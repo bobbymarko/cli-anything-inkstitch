@@ -65,6 +65,36 @@ def list_commands(ctx):
     emit(ctx, {"commands": schema["commands"]})
 
 
+@schema_group.command("extract")
+@click.option("--source", "source", default=None,
+              help="Path to inkstitch source root (defaults to sibling clone or known install paths).")
+@click.option("--no-write", is_flag=True, help="Print the schema instead of writing to cache.")
+@click.pass_context
+def extract_cmd(ctx, source, no_write):
+    """Mine the full param schema from inkstitch source via AST."""
+    from pathlib import Path
+    from cli_anything_inkstitch.schema.extract import (
+        extract_schema, find_inkstitch_source, write_cache,
+    )
+    root = Path(source) if source else find_inkstitch_source()
+    if root is None:
+        raise UserError(
+            "inkstitch source not found. Pass --source PATH or clone inkstitch as a sibling directory."
+        )
+    schema = extract_schema(root)
+    if no_write:
+        emit(ctx, schema)
+        return
+    path = write_cache(schema)
+    emit(ctx, {
+        "wrote": str(path),
+        "inkstitch_version": schema["inkstitch_version"],
+        "stitch_type_count": len(schema["stitch_types"]),
+        "param_count": schema["source"]["param_count"],
+        "source_root": schema["source"].get("root"),
+    })
+
+
 @schema_group.command("list-machine-formats")
 @click.pass_context
 def list_machine_formats(ctx):

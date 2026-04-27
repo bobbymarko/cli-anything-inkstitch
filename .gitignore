@@ -9,3 +9,9 @@ build/
 *.lock
 *.tmp
 ~/.cache/cli-anything-inkstitch/
+
+# Local-only sibling clones used by the schema extractor and as reference.
+/inkstitch/
+/pyembroidery/
+/CLI-Anything/
+/cli-anything-inkstitch-brief.md

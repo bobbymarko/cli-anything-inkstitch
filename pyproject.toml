@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Stateful CLI for machine-embroidery digitization with Ink/Stitch."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "cli-anything-inkstitch contributors" }]
 dependencies = [
     "click>=8.1",
