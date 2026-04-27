@@ -2,8 +2,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:inkstitch="http://inkstitch.org/namespace" width="100mm" height="100mm" viewBox="0 0 100 100">
   <metadata><inkstitch_svg_version>3</inkstitch_svg_version></metadata>
   <g id="layer1">
-    <path id="logo_outline" d="M 10 10 L 50 10 L 50 50 L 10 50 Z" fill="none" stroke="#000000" stroke-width="2"/>
-    <path id="logo_text" d="M 60 60 L 90 60 L 90 90 L 60 90 Z" fill="#ff0000" stroke="none"/>
+    <path id="logo_outline" style="stroke:#000000;stroke-width:1px;fill:none" d="M 113.386 34.0158 L 192.756 34.0158 L 192.756 192.756 L 113.386 192.756 L 34.0158 192.756 L 34.0158 34.0158 Z M 113.386 41.5748 L 185.197 41.5748 L 185.197 185.197 L 113.386 185.197 L 41.5748 185.197 L 41.5748 41.5748 Z M 173.858 42.3307 L 173.858 33.2599 M 184.441 52.9134 L 193.512 52.9134 M 184.441 173.858 L 193.512 173.858 M 173.858 184.441 L 173.858 193.512 M 113.386 193.512 L 113.386 184.441 M 52.9135 184.441 L 52.9135 193.512 M 42.3307 173.858 L 33.2599 173.858 M 42.3307 52.9135 L 33.2599 52.9135 M 52.9134 42.3307 L 52.9134 33.2599" transform="scale(0.264583, 0.264583)"/>
+    <path id="logo_text" d="M 60 60 L 90 60 L 90 90 L 60 90 Z" fill="#ff0000" stroke="none" inkstitch:auto_fill="True"/>
     <circle id="logo_dot" cx="20" cy="80" r="5" fill="#0000ff"/>
   </g>
 </svg>

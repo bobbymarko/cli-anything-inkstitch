@@ -2,15 +2,68 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import click
+from lxml import etree as _etree
 
 from cli_anything_inkstitch.binary import require, run_extension
 from cli_anything_inkstitch.commands._helpers import open_project
 from cli_anything_inkstitch.errors import UserError
 from cli_anything_inkstitch.output import emit
 from cli_anything_inkstitch.project import require_absolute
+
+_SVG_NS = "http://www.w3.org/2000/svg"
+_INKSCAPE_NS = "http://www.inkscape.org/namespaces/inkscape"
+_STROKE_RE = re.compile(r"stroke:\s*(#[0-9a-fA-F]{3,6})")
+_NUM_RE = re.compile(r"[-+]?[0-9]*\.?[0-9]+")
+
+
+def _parse_stitch_stats(root, spm: int) -> dict:
+    """Parse the __inkstitch_stitch_plan__ layer from a preview SVG.
+
+    Color blocks are <g id="__color_block_N__"> children of the plan layer.
+    Each contains a nested <g> whose paths have style="stroke: #RRGGBB; ...".
+    Stitch count = number of coordinate pairs across all paths (implicit lineto format).
+    """
+    plan_layer = root.find(f".//{{{_SVG_NS}}}g[@id='__inkstitch_stitch_plan__']")
+    if plan_layer is None:
+        return {"stitch_count": 0, "color_stops": [], "estimated_time_seconds": 0}
+
+    total = 0
+    color_stops: list[dict] = []
+    block_index = 0
+
+    for color_block in plan_layer.findall(f"{{{_SVG_NS}}}g"):
+        block_id = color_block.get("id", "")
+        if not block_id.startswith("__color_block_"):
+            continue
+        # Paths are direct children of the color block (no extra nesting).
+        block_stitches = 0
+        block_color = ""
+        for path in color_block.findall(f".//{{{_SVG_NS}}}path"):
+            d = path.get("d", "")
+            nums = _NUM_RE.findall(d)
+            block_stitches += len(nums) // 2
+            if not block_color:
+                style = path.get("style", "")
+                m = _STROKE_RE.search(style)
+                if m:
+                    block_color = m.group(1).upper()
+        total += block_stitches
+        color_stops.append({
+            "index": block_index,
+            "rgb": block_color or "#000000",
+            "stitches": block_stitches,
+        })
+        block_index += 1
+
+    return {
+        "stitch_count": total,
+        "color_stops": color_stops,
+        "estimated_time_seconds": round(60 * total / max(spm, 1)),
+    }
 
 
 @click.group("preview")
@@ -55,8 +108,6 @@ def generate(ctx, project_path, out, ids, render_mode, needle_points, visual_com
 @click.pass_context
 def stats(ctx, project_path, ids, spm):
     """Run stitch_plan_preview and parse counts out of the generated SVG."""
-    import tempfile
-    from lxml import etree as _etree
     with open_project(ctx, project_path) as (proj, _tree):
         binary = require(ctx.obj.get("binary_override"), proj.session)
         stdout = run_extension(binary, "stitch_plan_preview", proj.svg_path,
@@ -64,29 +115,5 @@ def stats(ctx, project_path, ids, spm):
                                 ids=list(ids), capture_stdout=True)
         if not stdout:
             raise UserError("preview produced no output")
-        with tempfile.NamedTemporaryFile(suffix=".svg") as f:
-            f.write(stdout)
-            f.flush()
-            tree = _etree.parse(f.name)
-        # Extract approximate counts from the __inkstitch_stitch_plan__ layer.
-        # Each stroke segment in the plan is one stitch; jumps are represented
-        # by separate paths with a specific class. v0.1 returns a coarse estimate.
-        root = tree.getroot()
-        stitch_paths = root.xpath(
-            "//*[local-name()='g'][@id='__inkstitch_stitch_plan__']//*[local-name()='path']"
-        )
-        total = 0
-        color_set = set()
-        for p in stitch_paths:
-            d = p.get("d", "")
-            total += d.count("L") + d.count("l")
-            stroke = p.get("stroke") or ""
-            if stroke:
-                color_set.add(stroke)
-        result = {
-            "stitch_count": total,
-            "color_stops": [{"index": i, "rgb": c} for i, c in enumerate(sorted(color_set))],
-            "estimated_time_seconds": int(60 * total / max(spm, 1)),
-            "note": "v0.1 coarse estimate from path d-attribute parsing",
-        }
-        emit(ctx, result)
+        root = _etree.fromstring(stdout)
+        emit(ctx, _parse_stitch_stats(root, spm))
