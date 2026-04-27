@@ -12,6 +12,9 @@ from cli_anything_inkstitch.errors import ProjectError
 from cli_anything_inkstitch.svg.attrs import SVG_NS, ensure_inkstitch_namespace
 
 
+INKSTITCH_SVG_VERSION = 3  # matches lib/update.py INKSTITCH_SVG_VERSION
+
+
 def load_svg(path: str | Path):
     p = Path(path)
     if not p.exists():
@@ -25,7 +28,33 @@ def load_svg(path: str | Path):
     if not root.tag.endswith("}svg") and root.tag != "svg":
         raise ProjectError(f"file is not an SVG document: {path}")
     ensure_inkstitch_namespace(root)
+    _ensure_inkstitch_version(root)
     return tree
+
+
+def _ensure_inkstitch_version(root) -> None:
+    """Stamp inkstitch_svg_version into <metadata> if absent.
+
+    The compiled inkstitch binary shows a blocking GUI dialog on SVGs that lack
+    this marker (the "Unversioned Ink/Stitch SVG file detected" prompt). We pre-stamp
+    it so headless runs are never blocked.
+
+    Uses localname matching: after lxml round-trips the SVG, child elements of
+    <metadata> inherit the default SVG namespace, so a plain find("inkstitch_svg_version")
+    misses them. Checking by localname avoids duplicate entries.
+    """
+    ns = root.nsmap.get(None) or "http://www.w3.org/2000/svg"
+    metadata = root.find(f"{{{ns}}}metadata")
+    if metadata is None:
+        metadata = etree.SubElement(root, f"{{{ns}}}metadata")
+        root.insert(0, metadata)
+    # Remove any duplicates, keep at most one.
+    existing = [c for c in metadata if etree.QName(c.tag).localname == "inkstitch_svg_version"]
+    for dup in existing[1:]:
+        metadata.remove(dup)
+    if not existing:
+        el = etree.SubElement(metadata, "inkstitch_svg_version")
+        el.text = str(INKSTITCH_SVG_VERSION)
 
 
 def save_svg(tree, path: str | Path) -> str:

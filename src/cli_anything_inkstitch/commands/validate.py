@@ -188,13 +188,19 @@ def run(ctx, project_path, strict, show_errors, show_warnings, show_type_warning
             })
             return
 
+        # The compiled inkstitch binary only accepts params declared in the INX.
+        # show-errors/show-warnings/show-type-warning are argparse-only and default True,
+        # so we only pass them when they're being turned off (which requires a source build).
+        extra_args: dict = {}
+        if not show_errors:
+            extra_args["show-errors"] = "False"
+        if not show_warnings:
+            extra_args["show-warnings"] = "False"
+        if not show_type_warnings:
+            extra_args["show-type-warning"] = "False"
         stdout = run_extension(
             binary, "troubleshoot", proj.svg_path,
-            args={
-                "show-errors": "True" if show_errors else "False",
-                "show-warnings": "True" if show_warnings else "False",
-                "show-type-warning": "True" if show_type_warnings else "False",
-            },
+            args=extra_args or None,
             capture_stdout=True,
         )
         parsed = parse_validation_layer(stdout or b"")

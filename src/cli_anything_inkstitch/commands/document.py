@@ -57,10 +57,10 @@ def open_cmd(ctx, project_path, svg_path, force):
             raise UserError(
                 f"project already attached to {proj.svg_path} (use --force to switch)"
             )
-        # validate the SVG parses
-        load_svg(svg_path)
+        # Load, stamp inkstitch_svg_version if missing, write back.
+        tree = load_svg(svg_path)
+        proj.svg_sha256 = save_svg(tree, svg_path)
         proj.svg_path = svg_path
-        proj.svg_sha256 = sha256_of(svg_path)
         proj.save()
     emit(ctx, {
         "project": project_path,
