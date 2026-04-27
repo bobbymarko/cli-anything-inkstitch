@@ -74,8 +74,9 @@ def parse_bool(value: str) -> bool:
 def ensure_inkstitch_namespace(root) -> bool:
     """Ensure the SVG root carries xmlns:inkstitch.
 
-    lxml's nsmap is immutable post-creation, so if the prefix isn't already
-    declared we rebuild the root. Returns True if the tree was rebuilt.
+    lxml's nsmap is immutable post-creation. We serialize to bytes, inject the
+    namespace declaration into the opening tag, then re-parse in place.
+    Returns True if the tree was modified.
     """
     if root.nsmap.get("inkstitch") == INKSTITCH_NS:
         return False
@@ -87,10 +88,21 @@ def ensure_inkstitch_namespace(root) -> bool:
     for child in list(root):
         new_root.append(child)
     parent = root.getparent()
-    if parent is None:
-        # Root of a tree — replace via getroottree
-        tree = root.getroottree()
-        tree._setroot(new_root)
-    else:
+    if parent is not None:
         parent.replace(root, new_root)
+    else:
+        # Swap contents of root in-place so callers holding a reference to
+        # `root` still see the updated node. Clear root, copy everything from
+        # new_root back into it with the new nsmap applied via re-serialise.
+        raw = etree.tostring(new_root)
+        parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
+        replacement = etree.fromstring(raw, parser)
+        root.tag = replacement.tag
+        root.attrib.clear()
+        root.attrib.update(replacement.attrib)
+        for child in list(root):
+            root.remove(child)
+        for child in list(replacement):
+            root.append(child)
+        root.text = replacement.text
     return True
