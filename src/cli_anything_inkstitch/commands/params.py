@@ -77,10 +77,12 @@ def _strip_competing_definers(elem, target: str, schema: dict) -> dict[str, str 
 @click.option("--stitch-type", "stitch_type", default=None,
               help="Optional stitch type to assign (validates geometry).")
 @click.option("--force", is_flag=True, help="Skip geometry-compatibility check.")
+@click.option("--refresh-schema", is_flag=True,
+              help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def set_cmd(ctx, project_path, svg_id, stitch_type, force):
+def set_cmd(ctx, project_path, svg_id, stitch_type, force, refresh_schema):
     """Set --stitch-type and any --<param>=<value> on an element."""
-    schema = load_schema()
+    schema = load_schema(refresh=refresh_schema)
     extra = _parse_extra_kv_args(ctx.args)
 
     if stitch_type is None and not extra:
@@ -176,9 +178,11 @@ def unset(ctx, project_path, svg_id, names):
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--id", "svg_id", required=True)
 @click.option("--param", "name", default=None)
+@click.option("--refresh-schema", is_flag=True,
+              help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def get_cmd(ctx, project_path, svg_id, name):
-    schema = load_schema()
+def get_cmd(ctx, project_path, svg_id, name, refresh_schema):
+    schema = load_schema(refresh=refresh_schema)
     with open_project(ctx, project_path) as (_proj, tree):
         elem = require_id(tree, svg_id)
         st_name = classify(elem)
@@ -242,13 +246,15 @@ def copy_cmd(ctx, project_path, src_id, dst_ids, only, excluded):
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--id", "svg_id", required=True)
 @click.option("--preset", required=True)
+@click.option("--refresh-schema", is_flag=True,
+              help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def apply_preset(ctx, project_path, svg_id, preset):
+def apply_preset(ctx, project_path, svg_id, preset, refresh_schema):
     pf = _preset_path(preset)
     if not pf.exists():
         raise UserError(f"preset not found: {preset} (looked in {pf.parent})")
     data = json.loads(pf.read_text())
-    schema = load_schema()
+    schema = load_schema(refresh=refresh_schema)
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
         elem = require_id(tree, svg_id)
         stitch_type = data.get("stitch_type") or classify(elem)

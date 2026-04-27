@@ -27,9 +27,11 @@ def validate():
 @validate.command("static")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--strict", is_flag=True)
+@click.option("--refresh-schema", is_flag=True,
+              help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def static(ctx, project_path, strict):
-    schema = load_schema()
+def static(ctx, project_path, strict, refresh_schema):
+    schema = load_schema(refresh=refresh_schema)
     issues = []
     with open_project(ctx, project_path) as (proj, tree):
         if tree is None:
@@ -221,9 +223,119 @@ def run(ctx, project_path, strict, show_errors, show_warnings, show_type_warning
             )
 
 
+# Issue `name` strings whose remediation is a `cleanup` extension run.
+# Source: inkstitch/lib/elements/{empty_d_object,fill_stitch}.py — these classes'
+# `steps_to_solve` literally tell the user "run Cleanup Document".
+AUTO_FIX_NAMES = frozenset({
+    "EmptyD",      # ObjectTypeWarning — empty <path d=""/>; cleanup removes
+    "Small Fill",  # ValidationWarning — fill below area threshold; cleanup removes
+})
+
+# Map issue name → human suggestion for the manual case. Anything not listed
+# falls back to the generic "open in Ink/Stitch" message.
+MANUAL_SUGGESTIONS = {
+    "Image": "convert image to a path (Ink/Stitch ignores raster images)",
+    "Marker Element": "convert marker to a path or remove it",
+    "Text": "convert text to a path (Path > Object to Path in Inkscape)",
+    "Not stitchable satin column": "fix satin geometry: rails must not self-intersect",
+    "Rail is a closed path": "open the satin rail; rails must not be closed loops",
+    "Rung doesn't intersect rails": "extend rungs so each crosses both rails",
+    "Satin has no rungs": "add at least one rung perpendicular to the rails",
+    "Rung intersects too many times": "split the satin or simplify the rung path",
+    "This shape is invalid": "repair the path geometry (Path > Union, then Path > Break Apart)",
+    "Border crosses itself": "remove self-intersections from the fill border",
+    "Fill and Stroke color": "remove either the fill or the stroke",
+    "Unconnected": "merge disjoint subpaths or split into separate elements",
+}
+
+
 @validate.command("fix")
 @click.option("--project", "project_path", type=click.Path(), default=None)
-@click.option("--auto-only", is_flag=True)
+@click.option("--auto/--no-auto", default=True,
+              help="Apply auto-fixes (currently: cleanup) when binary is available.")
+@click.option("--strict", is_flag=True,
+              help="Exit non-zero if any errors remain after fixes.")
 @click.pass_context
-def fix(ctx, project_path, auto_only):
-    emit(ctx, {"applied": [], "note": "v0.1: no auto-fixes implemented yet"})
+def fix(ctx, project_path, auto, strict):
+    """Categorize validation issues and optionally apply auto-fixes.
+
+    Auto-fixable issues (empty paths, tiny fills) are dispatched to the
+    `cleanup` extension. Everything else is reported as manual with a
+    one-line suggestion drawn from inkstitch's own `steps_to_solve`.
+    """
+    from cli_anything_inkstitch.svg.attrs import ensure_inkstitch_namespace
+    from cli_anything_inkstitch.svg.document import save_svg
+
+    with open_project(ctx, project_path, mutate=False) as (proj, _tree):
+        binary = discover(ctx.obj.get("binary_override"), proj.session)
+        if not binary:
+            emit(ctx, {
+                "ok": None,
+                "binary_status": "not_found",
+                "applied": [],
+                "manual": [],
+                "note": "Ink/Stitch binary not installed; cannot run validation or auto-fixes.",
+            })
+            return
+
+        before = parse_validation_layer(
+            run_extension(binary, "troubleshoot", proj.svg_path,
+                          capture_stdout=True) or b""
+        )
+        before_issues = before["issues"]
+
+        auto_issues = [i for i in before_issues if i["name"] in AUTO_FIX_NAMES]
+        manual_before = [i for i in before_issues if i["name"] not in AUTO_FIX_NAMES]
+
+        applied: list[dict] = []
+        after_issues = before_issues
+        manual_after = manual_before
+
+        if auto and auto_issues:
+            cleanup_stdout = run_extension(binary, "cleanup", proj.svg_path,
+                                           capture_stdout=True)
+            if cleanup_stdout:
+                new_tree = etree.ElementTree(etree.fromstring(cleanup_stdout))
+                ensure_inkstitch_namespace(new_tree.getroot())
+                proj.svg_sha256 = save_svg(new_tree, proj.svg_path)
+                proj.save()
+                applied.append({"tool": "cleanup",
+                                "addresses": sorted({i["name"] for i in auto_issues})})
+                after = parse_validation_layer(
+                    run_extension(binary, "troubleshoot", proj.svg_path,
+                                  capture_stdout=True) or b""
+                )
+                after_issues = after["issues"]
+                manual_after = [i for i in after_issues
+                                if i["name"] not in AUTO_FIX_NAMES]
+
+        manual = [{
+            **issue,
+            "suggestion": MANUAL_SUGGESTIONS.get(
+                issue["name"],
+                "open in Ink/Stitch and follow the troubleshoot dialog",
+            ),
+        } for issue in manual_after]
+
+        ok = not any(i["category"] == "error" for i in after_issues)
+        emit(ctx, {
+            "ok": ok,
+            "binary_status": "ok",
+            "before": {
+                "errors": len(before["errors"]),
+                "warnings": len(before["warnings"]),
+                "type_warnings": len(before["type_warnings"]),
+            },
+            "after": {
+                "errors": sum(1 for i in after_issues if i["category"] == "error"),
+                "warnings": sum(1 for i in after_issues if i["category"] == "warning"),
+                "type_warnings": sum(1 for i in after_issues
+                                     if i["category"] == "type_warning"),
+            },
+            "applied": applied,
+            "manual": manual,
+        })
+        if strict and not ok:
+            raise ValidationError(
+                f"{sum(1 for i in after_issues if i['category'] == 'error')} error(s) remain"
+            )

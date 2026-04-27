@@ -68,6 +68,7 @@ Document and project management.
 |---------|-------------|
 | `new` | Create a new project (no SVG attached yet) |
 | `open` | Open an existing SVG and create/attach a project |
+| `prep` | Assign IDs to un-IDed elements and inline CSS-class fills/strokes (fixes Illustrator-exported SVGs) |
 | `save` | Flush in-memory mutations to the SVG and project JSON |
 | `info` | Show SVG dimensions, hoop, units, palette, element counts, stitch_type histogram |
 | `set-hoop` | Set hoop size (`--name 100x100` or `--width-mm W --height-mm H`) |
@@ -135,7 +136,7 @@ Binary-backed geometry rewrites — operations that require Ink/Stitch's stitch 
 | `flip-satin` | Swap rails on a satin column |
 | `auto-run` | Auto-route running-stitch elements |
 | `break-apart` | Split a compound path into individual subpaths |
-| `cleanup` | Remove empty groups and orphan defs |
+| `cleanup` | Remove empty `<path>` elements, fills below an area threshold, strokes/satins below a length threshold, and empty groups |
 
 
 ### Validate
@@ -146,7 +147,7 @@ Static and binary-backed checks for digitization completeness and geometry healt
 |---------|-------------|
 | `run` | Invoke the Ink/Stitch troubleshoot extension; returns errors, warnings, type warnings as JSON. `--strict` makes any error a non-zero exit. |
 | `static` | Run harness-only checks (no binary): missing required params, unknown attrs, out-of-range values |
-| `fix` | Apply auto-fixable suggestions (`--auto-only` to skip user-confirmation cases) |
+| `fix` | Categorize issues: auto-fixable ones (empty paths, tiny fills) are dispatched to `cleanup` (default `--auto`; pass `--no-auto` to skip). Manual issues come back with one-line suggestions. `--strict` exits non-zero if any errors remain. |
 
 
 ### Preview
@@ -214,6 +215,19 @@ cli-anything-inkstitch --json element list --project $PROJ --refresh
 ```
 
 
+### Prep an Illustrator-exported SVG
+
+Illustrator emits SVGs without element IDs and with fills/strokes defined via `<style>` CSS classes (`.cls-1 { fill: #abc }`). The CLI cannot address or classify those elements until they're prepped:
+
+```bash
+cli-anything-inkstitch document open --project $PROJ --svg /tmp/illustrator-export.svg
+cli-anything-inkstitch --json document prep --project $PROJ
+# → {"assigned_ids": 47, "inlined_styles": 47}
+```
+
+`prep` is self-contained (no Inkscape dependency). Run it once per imported SVG before `element list`/`params set`.
+
+
 ### Discover what's possible before assigning params
 
 ```bash
@@ -249,6 +263,15 @@ cli-anything-inkstitch commands attach --project $PROJ --id logo_text --command 
 ### Validate, preview, then export
 
 ```bash
+# Run binary-backed validation first
+cli-anything-inkstitch --json validate run --project $PROJ
+
+# Auto-fix what's auto-fixable; report manual issues with suggestions
+cli-anything-inkstitch --json validate fix --project $PROJ
+# → { ok, before, after, applied: [{tool: "cleanup", addresses: [...]}],
+#     manual: [{name, label, suggestion, x_mm, y_mm, ...}] }
+
+# Iterate manual fixes via params/tools, then strict-gate before export
 cli-anything-inkstitch --json validate run --project $PROJ --strict
 
 cli-anything-inkstitch preview generate --project $PROJ --out /tmp/logo-preview.svg
@@ -322,6 +345,8 @@ When using this CLI programmatically:
 8. **Use `preview stats`** to sanity-check stitch counts and runtime before exporting — a 50,000-stitch file on a 50×50mm hoop is almost certainly an error.
 9. **Geometry decides element type, not just attributes**: setting `--stitch-type satin_column` on a path with no stroke will fail validation. Use `cli-anything-inkscape` upstream to add a stroke first.
 10. **Booleans** are written as Ink/Stitch's `True`/`False` (capital first letter); the CLI normalizes on input but agents reading SVG directly should expect that casing.
+11. **Prep imported SVGs**: if `element list` returns nothing or every element shows `unassigned`, the SVG was likely exported from Illustrator (no IDs, CSS-class fills). Run `document prep` once before continuing.
+12. **Use `validate fix` as a triage step**: it splits issues into auto-fixed (cleanup-handled) vs manual (with one-line suggestions). Pass `--no-auto` to inspect without mutating the SVG.
 
 
 ## More Information

@@ -44,9 +44,11 @@ def get_stitch_type(ctx, stitch_type, refresh_schema):
 
 @schema_group.command("get-extension")
 @click.option("--extension", "ext_name", required=True)
+@click.option("--refresh-schema", is_flag=True,
+              help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def get_extension(ctx, ext_name):
-    schema = load_schema()
+def get_extension(ctx, ext_name, refresh_schema):
+    schema = load_schema(refresh=refresh_schema)
     ext = schema.get("extensions", {}).get(ext_name)
     if not ext:
         # bootstrap schema doesn't enumerate extensions; tell the user honestly
@@ -59,9 +61,11 @@ def get_extension(ctx, ext_name):
 
 
 @schema_group.command("list-commands")
+@click.option("--refresh-schema", is_flag=True,
+              help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def list_commands(ctx):
-    schema = load_schema()
+def list_commands(ctx, refresh_schema):
+    schema = load_schema(refresh=refresh_schema)
     emit(ctx, {"commands": schema["commands"]})
 
 

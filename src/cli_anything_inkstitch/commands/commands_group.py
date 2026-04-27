@@ -47,9 +47,11 @@ def list_cmd(ctx, project_path, svg_id):
 @click.option("--command", "command_name", required=True)
 @click.option("--at-x", "at_x", type=float, default=None)
 @click.option("--at-y", "at_y", type=float, default=None)
+@click.option("--refresh-schema", is_flag=True,
+              help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def attach(ctx, project_path, svg_id, command_name, at_x, at_y):
-    schema = load_schema()
+def attach(ctx, project_path, svg_id, command_name, at_x, at_y, refresh_schema):
+    schema = load_schema(refresh=refresh_schema)
     valid = {c["name"] for c in schema["commands"]}
     if command_name not in valid:
         raise UserError(f"unknown command '{command_name}' (known: {sorted(valid)})")
@@ -95,9 +97,11 @@ def detach(ctx, project_path, svg_id, command_name):
 
 
 @commands_group.command("list-types")
+@click.option("--refresh-schema", is_flag=True,
+              help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def list_types(ctx):
-    schema = load_schema()
+def list_types(ctx, refresh_schema):
+    schema = load_schema(refresh=refresh_schema)
     emit(ctx, {"commands": schema["commands"]})
 
 
