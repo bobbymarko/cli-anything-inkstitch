@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[co]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+*.lock
+*.tmp
+~/.cache/cli-anything-inkstitch/
