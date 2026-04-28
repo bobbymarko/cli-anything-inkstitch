@@ -8,7 +8,9 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from cli_anything_inkstitch.cli import root
-from tests.test_validate_run import _make_layer_svg
+# pytest adds tests/ to sys.path, so this resolves on local + CI without
+# requiring tests/ to be a package.
+from test_validate_run import _make_layer_svg
 
 
 def _open(runner, fixture_svg, project_path):
