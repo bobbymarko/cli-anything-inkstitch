@@ -68,7 +68,7 @@ Document and project management.
 |---------|-------------|
 | `new` | Create a new project (no SVG attached yet) |
 | `open` | Open an existing SVG and create/attach a project |
-| `prep` | Assign IDs to un-IDed elements and inline CSS-class fills/strokes (fixes Illustrator-exported SVGs) |
+| `prep` | Assign IDs, inline CSS-class fills/strokes, and detect/handle Illustrator stroke-to-outline rings (`--illustrator-rings={detect\|skip\|fill-black\|satin}`) |
 | `save` | Flush in-memory mutations to the SVG and project JSON |
 | `info` | Show SVG dimensions, hoop, units, palette, element counts, stitch_type histogram |
 | `set-hoop` | Set hoop size (`--name 100x100` or `--width-mm W --height-mm H`) |
@@ -222,10 +222,26 @@ Illustrator emits SVGs without element IDs and with fills/strokes defined via `<
 ```bash
 cli-anything-inkstitch document open --project $PROJ --svg /tmp/illustrator-export.svg
 cli-anything-inkstitch --json document prep --project $PROJ
-# → {"assigned_ids": 47, "inlined_styles": 47}
+# → {"assigned_ids": 47, "inlined_styles": 47,
+#    "illustrator_rings_found": 4, "illustrator_rings_action": "detect", ...}
 ```
 
-`prep` is self-contained (no Inkscape dependency). Run it once per imported SVG before `element list`/`params set`.
+`prep` also detects **Illustrator stroke-to-outline rings**: when you stroke a shape in Illustrator and export to SVG, the stroke is converted into a separate filled-ring `<path>` with no fill attribute and 2+ subpaths. SVG defaults that to black, and inkstitch will silently auto-fill the ring as solid black — usually not what you want.
+
+`--illustrator-rings={detect|skip|fill-black|satin}` controls handling:
+
+- `detect` (default): report only, don't modify. Good for inspecting first.
+- `skip`: set `display="none"` so inkstitch ignores them entirely.
+- `fill-black`: set explicit `fill="#000000"` so the auto-fill behavior is visible in `element list` (matches what inkstitch does silently anyway).
+- `satin`: set `inkstitch:satin_column="True"` — the two subpaths become the satin rails. Best fit for designs where the rings represent intended outline embroidery. Note: closed-rail satins emit a `ClosedPathWarning` in `validate run` but still stitch.
+
+```bash
+# typical Illustrator import workflow:
+cli-anything-inkstitch document open --project $PROJ --svg /tmp/illustrator-export.svg
+cli-anything-inkstitch --json document prep --project $PROJ --illustrator-rings satin
+```
+
+`prep` is self-contained (no Inkscape dependency). Idempotent — safe to re-run.
 
 
 ### Discover what's possible before assigning params
@@ -345,7 +361,7 @@ When using this CLI programmatically:
 8. **Use `preview stats`** to sanity-check stitch counts and runtime before exporting — a 50,000-stitch file on a 50×50mm hoop is almost certainly an error.
 9. **Geometry decides element type, not just attributes**: setting `--stitch-type satin_column` on a path with no stroke will fail validation. Use `cli-anything-inkscape` upstream to add a stroke first.
 10. **Booleans** are written as Ink/Stitch's `True`/`False` (capital first letter); the CLI normalizes on input but agents reading SVG directly should expect that casing.
-11. **Prep imported SVGs**: if `element list` returns nothing or every element shows `unassigned`, the SVG was likely exported from Illustrator (no IDs, CSS-class fills). Run `document prep` once before continuing.
+11. **Prep imported SVGs**: if `element list` returns nothing or every element shows `unassigned`, the SVG was likely exported from Illustrator (no IDs, CSS-class fills). Run `document prep` once before continuing. For Illustrator designs with stroked outlines, pass `--illustrator-rings=satin` to convert the auto-emitted outline-ring artifacts into satin columns rather than letting them stitch as solid black auto-fills.
 12. **Use `validate fix` as a triage step**: it splits issues into auto-fixed (cleanup-handled) vs manual (with one-line suggestions). Pass `--no-auto` to inspect without mutating the SVG.
 
 

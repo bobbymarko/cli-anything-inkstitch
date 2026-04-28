@@ -206,22 +206,29 @@ def set_min_stitch_len(ctx, project_path, mm):
 
 @document.command("prep")
 @click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--illustrator-rings", "ring_action",
+              type=click.Choice(["detect", "skip", "fill-black", "satin"]),
+              default="detect", show_default=True,
+              help="How to handle paths with no fill/stroke and 2+ subpaths "
+                   "(Illustrator's stroke-to-outline-ring artifact). "
+                   "detect = report only; skip = display:none; "
+                   "fill-black = explicit fill='#000000'; "
+                   "satin = inkstitch:satin_column='True'.")
 @click.pass_context
-def prep(ctx, project_path):
-    """Assign IDs to un-IDed elements and inline CSS class-based fills/strokes.
+def prep(ctx, project_path, ring_action):
+    """Assign IDs, inline CSS class-based fills/strokes, and detect/handle
+    Illustrator stroke-to-outline rings.
 
-    Useful for Illustrator-exported SVGs where elements lack id attributes
-    and fills are declared in a <style> block rather than inline.
+    Useful for Illustrator-exported SVGs where elements lack id attributes,
+    fills are declared in a `<style>` block rather than inline, and strokes
+    are pre-converted to filled outline rings.
     """
     from cli_anything_inkstitch.svg.prep import prep_svg
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
         if tree is None:
             raise ProjectError("project has no SVG attached")
-        stats = prep_svg(tree)
-        emit(ctx, {
-            "assigned_ids": stats["assigned_ids"],
-            "inlined_styles": stats["inlined_styles"],
-        })
+        stats = prep_svg(tree, ring_action=ring_action)
+        emit(ctx, stats)
 
 
 @document.command("json")
