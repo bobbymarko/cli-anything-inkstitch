@@ -69,6 +69,8 @@ Document and project management.
 | `new` | Create a new project (no SVG attached yet) |
 | `open` | Open an existing SVG and create/attach a project |
 | `prep` | Assign IDs, inline CSS-class fills/strokes, and detect/handle Illustrator stroke-to-outline rings (`--illustrator-rings={detect\|skip\|fill-black\|satin}`) |
+| `set-context` | Capture design-intent context (material, stretch, thread, stabilizer, hoop_tension, intent, plus arbitrary `--set KEY=VALUE`). Surfaced in `element list` / `describe`. |
+| `get-context` | Print the design-intent context. |
 | `save` | Flush in-memory mutations to the SVG and project JSON |
 | `info` | Show SVG dimensions, hoop, units, palette, element counts, stitch_type histogram |
 | `set-hoop` | Set hoop size (`--name 100x100` or `--width-mm W --height-mm H`) |
@@ -253,12 +255,35 @@ cli-anything-inkstitch --json schema get-stitch-type --type satin_column
 ```
 
 
+### Capture design intent before reasoning about params
+
+```bash
+# Tell the CLI (and the LLM) what this design is FOR
+cli-anything-inkstitch document set-context --project $PROJ \
+    --material "knit cotton t-shirt" \
+    --stretch high \
+    --thread "40wt polyester" \
+    --stabilizer "medium cut-away" \
+    --hoop-tension medium \
+    --intent "team logo for left chest, will be washed weekly"
+
+# Add arbitrary keys not covered by the typed flags
+cli-anything-inkstitch document set-context --project $PROJ \
+    --set "color_palette=team_2026" --set "wash_count=50"
+```
+
+Stored in `session.context`; surfaced as `document_context` at the top of every `element list` and `element describe` payload so the LLM sees it on every contextual call. This is what makes "more pull comp because it's stretchy" possible — the choice is grounded in real conditions, not assumed defaults.
+
+`--stretch` accepts `none|low|medium|high`; `--hoop-tension` accepts `light|medium|firm`. Other values are free-form. `--unset KEY` removes one key, `--clear` wipes the whole context.
+
+
 ### Get rich design context before reasoning about params
 
 ```bash
 # Per-element context: position, size, color name, neighbors
 cli-anything-inkstitch --json element describe --project $PROJ
 # → { design_size_mm: [60.2, 76.2],
+#     document_context: { material: "...", stretch: "high", ... },
 #     elements: [
 #       { id: "elem_3", stitch_type: "auto_fill", color_name: "black",
 #         size_mm: [68.4, 49.8], bbox_pct_of_design: { area: 74.2 },
@@ -386,6 +411,7 @@ When using this CLI programmatically:
 11. **Prep imported SVGs**: if `element list` returns nothing or every element shows `unassigned`, the SVG was likely exported from Illustrator (no IDs, CSS-class fills). Run `document prep` once before continuing. For Illustrator designs with stroked outlines, pass `--illustrator-rings=satin` to convert the auto-emitted outline-ring artifacts into satin columns rather than letting them stitch as solid black auto-fills.
 12. **Use `validate fix` as a triage step**: it splits issues into auto-fixed (cleanup-handled) vs manual (with one-line suggestions). Pass `--no-auto` to inspect without mutating the SVG.
 13. **Always run `element describe` before `params set`**: parameter choices are dependent on what each element *is* (small detail vs big background, surrounded by what colors, near the edge vs centered) — not just its fill hex. Describe gives the LLM the geometric and relational context heuristic auto-digitization can't see.
+14. **Capture intent with `document set-context` early**: material, stretch, thread, stabilizer, hoop tension, what the design is for. This appears as `document_context` in every `element list` / `describe` call thereafter, so param choices ground in real conditions ("more pull comp because the substrate is stretchy") instead of assumed defaults.
 
 
 ## More Information

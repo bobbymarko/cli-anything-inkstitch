@@ -204,6 +204,88 @@ def set_min_stitch_len(ctx, project_path, mm):
         emit(ctx, {"min_stitch_len_mm": float(mm)})
 
 
+# --- design-intent context for AI reasoning -------------------------------
+#
+# These commands capture the *non-geometric* facts the LLM needs to make good
+# digitization decisions: what fabric is this going on, what thread, what's
+# the design for. Stored in session.context, surfaced in element list /
+# element describe output so the LLM sees it on every contextual call.
+
+# Well-known fields with nudged-toward-correct values. Anything else can go
+# through --set KEY=VALUE.
+_STRETCH_CHOICES = ("none", "low", "medium", "high")
+_TENSION_CHOICES = ("light", "medium", "firm")
+
+
+def _ensure_context(proj: ProjectFile) -> dict:
+    """Initialize session.context if a legacy project file lacks it."""
+    if "context" not in proj.session:
+        proj.session["context"] = {}
+    return proj.session["context"]
+
+
+@document.command("set-context")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--material", default=None,
+              help="Fabric description (e.g. 'knit cotton t-shirt', 'denim').")
+@click.option("--stretch", type=click.Choice(_STRETCH_CHOICES), default=None,
+              help="How stretchy the substrate is. Drives push/pull comp choices.")
+@click.option("--thread", default=None,
+              help="Thread description (e.g. '40wt polyester', '60wt cotton').")
+@click.option("--stabilizer", default=None,
+              help="Backing description (e.g. 'medium cut-away', 'tear-away').")
+@click.option("--hoop-tension", type=click.Choice(_TENSION_CHOICES), default=None,
+              help="Hooping firmness.")
+@click.option("--intent", default=None,
+              help="Free-form description of what this design is for.")
+@click.option("--set", "kvs", multiple=True, metavar="KEY=VALUE",
+              help="Set an arbitrary context key. Repeatable.")
+@click.option("--unset", "unset_keys", multiple=True, metavar="KEY",
+              help="Remove a context key. Repeatable.")
+@click.option("--clear", is_flag=True, help="Drop all context.")
+@click.pass_context
+def set_context(ctx, project_path, material, stretch, thread, stabilizer,
+                 hoop_tension, intent, kvs, unset_keys, clear):
+    """Capture material/intent context that informs param choices.
+
+    The LLM consumes this on every `element list` and `element describe`
+    call, so parameter choices ("more pull comp because it's stretchy",
+    "tighter spacing because the design will be washed often") can be
+    grounded in real conditions rather than assumed defaults.
+    """
+    with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+        ctx_obj = _ensure_context(proj)
+        if clear:
+            ctx_obj.clear()
+        # Typed fields
+        for key, val in (
+            ("material", material), ("stretch", stretch),
+            ("thread", thread), ("stabilizer", stabilizer),
+            ("hoop_tension", hoop_tension), ("intent", intent),
+        ):
+            if val is not None:
+                ctx_obj[key] = val
+        # Free-form key=value
+        for kv in kvs:
+            if "=" not in kv:
+                raise UserError(f"--set value must be KEY=VALUE, got: {kv!r}")
+            k, v = kv.split("=", 1)
+            ctx_obj[k.strip()] = v.strip()
+        # Removals
+        for k in unset_keys:
+            ctx_obj.pop(k, None)
+        emit(ctx, {"context": dict(ctx_obj)})
+
+
+@document.command("get-context")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.pass_context
+def get_context(ctx, project_path):
+    """Print the project's design-intent context."""
+    with open_project(ctx, project_path) as (proj, _tree):
+        emit(ctx, {"context": dict(_ensure_context(proj))})
+
+
 @document.command("prep")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--illustrator-rings", "ring_action",

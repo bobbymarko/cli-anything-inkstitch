@@ -53,7 +53,11 @@ def list_cmd(ctx, project_path, refresh, stitch_type_filter, with_params):
                     "stitch_type": r["stitch_type"],
                     "set_params": r["set_params"],
                 }
+        # Surface design-intent context so the LLM sees it on every list call.
+        ctx_obj = proj.session.get("context") or {}
         payload = {"elements": rows, "count": len(rows)}
+        if ctx_obj:
+            payload["document_context"] = ctx_obj
         if with_params or ctx.obj.get("json"):
             emit(ctx, payload)
         else:
@@ -106,7 +110,7 @@ def describe(ctx, project_path, svg_id, neighbors):
         px_to_mm,
     )
 
-    with open_project(ctx, project_path) as (_proj, tree):
+    with open_project(ctx, project_path) as (proj, tree):
         root = tree.getroot()
         d_bbox = design_bbox_from_root(root)
         d_w_px = max(d_bbox[2] - d_bbox[0], 1.0)
@@ -125,6 +129,8 @@ def describe(ctx, project_path, svg_id, neighbors):
                 bb = None
             all_elems.append((e, bb))
 
+        doc_context = proj.session.get("context") or {}
+
         if svg_id is not None:
             target = next(((e, bb) for e, bb in all_elems if e.get("id") == svg_id), None)
             if target is None:
@@ -136,6 +142,8 @@ def describe(ctx, project_path, svg_id, neighbors):
                 bbox_overlap, closest_named,
                 d_w_px, d_h_px, d_area_px,
             )
+            if doc_context:
+                description["document_context"] = doc_context
             emit(ctx, description)
             return
 
@@ -148,13 +156,16 @@ def describe(ctx, project_path, svg_id, neighbors):
                 bbox_overlap, closest_named,
                 d_w_px, d_h_px, d_area_px,
             ))
-        emit(ctx, {
+        payload = {
             "design_bbox_px": list(d_bbox),
             "design_size_mm": [round(px_to_mm(d_w_px), 2),
                                 round(px_to_mm(d_h_px), 2)],
             "elements": out,
             "count": len(out),
-        })
+        }
+        if doc_context:
+            payload["document_context"] = doc_context
+        emit(ctx, payload)
 
 
 def _describe_one(elem, bb, d_bbox, all_elems,

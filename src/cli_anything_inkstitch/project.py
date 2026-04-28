@@ -36,6 +36,7 @@ def _empty_project() -> dict[str, Any]:
             "collapse_len_mm": 3.0,
             "min_stitch_len_mm": 0.1,
             "inkstitch_binary": None,
+            "context": {},
         },
         "elements": {},
         "history": {"cursor": -1, "entries": []},
