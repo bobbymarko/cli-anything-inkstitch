@@ -88,6 +88,7 @@ Enumerate and inspect SVG elements; clear digitization state.
 |---------|-------------|
 | `list` | List elements with stitch_type, set params, warnings (`--refresh` rescans the SVG) |
 | `get` | Full attribute dump for one element by `--id` |
+| `describe` | Rich derived context for AI reasoning: bbox in mm + as % of design, position (3x3 grid), aspect ratio, area %, closest named color, neighbors. `--id` for one element or omit for all. `--no-neighbors` to skip overlap analysis. |
 | `identify` | Echo the element-class dispatch (FillStitch / SatinColumn / Stroke / …) |
 | `delete` | Remove an SVG node entirely |
 | `clear-params` | Strip all `inkstitch:*` attributes from an element (`--keep-commands` to preserve attached visual commands) |
@@ -252,6 +253,27 @@ cli-anything-inkstitch --json schema get-stitch-type --type satin_column
 ```
 
 
+### Get rich design context before reasoning about params
+
+```bash
+# Per-element context: position, size, color name, neighbors
+cli-anything-inkstitch --json element describe --project $PROJ
+# → { design_size_mm: [60.2, 76.2],
+#     elements: [
+#       { id: "elem_3", stitch_type: "auto_fill", color_name: "black",
+#         size_mm: [68.4, 49.8], bbox_pct_of_design: { area: 74.2 },
+#         position: "center", aspect_ratio: 1.37,
+#         neighbors: [{id: "elem_1", relation: "contained_by"}, ...] },
+#       ...
+#     ] }
+```
+
+This is the LLM's window into the design. Use it before `params set` so
+parameter choices are informed by what each element *is* (a small detail vs
+a large background, near the edge vs centered, surrounded by what colors)
+rather than just its fill hex. `--id X` for one element; omit for all.
+
+
 ### Assign stitch types and parameters
 
 ```bash
@@ -363,6 +385,7 @@ When using this CLI programmatically:
 10. **Booleans** are written as Ink/Stitch's `True`/`False` (capital first letter); the CLI normalizes on input but agents reading SVG directly should expect that casing.
 11. **Prep imported SVGs**: if `element list` returns nothing or every element shows `unassigned`, the SVG was likely exported from Illustrator (no IDs, CSS-class fills). Run `document prep` once before continuing. For Illustrator designs with stroked outlines, pass `--illustrator-rings=satin` to convert the auto-emitted outline-ring artifacts into satin columns rather than letting them stitch as solid black auto-fills.
 12. **Use `validate fix` as a triage step**: it splits issues into auto-fixed (cleanup-handled) vs manual (with one-line suggestions). Pass `--no-auto` to inspect without mutating the SVG.
+13. **Always run `element describe` before `params set`**: parameter choices are dependent on what each element *is* (small detail vs big background, surrounded by what colors, near the edge vs centered) — not just its fill hex. Describe gives the LLM the geometric and relational context heuristic auto-digitization can't see.
 
 
 ## More Information

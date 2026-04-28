@@ -77,6 +77,133 @@ def get(ctx, project_path, svg_id):
         emit(ctx, result)
 
 
+@element.command("describe")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--id", "svg_id", default=None,
+              help="Describe a single element. Omit to describe all addressable elements.")
+@click.option("--neighbors/--no-neighbors", default=True,
+              help="Include bbox-overlap relationships with other elements.")
+@click.pass_context
+def describe(ctx, project_path, svg_id, neighbors):
+    """Rich, derived per-element context for AI reasoning.
+
+    Returns geometry-derived facts that aren't on the element directly:
+    bbox in mm and as % of the design, position (3x3 grid descriptor),
+    aspect ratio, area %, closest named color, and (if --neighbors)
+    bbox-overlap relationships with other elements.
+
+    Use this before calling `params set` so the LLM knows what each element
+    is and how it relates to its surroundings.
+    """
+    from cli_anything_inkstitch.svg.colors import closest_named
+    from cli_anything_inkstitch.svg.geometry import (
+        aspect_ratio,
+        bbox_area,
+        bbox_overlap,
+        design_bbox_from_root,
+        element_bbox,
+        position_descriptor,
+        px_to_mm,
+    )
+
+    with open_project(ctx, project_path) as (_proj, tree):
+        root = tree.getroot()
+        d_bbox = design_bbox_from_root(root)
+        d_w_px = max(d_bbox[2] - d_bbox[0], 1.0)
+        d_h_px = max(d_bbox[3] - d_bbox[1], 1.0)
+        d_area_px = bbox_area(d_bbox) or 1.0
+
+        # Pre-compute bbox for every addressable element so neighbor lookup
+        # doesn't recompute per-element.
+        all_elems: list[tuple[object, "_Bbox | None"]] = []
+        for e in all_addressable_elements(tree):
+            if not e.get("id"):
+                continue
+            try:
+                bb = element_bbox(e)
+            except Exception:  # noqa: BLE001
+                bb = None
+            all_elems.append((e, bb))
+
+        if svg_id is not None:
+            target = next(((e, bb) for e, bb in all_elems if e.get("id") == svg_id), None)
+            if target is None:
+                raise UserError(f"no element with id={svg_id!r} in SVG")
+            description = _describe_one(
+                target[0], target[1], d_bbox,
+                all_elems if neighbors else [],
+                px_to_mm, position_descriptor, aspect_ratio, bbox_area,
+                bbox_overlap, closest_named,
+                d_w_px, d_h_px, d_area_px,
+            )
+            emit(ctx, description)
+            return
+
+        out = []
+        for e, bb in all_elems:
+            out.append(_describe_one(
+                e, bb, d_bbox,
+                all_elems if neighbors else [],
+                px_to_mm, position_descriptor, aspect_ratio, bbox_area,
+                bbox_overlap, closest_named,
+                d_w_px, d_h_px, d_area_px,
+            ))
+        emit(ctx, {
+            "design_bbox_px": list(d_bbox),
+            "design_size_mm": [round(px_to_mm(d_w_px), 2),
+                                round(px_to_mm(d_h_px), 2)],
+            "elements": out,
+            "count": len(out),
+        })
+
+
+def _describe_one(elem, bb, d_bbox, all_elems,
+                  px_to_mm, position_descriptor, aspect_ratio, bbox_area,
+                  bbox_overlap, closest_named,
+                  d_w_px, d_h_px, d_area_px) -> dict:
+    """Build the description payload for one element. Helper kept module-local
+    so the command function reads top-down."""
+    summary = element_summary(elem)
+    out: dict = {
+        "id": elem.get("id"),
+        "tag": summary["tag"],
+        "stitch_type": summary["stitch_type"],
+        "fill": summary["fill"],
+        "stroke": summary["stroke"],
+        "color_name": closest_named(summary["fill"]) if summary["fill"] else None,
+    }
+    if bb is None:
+        out["bbox"] = None
+        out["note"] = "geometry not parseable (transforms or unsupported tag)"
+        return out
+
+    w_px = bb[2] - bb[0]
+    h_px = bb[3] - bb[1]
+    area_px = bbox_area(bb)
+
+    out["bbox_mm"] = [round(px_to_mm(v), 2) for v in bb]
+    out["size_mm"] = [round(px_to_mm(w_px), 2), round(px_to_mm(h_px), 2)]
+    out["bbox_pct_of_design"] = {
+        "width": round(100.0 * w_px / d_w_px, 1),
+        "height": round(100.0 * h_px / d_h_px, 1),
+        "area": round(100.0 * area_px / d_area_px, 1),
+    }
+    out["position"] = position_descriptor(bb, d_bbox)
+    ar = aspect_ratio(bb)
+    out["aspect_ratio"] = round(ar, 2) if ar is not None else None
+
+    if all_elems:
+        nbrs = []
+        for other, other_bb in all_elems:
+            if other is elem or other_bb is None:
+                continue
+            rel = bbox_overlap(bb, other_bb)
+            if rel:
+                nbrs.append({"id": other.get("id"), "relation": rel})
+        out["neighbors"] = nbrs
+    return out
+
+
 @element.command("identify")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--id", "svg_id", required=True)
