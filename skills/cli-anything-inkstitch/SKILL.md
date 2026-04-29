@@ -412,6 +412,7 @@ When using this CLI programmatically:
 12. **Use `validate fix` as a triage step**: it splits issues into auto-fixed (cleanup-handled) vs manual (with one-line suggestions). Pass `--no-auto` to inspect without mutating the SVG.
 13. **Always run `element describe` before `params set`**: parameter choices are dependent on what each element *is* (small detail vs big background, surrounded by what colors, near the edge vs centered) — not just its fill hex. Describe gives the LLM the geometric and relational context heuristic auto-digitization can't see.
 14. **Capture intent with `document set-context` early**: material, stretch, thread, stabilizer, hoop tension, what the design is for. This appears as `document_context` in every `element list` / `describe` call thereafter, so param choices ground in real conditions ("more pull comp because the substrate is stretchy") instead of assumed defaults.
+15. **Consult the `embroidery-digitization` skill** when choosing stitch types or parameter values. It encodes the per-element decision flow (stitch type → direction → spacing → underlay → comp), fabric-specific starting numbers, satin width thresholds, and visual failure modes — knowledge the CLI surface alone doesn't carry.
 
 
 ## More Information
