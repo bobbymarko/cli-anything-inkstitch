@@ -159,8 +159,9 @@ Generate a stitch-plan preview SVG and extract stitch-plan statistics.
 
 | Command | Description |
 |---------|-------------|
-| `generate` | Render the stitch plan to an SVG file (`--render-mode simple\|realistic-300\|realistic-600\|realistic-vector`, `--needle-points`, `--visual-commands`, `--render-jumps`) |
+| `generate` | Render the stitch plan to an SVG file (`--render-mode simple\|realistic-300\|realistic-600\|realistic-vector`, `--needle-points`, `--visual-commands`, `--render-jumps`). Add `--raster --dpi 150` to also write a PNG via Inkscape so the LLM can visually consume it. |
 | `stats` | Return JSON with stitch count, jump count, trim count, color stops, estimated runtime, bounding box |
+| `rasterize` | Standalone SVG → PNG conversion via Inkscape (`--svg`, `--out`, `--dpi`). Useful for converting any SVG (validation layers, old previews) into something an LLM can look at. |
 
 
 ### Export
@@ -413,6 +414,7 @@ When using this CLI programmatically:
 13. **Always run `element describe` before `params set`**: parameter choices are dependent on what each element *is* (small detail vs big background, surrounded by what colors, near the edge vs centered) — not just its fill hex. Describe gives the LLM the geometric and relational context heuristic auto-digitization can't see.
 14. **Capture intent with `document set-context` early**: material, stretch, thread, stabilizer, hoop tension, what the design is for. This appears as `document_context` in every `element list` / `describe` call thereafter, so param choices ground in real conditions ("more pull comp because the substrate is stretchy") instead of assumed defaults.
 15. **Consult the `embroidery-digitization` skill** when choosing stitch types or parameter values. It encodes the per-element decision flow (stitch type → direction → spacing → underlay → comp), fabric-specific starting numbers, satin width thresholds, and visual failure modes — knowledge the CLI surface alone doesn't carry.
+16. **Use `preview generate --raster` to close the visual loop**: pass `--raster` (and optionally `--dpi 200` for higher resolution) to also produce a PNG alongside the SVG. The PNG can be loaded as an image by your agent harness, so you can visually evaluate stitch density, color order, and shape coverage rather than reasoning blind about the SVG XML. Inkscape 1.0+ must be installed (`INKSCAPE_BINARY` env var or default install path).
 
 
 ## More Information

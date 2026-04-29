@@ -81,8 +81,14 @@ def preview():
 @click.option("--visual-commands", is_flag=True)
 @click.option("--render-jumps", is_flag=True)
 @click.option("--insensitive", is_flag=True)
+@click.option("--raster", is_flag=True,
+              help="Also rasterize the preview SVG to PNG via Inkscape "
+                   "so it can be loaded as an image. PNG is written "
+                   "alongside --out with .png extension.")
+@click.option("--dpi", type=int, default=150, show_default=True,
+              help="Rasterization DPI (only used with --raster).")
 @click.pass_context
-def generate(ctx, project_path, out, ids, render_mode, needle_points, visual_commands, render_jumps, insensitive):
+def generate(ctx, project_path, out, ids, render_mode, needle_points, visual_commands, render_jumps, insensitive, raster, dpi):
     out = require_absolute(out, "out")
     with open_project(ctx, project_path) as (proj, _tree):
         binary = require(ctx.obj.get("binary_override"), proj.session)
@@ -97,7 +103,38 @@ def generate(ctx, project_path, out, ids, render_mode, needle_points, visual_com
                                 args=args, ids=list(ids), capture_stdout=True)
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         Path(out).write_bytes(stdout or b"")
-        emit(ctx, {"preview": out, "bytes": len(stdout or b"")})
+        result = {"preview": out, "bytes": len(stdout or b"")}
+        if raster:
+            from cli_anything_inkstitch.inkscape import rasterize
+            png_path = str(Path(out).with_suffix(".png"))
+            png_bytes = rasterize(out, png_path, dpi=dpi)
+            result["raster"] = png_path
+            result["raster_bytes"] = png_bytes
+            result["raster_dpi"] = dpi
+        emit(ctx, result)
+
+
+@preview.command("rasterize")
+@click.option("--svg", "svg_in", required=True, type=click.Path(),
+              help="Path to an SVG file (e.g. a stitch-plan preview).")
+@click.option("--out", required=True, type=click.Path(),
+              help="Output PNG path.")
+@click.option("--dpi", type=int, default=150, show_default=True)
+@click.pass_context
+def rasterize_cmd(ctx, svg_in, out, dpi):
+    """Convert any SVG to PNG via Inkscape.
+
+    Standalone rasterizer — useful for converting previously-generated
+    preview SVGs, validation-layer SVGs, or any other SVG into something
+    the LLM can visually consume.
+    """
+    from cli_anything_inkstitch.inkscape import rasterize
+    svg_in = require_absolute(svg_in, "svg")
+    out = require_absolute(out, "out")
+    if not Path(svg_in).exists():
+        raise UserError(f"SVG not found: {svg_in}")
+    png_bytes = rasterize(svg_in, out, dpi=dpi)
+    emit(ctx, {"raster": out, "raster_bytes": png_bytes, "raster_dpi": dpi})
 
 
 @preview.command("stats")
