@@ -176,12 +176,81 @@ def set_machine_target(ctx, project_path, fmt):
 
 @document.command("set-palette")
 @click.option("--project", "project_path", type=click.Path(), default=None)
-@click.option("--palette", required=True)
+@click.option("--palette", required=True,
+              help="Thread palette name (e.g. 'Madeira Polyneon', 'Isacord').")
 @click.pass_context
 def set_palette(ctx, project_path, palette):
-    with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+    """Record the thread palette so inkstitch resolves fills to thread names.
+
+    Writes BOTH our session JSON (for our own bookkeeping) AND the SVG's
+    `<metadata>/<inkstitch:thread-palette>` element. The latter is what
+    inkstitch's exports actually read — the threadlist generation, PES/JEF
+    output, and apply-palette extension all consult it. Without writing
+    metadata, the palette name was a no-op for inkstitch.
+    """
+    from cli_anything_inkstitch.svg.document import set_inkstitch_metadata
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
         proj.session["thread_palette"] = palette
-        emit(ctx, {"thread_palette": palette})
+        if tree is not None:
+            set_inkstitch_metadata(tree, "thread-palette", palette)
+        emit(ctx, {"thread_palette": palette,
+                   "wrote_svg_metadata": tree is not None})
+
+
+@document.command("list-thread-colors")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.pass_context
+def list_thread_colors(ctx, project_path):
+    """List unique thread colors used in the design, with element counts.
+
+    Useful for operator handoff: tells the machine operator which threads to
+    load. Resolves color from each addressable element's fill (or stroke if
+    no fill), normalizes to lowercase hex, returns deduplicated by color
+    with the count of elements using each.
+
+    Pair with `document set-palette` so subsequent exports resolve these
+    hex colors to actual thread catalog names.
+    """
+    from collections import Counter
+
+    from cli_anything_inkstitch.svg.colors import closest_named
+    from cli_anything_inkstitch.svg.document import (
+        all_addressable_elements,
+        get_inkstitch_metadata,
+    )
+    from cli_anything_inkstitch.svg.elements import element_summary
+
+    def _resolved_thread_color(elem) -> str | None:
+        s = element_summary(elem)
+        # Inkstitch reads color from fill first, then falls back to black if
+        # neither fill nor stroke is set (matches inkstitch's fill_color default).
+        candidate = s["fill"] or s["stroke"] or "#000000"
+        candidate = candidate.strip().lower()
+        return candidate if candidate.startswith("#") else None
+
+    with open_project(ctx, project_path) as (proj, tree):
+        if tree is None:
+            raise ProjectError("project has no SVG attached")
+        counter: Counter = Counter()
+        for elem in all_addressable_elements(tree):
+            if not elem.get("id"):
+                continue
+            c = _resolved_thread_color(elem)
+            if c is not None:
+                counter[c] += 1
+        rows = [
+            {
+                "hex": hex_color,
+                "name": closest_named(hex_color),
+                "element_count": count,
+            }
+            for hex_color, count in counter.most_common()
+        ]
+        emit(ctx, {
+            "thread_palette": get_inkstitch_metadata(tree, "thread-palette"),
+            "colors": rows,
+            "unique_count": len(rows),
+        })
 
 
 @document.command("set-collapse-len")

@@ -102,3 +102,59 @@ def get_label(elem) -> str | None:
         if etree.QName(child.tag).localname == "title" and child.text:
             return child.text.strip()
     return None
+
+
+# --- inkstitch metadata helpers -------------------------------------------
+#
+# Inkstitch stores per-document settings (thread palette, default min stitch
+# length, etc.) as JSON-encoded children of <svg>/<metadata>. The tag uses
+# the inkstitch namespace, e.g.
+#   <inkstitch:thread-palette>"Madeira Polyneon"</inkstitch:thread-palette>
+# Mirrors the format produced by inkstitch/lib/metadata.py InkStitchMetadata.
+
+import json as _json  # noqa: E402
+
+from cli_anything_inkstitch.svg.attrs import INKSTITCH_NS  # noqa: E402
+
+
+def _metadata_node(root):
+    """Find or create the <metadata> child of the SVG root."""
+    ns = root.nsmap.get(None) or SVG_NS
+    md = root.find(f"{{{ns}}}metadata")
+    if md is None:
+        md = etree.SubElement(root, f"{{{ns}}}metadata")
+        root.insert(0, md)
+    return md
+
+
+def set_inkstitch_metadata(tree, name: str, value) -> None:
+    """Set an inkstitch metadata value (JSON-encoded child of <metadata>).
+
+    Idempotent: if the key already exists, its text is replaced rather than
+    a duplicate added. Pass `value=None` to remove the key.
+    """
+    root = tree.getroot()
+    md = _metadata_node(root)
+    tag = f"{{{INKSTITCH_NS}}}{name}"
+    item = md.find(tag)
+    if value is None:
+        if item is not None:
+            md.remove(item)
+        return
+    if item is None:
+        item = etree.SubElement(md, tag)
+    item.text = _json.dumps(value)
+
+
+def get_inkstitch_metadata(tree, name: str):
+    """Read an inkstitch metadata value. Returns None if absent or unparseable."""
+    md = tree.getroot().find(f"{{{tree.getroot().nsmap.get(None) or SVG_NS}}}metadata")
+    if md is None:
+        return None
+    item = md.find(f"{{{INKSTITCH_NS}}}{name}")
+    if item is None or item.text is None:
+        return None
+    try:
+        return _json.loads(item.text)
+    except (ValueError, TypeError):
+        return None

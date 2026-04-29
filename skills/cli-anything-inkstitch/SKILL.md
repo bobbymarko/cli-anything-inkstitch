@@ -76,7 +76,8 @@ Document and project management.
 | `set-hoop` | Set hoop size (`--name 100x100` or `--width-mm W --height-mm H`) |
 | `set-units` | Set display units (`mm` or `in`); XML always stores `_mm` |
 | `set-machine-target` | Set the default export format (`dst`, `pes`, `jef`, `vp3`, `exp`) |
-| `set-palette` | Set the document's thread palette (writes `inkstitch:thread-palette` metadata) |
+| `set-palette` | Set the thread palette name. Writes BOTH session JSON and the SVG's `<metadata>/<inkstitch:thread-palette>` element — the latter is what inkstitch's exports / threadlists / apply-palette extension actually read. |
+| `list-thread-colors` | Enumerate unique thread colors in the design (with element counts and closest CSS named color), plus the current palette. Useful for operator handoff: "load these N threads." |
 | `set-collapse-len` | Set the collapse-jump distance in mm (default 3.0) |
 | `set-min-stitch-len` | Set the minimum stitch length in mm (default 0.1) |
 | `json` | Print raw project JSON |

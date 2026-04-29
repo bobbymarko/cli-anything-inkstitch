@@ -380,7 +380,12 @@ A: Yes, almost always. Inkstitch handles `<text>` poorly (it's a TextTypeWarning
 A: Use `preview stats --project $PROJ`. Heuristic: stitch count / area in mm² should be roughly 0.6–1.5 for most designs. > 2.0 is over-stitched (will damage fabric); < 0.4 is sparse (will show through).
 
 **Q: Why are my colors all wrong in the DST preview?**
-A: DST format doesn't store RGB — only color stops. Whatever previewer you're using is assigning arbitrary palette colors. The actual colors come from the thread you load on the machine; the operator should reference the design's color order. To control: set `--thread_color` per element, or use `document set-palette` to attach a thread palette name (e.g., "Madeira Polyneon") that previewers can resolve.
+A: DST format doesn't store RGB — only color-stop indices. Whatever previewer you're using is assigning arbitrary palette colors. There's nothing to fix in the DST itself; three options:
+1. Export PES, JEF, or VP3 instead — those formats carry RGB.
+2. `document set-palette --palette "Madeira Polyneon"` (or another catalog name) so inkstitch resolves fills to named threads when generating threadlists / writing PES/JEF.
+3. `document list-thread-colors` produces a "load these N threads in this order" list for operator handoff. Pair with `export zip --threadlist` for a sidecar text file with the DST.
+
+Note: there's no per-element `inkstitch:thread_color` attribute. Inkstitch reads thread color directly from each element's SVG `fill`. To change a thread color, change the fill.
 
 ---
 
