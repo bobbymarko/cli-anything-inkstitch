@@ -99,6 +99,56 @@ def set_params_on(elem) -> list[str]:
     return sorted(local for local, _ in iter_inkstitch_attrs(elem))
 
 
+# Tags inkstitch *would* try to stitch as path geometry. text/image/use trigger
+# their own warnings (TextTypeWarning, ImageTypeWarning, Clone) so we don't
+# flag them as "stitches as black" — that's a different problem.
+_FILLABLE_TAGS = frozenset({
+    "path", "rect", "circle", "ellipse", "line", "polygon", "polyline",
+})
+
+
+def _in_defs(elem) -> bool:
+    """True if elem is inside a <defs> block (not directly rendered)."""
+    parent = elem.getparent()
+    while parent is not None:
+        if etree.QName(parent.tag).localname == "defs":
+            return True
+        parent = parent.getparent()
+    return False
+
+
+def warnings_for_element(elem) -> list[dict]:
+    """Static (no-binary) warnings about how this element will stitch.
+
+    Currently flags:
+      - `default_fill_black`: the element has no fill and no stroke, so
+        inkstitch's `fill_color` default ("black") makes it silently stitch
+        as a solid black auto-fill. This is rarely intentional — the user
+        usually meant "no fill, don't stitch this" or forgot to set a fill.
+        Compare to `document prep --illustrator-rings=...` which handles
+        the multi-subpath ring subset of this problem.
+    """
+    out: list[dict] = []
+    local = etree.QName(elem.tag).localname
+    if (
+        local in _FILLABLE_TAGS
+        and not _in_defs(elem)
+        and not has_fill(elem)
+        and not has_stroke(elem)
+    ):
+        out.append({
+            "type": "default_fill_black",
+            "severity": "warning",
+            "message": (
+                "no fill or stroke set; inkstitch will silently stitch this "
+                "as a solid black auto-fill. Set an explicit fill, add a "
+                "stroke, or run `document prep --illustrator-rings=skip` to "
+                "exclude it from stitching."
+            ),
+        })
+    return out
+
+
 def element_summary(elem) -> dict:
     """Compact dict representation of one SVG element for `element list` JSON output."""
     from cli_anything_inkstitch.svg.document import get_label
@@ -106,7 +156,7 @@ def element_summary(elem) -> dict:
     style = _style_dict(elem)
     fill = elem.get("fill") or style.get("fill")
     stroke = elem.get("stroke") or style.get("stroke")
-    return {
+    out = {
         "id": elem.get("id"),
         "tag": etree.QName(elem.tag).localname,
         "label": get_label(elem),
@@ -116,3 +166,7 @@ def element_summary(elem) -> dict:
         "stitch_type": classify(elem),
         "set_params": set_params_on(elem),
     }
+    warnings = warnings_for_element(elem)
+    if warnings:
+        out["warnings"] = warnings
+    return out

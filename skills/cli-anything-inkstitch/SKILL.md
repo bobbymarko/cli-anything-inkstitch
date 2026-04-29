@@ -88,7 +88,7 @@ Enumerate and inspect SVG elements; clear digitization state.
 
 | Command | Description |
 |---------|-------------|
-| `list` | List elements with stitch_type, set params, warnings (`--refresh` rescans the SVG) |
+| `list` | List elements with stitch_type, set params, warnings (`--refresh` rescans the SVG). Each element gains a `warnings: [...]` field if it would behave unexpectedly under inkstitch (e.g. `default_fill_black` for paths with no fill/stroke that will silently stitch as solid black). |
 | `get` | Full attribute dump for one element by `--id` |
 | `describe` | Rich derived context for AI reasoning: bbox in mm + as % of design, position (3x3 grid), aspect ratio, area %, closest named color, neighbors. `--id` for one element or omit for all. `--no-neighbors` to skip overlap analysis. |
 | `identify` | Echo the element-class dispatch (FillStitch / SatinColumn / Stroke / …) |

@@ -14,7 +14,7 @@ from cli_anything_inkstitch.output import emit
 from cli_anything_inkstitch.schema.cache import load_schema
 from cli_anything_inkstitch.svg.attrs import INKSCAPE_NS, INKSTITCH_PREFIX, SVG_NS
 from cli_anything_inkstitch.svg.document import all_addressable_elements
-from cli_anything_inkstitch.svg.elements import classify
+from cli_anything_inkstitch.svg.elements import classify, warnings_for_element
 
 PIXELS_PER_MM = 96.0 / 25.4  # inkstitch's PIXELS_PER_MM
 
@@ -39,6 +39,11 @@ def static(ctx, project_path, strict, refresh_schema):
         for elem in all_addressable_elements(tree):
             if not elem.get("id"):
                 continue
+            # Surface "stitches as black by default" before the unassigned
+            # warning — it's the more actionable one. (Unassigned implies
+            # the same outcome but doesn't tell you *why*.)
+            for w in warnings_for_element(elem):
+                issues.append({**w, "id": elem.get("id")})
             st_name = classify(elem)
             if st_name == "unassigned":
                 issues.append({"severity": "warning", "id": elem.get("id"),

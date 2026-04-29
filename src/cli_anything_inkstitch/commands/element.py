@@ -183,6 +183,8 @@ def _describe_one(elem, bb, d_bbox, all_elems,
         "stroke": summary["stroke"],
         "color_name": closest_named(summary["fill"]) if summary["fill"] else None,
     }
+    if summary.get("warnings"):
+        out["warnings"] = summary["warnings"]
     if bb is None:
         out["bbox"] = None
         out["note"] = "geometry not parseable (transforms or unsupported tag)"
