@@ -35,7 +35,7 @@ def _run_tool(ctx, project_path, extension_name, ids, args):
                        "note": "no changes — selection may not match tool requirements"})
             return
         new_tree = etree.ElementTree(etree.fromstring(stdout))
-        ensure_inkstitch_namespace(new_tree.getroot())
+        ensure_inkstitch_namespace(new_tree)
         proj.svg_sha256 = save_svg(new_tree, proj.svg_path)
         proj.save()
         emit(ctx, {"tool": extension_name, "ids": ids, "changed": True, "bytes": len(stdout)})

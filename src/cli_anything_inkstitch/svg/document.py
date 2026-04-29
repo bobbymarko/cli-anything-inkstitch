@@ -27,8 +27,11 @@ def load_svg(path: str | Path):
     root = tree.getroot()
     if not root.tag.endswith("}svg") and root.tag != "svg":
         raise ProjectError(f"file is not an SVG document: {path}")
-    ensure_inkstitch_namespace(root)
-    _ensure_inkstitch_version(root)
+    # Pass the tree (not just root) so _setroot can replace the root with
+    # one that has xmlns:inkstitch. Otherwise inkstitch:* attrs added later
+    # serialize with per-element nsN: prefixes instead of `inkstitch:`.
+    ensure_inkstitch_namespace(tree)
+    _ensure_inkstitch_version(tree.getroot())
     return tree
 
 

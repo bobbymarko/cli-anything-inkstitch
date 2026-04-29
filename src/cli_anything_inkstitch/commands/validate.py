@@ -301,7 +301,7 @@ def fix(ctx, project_path, auto, strict):
                                            capture_stdout=True)
             if cleanup_stdout:
                 new_tree = etree.ElementTree(etree.fromstring(cleanup_stdout))
-                ensure_inkstitch_namespace(new_tree.getroot())
+                ensure_inkstitch_namespace(new_tree)
                 proj.svg_sha256 = save_svg(new_tree, proj.svg_path)
                 proj.save()
                 applied.append({"tool": "cleanup",

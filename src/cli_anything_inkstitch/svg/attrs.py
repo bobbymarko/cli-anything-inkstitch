@@ -71,15 +71,35 @@ def parse_bool(value: str) -> bool:
     raise ValueError(f"cannot parse boolean: {value!r}")
 
 
-def ensure_inkstitch_namespace(root) -> bool:
-    """Ensure the SVG root carries xmlns:inkstitch.
+def ensure_inkstitch_namespace(tree_or_root) -> bool:
+    """Ensure the SVG root carries `xmlns:inkstitch`.
 
-    lxml's nsmap is immutable post-creation. We serialize to bytes, inject the
-    namespace declaration into the opening tag, then re-parse in place.
+    lxml's nsmap is set at element creation time and is immutable on a live
+    element, so we can't add `inkstitch` to the existing root's nsmap. We
+    build a fresh root with the correct nsmap, move children/text/attribs
+    over, and replace the original root in the tree.
+
+    Pass an `_ElementTree` when you have one (most callers do). Passing only
+    an `_Element` works too — but only reliably if the element is mid-tree
+    (we use `getparent().replace()` in that case). For a document-root
+    element with no tree handle we fall back to in-place attribute/child
+    swap, which preserves children but NOT the inkstitch nsmap declaration
+    on the root — so any inkstitch:* attrs added later will serialize with
+    per-element `nsN:` prefixes instead of `inkstitch:`. Always prefer to
+    pass the tree.
+
     Returns True if the tree was modified.
     """
+    if hasattr(tree_or_root, "getroot"):
+        tree = tree_or_root
+        root = tree.getroot()
+    else:
+        root = tree_or_root
+        tree = None
+
     if root.nsmap.get("inkstitch") == INKSTITCH_NS:
         return False
+
     new_nsmap = dict(root.nsmap or {})
     new_nsmap["inkstitch"] = INKSTITCH_NS
     new_root = etree.Element(root.tag, attrib=root.attrib, nsmap=new_nsmap)
@@ -87,22 +107,34 @@ def ensure_inkstitch_namespace(root) -> bool:
     new_root.tail = root.tail
     for child in list(root):
         new_root.append(child)
+
     parent = root.getparent()
     if parent is not None:
+        # Mid-tree element: simple in-place replace.
         parent.replace(root, new_root)
-    else:
-        # Swap contents of root in-place so callers holding a reference to
-        # `root` still see the updated node. Clear root, copy everything from
-        # new_root back into it with the new nsmap applied via re-serialise.
-        raw = etree.tostring(new_root)
-        parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
-        replacement = etree.fromstring(raw, parser)
-        root.tag = replacement.tag
-        root.attrib.clear()
-        root.attrib.update(replacement.attrib)
-        for child in list(root):
-            root.remove(child)
-        for child in list(replacement):
-            root.append(child)
-        root.text = replacement.text
+        return True
+
+    if tree is not None:
+        # Document root + caller-owned tree: _setroot works correctly when
+        # called on the tree the caller actually holds. (Calling
+        # `root.getroottree()._setroot(...)` silently fails because
+        # getroottree() returns a transient wrapper that doesn't share state
+        # with the caller's tree object.)
+        tree._setroot(new_root)
+        return True
+
+    # Document root, no tree handle. Fall back: copy attribs/children back
+    # into the original root in-place. nsmap won't update (limitation of
+    # lxml). See docstring.
+    raw = etree.tostring(new_root)
+    parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
+    replacement = etree.fromstring(raw, parser)
+    root.tag = replacement.tag
+    root.attrib.clear()
+    root.attrib.update(replacement.attrib)
+    for child in list(root):
+        root.remove(child)
+    for child in list(replacement):
+        root.append(child)
+    root.text = replacement.text
     return True
