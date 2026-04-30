@@ -282,3 +282,132 @@ def aspect_ratio(b: Bbox) -> float | None:
     if h <= 0:
         return None
     return w / h
+
+
+def _fmt(n: float) -> str:
+    """Format a coordinate compactly: drop trailing .0, keep precision."""
+    if n == int(n):
+        return str(int(n))
+    return f"{n:g}"
+
+
+def open_closed_subpaths(d: str) -> str:
+    """Replace `Z`/`z` close-path commands with explicit lineto-to-start.
+
+    Inkstitch's `ClosedPathWarning` fires on `any(letter == 'Z')` anywhere
+    in a satin column path's `d` attribute (see
+    inkstitch/lib/elements/satin_column.py). Just removing Z would lose the
+    closing segment of geometry; replacing it with an explicit
+    `L <start_x> <start_y>` preserves the rail's full traversal while
+    eliminating the literal Z that triggers the warning.
+
+    The output uses absolute coordinates throughout and parses back to
+    geometrically equivalent paths (subject to the bezier control-point
+    over-estimate documented on `path_bbox`).
+
+    Returns the input unchanged if it contains no Z/z.
+    """
+    if not d or 'z' not in d.lower():
+        return d
+
+    tokens = list(_tokenize_d(d))
+    if not tokens:
+        return d
+
+    out: list[str] = []
+    cur_x = cur_y = 0.0
+    start_x = start_y = 0.0
+    cmd: str | None = None
+    i = 0
+
+    while i < len(tokens):
+        kind, val = tokens[i]
+        if kind == 'cmd':
+            cmd = val
+            i += 1
+            if cmd in 'Zz':
+                # Substitute explicit lineto back to subpath start.
+                out.append(f"L {_fmt(start_x)} {_fmt(start_y)}")
+                cur_x, cur_y = start_x, start_y
+                continue
+        if cmd is None:
+            i += 1
+            continue
+        upper = cmd.upper()
+        n = _PARAM_COUNTS.get(upper, 0)
+        if i + n > len(tokens):
+            break
+        params = []
+        for j in range(n):
+            ptok = tokens[i + j]
+            if ptok[0] != 'num':
+                # Malformed: bail and return original to avoid worse damage
+                return d
+            params.append(ptok[1])
+        i += n
+        relative = cmd.islower()
+
+        if upper == 'M':
+            x, y = params
+            if relative and out:  # first M is implicitly absolute
+                x += cur_x
+                y += cur_y
+            cur_x, cur_y = x, y
+            start_x, start_y = x, y
+            out.append(f"M {_fmt(x)} {_fmt(y)}")
+            cmd = 'L'  # subsequent coord pairs become implicit lineto
+        elif upper == 'L':
+            x, y = params
+            if relative:
+                x += cur_x; y += cur_y
+            cur_x, cur_y = x, y
+            out.append(f"L {_fmt(x)} {_fmt(y)}")
+        elif upper == 'H':
+            x = params[0]
+            if relative:
+                x += cur_x
+            cur_x = x
+            out.append(f"H {_fmt(x)}")
+        elif upper == 'V':
+            y = params[0]
+            if relative:
+                y += cur_y
+            cur_y = y
+            out.append(f"V {_fmt(y)}")
+        elif upper == 'C':
+            x1, y1, x2, y2, x, y = params
+            if relative:
+                x1 += cur_x; y1 += cur_y
+                x2 += cur_x; y2 += cur_y
+                x += cur_x; y += cur_y
+            cur_x, cur_y = x, y
+            out.append(f"C {_fmt(x1)} {_fmt(y1)} {_fmt(x2)} {_fmt(y2)} {_fmt(x)} {_fmt(y)}")
+        elif upper == 'S':
+            x2, y2, x, y = params
+            if relative:
+                x2 += cur_x; y2 += cur_y
+                x += cur_x; y += cur_y
+            cur_x, cur_y = x, y
+            out.append(f"S {_fmt(x2)} {_fmt(y2)} {_fmt(x)} {_fmt(y)}")
+        elif upper == 'Q':
+            x1, y1, x, y = params
+            if relative:
+                x1 += cur_x; y1 += cur_y
+                x += cur_x; y += cur_y
+            cur_x, cur_y = x, y
+            out.append(f"Q {_fmt(x1)} {_fmt(y1)} {_fmt(x)} {_fmt(y)}")
+        elif upper == 'T':
+            x, y = params
+            if relative:
+                x += cur_x; y += cur_y
+            cur_x, cur_y = x, y
+            out.append(f"T {_fmt(x)} {_fmt(y)}")
+        elif upper == 'A':
+            rx, ry, rot, large, sweep, x, y = params
+            if relative:
+                x += cur_x; y += cur_y
+            cur_x, cur_y = x, y
+            out.append(f"A {_fmt(rx)} {_fmt(ry)} {_fmt(rot)} "
+                        f"{int(large)} {int(sweep)} {_fmt(x)} {_fmt(y)}")
+
+    return ' '.join(out)

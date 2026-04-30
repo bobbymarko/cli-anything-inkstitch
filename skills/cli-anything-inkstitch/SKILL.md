@@ -238,7 +238,7 @@ cli-anything-inkstitch --json document prep --project $PROJ
 - `detect` (default): report only, don't modify. Good for inspecting first.
 - `skip`: set `display="none"` so inkstitch ignores them entirely.
 - `fill-black`: set explicit `fill="#000000"` so the auto-fill behavior is visible in `element list` (matches what inkstitch does silently anyway).
-- `satin`: set `inkstitch:satin_column="True"` — the two subpaths become the satin rails. Best fit for designs where the rings represent intended outline embroidery. Note: closed-rail satins emit a `ClosedPathWarning` in `validate run` but still stitch.
+- `satin`: set `inkstitch:satin_column="True"` — the two subpaths become the satin rails. Best fit for designs where the rings represent intended outline embroidery. The path's `d` attribute is also rewritten to replace each `Z` close-path with an explicit lineto-back-to-start, preserving ring geometry while eliminating the literal `Z` that triggers inkstitch's `ClosedPathWarning`.
 
 ```bash
 # typical Illustrator import workflow:

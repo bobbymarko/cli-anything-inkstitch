@@ -117,9 +117,15 @@ def _apply_ring_action(elem, action: str) -> bool:
     if action == "satin":
         # Mark as satin column — inkstitch's `rails` property reads the path's
         # subpaths directly, so a 2-subpath ring becomes a satin with two rails.
-        # NB: closed-rail satins emit a ClosedPathWarning from inkstitch's
-        # troubleshoot but still stitch. Opening the subpaths is a future
-        # refinement.
+        # We also rewrite the `d` attribute to replace each `Z` close-path with
+        # an explicit lineto-back-to-start. This preserves the ring geometry
+        # while eliminating the literal `Z` that triggers inkstitch's
+        # ClosedPathWarning. (See svg/geometry.open_closed_subpaths.)
+        from cli_anything_inkstitch.svg.geometry import open_closed_subpaths
+        d = elem.get("d", "")
+        opened = open_closed_subpaths(d)
+        if opened != d:
+            elem.set("d", opened)
         set_inkstitch(elem, "satin_column", True)
         return True
     raise ValueError(f"unknown ring action: {action}")
