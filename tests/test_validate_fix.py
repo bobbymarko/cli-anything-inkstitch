@@ -175,6 +175,41 @@ def test_fix_strict_raises_on_remaining_errors(fixture_svg, project_path):
     assert result.exit_code == 4  # ValidationError exit code
 
 
+def test_fix_recognizes_empty_path_label_from_inkstitch_3_2(fixture_svg, project_path):
+    """Inkstitch 3.2.x emits 'Empty Path' (not 'EmptyD') for empty-d issues
+    in the troubleshoot layer. Both labels must trigger the cleanup auto-fix.
+    Regression for the live-test bug where AUTO_FIX_NAMES only contained 'EmptyD'."""
+    runner = CliRunner()
+    _open(runner, fixture_svg, project_path)
+    before_svg = _make_layer_svg([
+        ("type_warning", "Empty Path", "p1", 1, 1),
+        ("type_warning", "Empty Path", "p2", 2, 2),
+    ])
+    after_svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+    cleanup_svg = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+    call_log = []
+
+    def fake_run(_binary, ext, *_args, **_kwargs):
+        call_log.append(ext)
+        if ext == "cleanup":
+            return cleanup_svg
+        return before_svg if call_log.count("troubleshoot") == 1 else after_svg
+
+    with patch("cli_anything_inkstitch.commands.validate.discover",
+               return_value="/fake/inkstitch"), \
+         patch("cli_anything_inkstitch.commands.validate.run_extension",
+               side_effect=fake_run):
+        result = runner.invoke(
+            root, ["--json", "validate", "fix", "--project", project_path],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "cleanup" in call_log  # cleanup was dispatched
+    assert data["applied"] == [{"tool": "cleanup", "addresses": ["Empty Path"]}]
+    assert data["manual"] == []
+
+
 def test_fix_mixed_auto_and_manual(fixture_svg, project_path):
     """When both auto and manual issues exist, cleanup runs and manual stays."""
     runner = CliRunner()

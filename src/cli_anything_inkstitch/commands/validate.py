@@ -231,9 +231,17 @@ def run(ctx, project_path, strict, show_errors, show_warnings, show_type_warning
 # Issue `name` strings whose remediation is a `cleanup` extension run.
 # Source: inkstitch/lib/elements/{empty_d_object,fill_stitch}.py — these classes'
 # `steps_to_solve` literally tell the user "run Cleanup Document".
+#
+# We list multiple labels per concept because inkstitch's troubleshoot output
+# varies between versions (EmptyD class lives in `name`, but newer versions of
+# the troubleshoot extension surface `element_name = "Empty Path"` instead).
+# Verified empirically against inkstitch 3.2.2 emitting "Empty Path".
 AUTO_FIX_NAMES = frozenset({
-    "EmptyD",      # ObjectTypeWarning — empty <path d=""/>; cleanup removes
-    "Small Fill",  # ValidationWarning — fill below area threshold; cleanup removes
+    # Empty <path d=""/> — cleanup removes
+    "EmptyD",
+    "Empty Path",
+    # Fill below area threshold — cleanup removes
+    "Small Fill",
 })
 
 # Map issue name → human suggestion for the manual case. Anything not listed
