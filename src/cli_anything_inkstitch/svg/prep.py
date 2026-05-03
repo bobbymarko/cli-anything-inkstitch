@@ -86,6 +86,8 @@ def find_illustrator_rings(tree) -> list:
     """
     rings = []
     for elem in tree.getroot().iter():
+        if not isinstance(elem.tag, str):  # skip comments, PIs, etc.
+            continue
         if etree.QName(elem.tag).localname != "path":
             continue
         if _has_explicit_fill(elem) or _has_explicit_stroke(elem):
@@ -149,6 +151,8 @@ def prep_svg(tree, ring_action: str = "detect") -> dict:
     # Collect all stylesheet rules from <style> elements.
     style_rules: dict[str, dict[str, str]] = {}
     for elem in root.iter():
+        if not isinstance(elem.tag, str):  # skip comments, PIs, etc.
+            continue
         if etree.QName(elem.tag).localname == "style" and elem.text:
             style_rules.update(_parse_stylesheet(elem.text))
 
@@ -157,6 +161,8 @@ def prep_svg(tree, ring_action: str = "detect") -> dict:
     inlined_styles = 0
 
     for elem in root.iter():
+        if not isinstance(elem.tag, str):  # skip comments, PIs, etc.
+            continue
         local = etree.QName(elem.tag).localname
         if local not in _ADDRESSABLE_TAGS:
             continue
