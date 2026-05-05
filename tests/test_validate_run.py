@@ -9,10 +9,8 @@ import pytest
 from click.testing import CliRunner
 
 from cli_anything_inkstitch.cli import root
-from cli_anything_inkstitch.commands.validate import (
-    PIXELS_PER_MM,
-    parse_validation_layer,
-)
+from cli_anything_inkstitch.svg.geometry import PIXELS_PER_MM
+from cli_anything_inkstitch.svg.validation import parse_validation_layer
 
 
 def _make_layer_svg(problems):

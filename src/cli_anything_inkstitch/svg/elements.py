@@ -149,6 +149,68 @@ def warnings_for_element(elem) -> list[dict]:
     return out
 
 
+def describe_element(elem, bb, d_bbox, all_elems, d_w_px: float, d_h_px: float, d_area_px: float) -> dict:
+    """Rich derived context for one element — geometry, position, color, neighbors.
+
+    Args:
+        elem: lxml element
+        bb: bounding box tuple (xmin, ymin, xmax, ymax) in px, or None
+        d_bbox: design bounding box in px
+        all_elems: list of (elem, bb) pairs for neighbor lookup; pass [] to skip
+        d_w_px, d_h_px, d_area_px: pre-computed design dimensions in px
+    """
+    from cli_anything_inkstitch.svg.colors import closest_named
+    from cli_anything_inkstitch.svg.geometry import (
+        aspect_ratio,
+        bbox_area,
+        bbox_overlap,
+        position_descriptor,
+        px_to_mm,
+    )
+
+    summary = element_summary(elem)
+    out: dict = {
+        "id": elem.get("id"),
+        "tag": summary["tag"],
+        "stitch_type": summary["stitch_type"],
+        "fill": summary["fill"],
+        "stroke": summary["stroke"],
+        "color_name": closest_named(summary["fill"]) if summary["fill"] else None,
+    }
+    if summary.get("warnings"):
+        out["warnings"] = summary["warnings"]
+    if bb is None:
+        out["bbox"] = None
+        out["note"] = "geometry not parseable (transforms or unsupported tag)"
+        return out
+
+    w_px = bb[2] - bb[0]
+    h_px = bb[3] - bb[1]
+    area_px = bbox_area(bb)
+
+    out["bbox_mm"] = [round(px_to_mm(v), 2) for v in bb]
+    out["size_mm"] = [round(px_to_mm(w_px), 2), round(px_to_mm(h_px), 2)]
+    out["bbox_pct_of_design"] = {
+        "width": round(100.0 * w_px / d_w_px, 1),
+        "height": round(100.0 * h_px / d_h_px, 1),
+        "area": round(100.0 * area_px / d_area_px, 1),
+    }
+    out["position"] = position_descriptor(bb, d_bbox)
+    ar = aspect_ratio(bb)
+    out["aspect_ratio"] = round(ar, 2) if ar is not None else None
+
+    if all_elems:
+        nbrs = []
+        for other, other_bb in all_elems:
+            if other is elem or other_bb is None:
+                continue
+            rel = bbox_overlap(bb, other_bb)
+            if rel:
+                nbrs.append({"id": other.get("id"), "relation": rel})
+        out["neighbors"] = nbrs
+    return out
+
+
 def element_summary(elem) -> dict:
     """Compact dict representation of one SVG element for `element list` JSON output."""
     from cli_anything_inkstitch.svg.document import get_label

@@ -18,7 +18,7 @@ from cli_anything_inkstitch.history import attr_diff, node_delete
 from cli_anything_inkstitch.output import emit, print_table
 from cli_anything_inkstitch.svg.attrs import INKSTITCH_PREFIX, qname
 from cli_anything_inkstitch.svg.document import all_addressable_elements
-from cli_anything_inkstitch.svg.elements import classify, element_summary
+from cli_anything_inkstitch.svg.elements import classify, describe_element, element_summary
 
 
 @click.group("element")
@@ -99,14 +99,10 @@ def describe(ctx, project_path, svg_id, neighbors):
     Use this before calling `params set` so the LLM knows what each element
     is and how it relates to its surroundings.
     """
-    from cli_anything_inkstitch.svg.colors import closest_named
     from cli_anything_inkstitch.svg.geometry import (
-        aspect_ratio,
         bbox_area,
-        bbox_overlap,
         design_bbox_from_root,
         element_bbox,
-        position_descriptor,
         px_to_mm,
     )
 
@@ -117,9 +113,7 @@ def describe(ctx, project_path, svg_id, neighbors):
         d_h_px = max(d_bbox[3] - d_bbox[1], 1.0)
         d_area_px = bbox_area(d_bbox) or 1.0
 
-        # Pre-compute bbox for every addressable element so neighbor lookup
-        # doesn't recompute per-element.
-        all_elems: list[tuple[object, "_Bbox | None"]] = []
+        all_elems: list[tuple[object, object]] = []
         for e in all_addressable_elements(tree):
             if not e.get("id"):
                 continue
@@ -135,11 +129,9 @@ def describe(ctx, project_path, svg_id, neighbors):
             target = next(((e, bb) for e, bb in all_elems if e.get("id") == svg_id), None)
             if target is None:
                 raise UserError(f"no element with id={svg_id!r} in SVG")
-            description = _describe_one(
+            description = describe_element(
                 target[0], target[1], d_bbox,
                 all_elems if neighbors else [],
-                px_to_mm, position_descriptor, aspect_ratio, bbox_area,
-                bbox_overlap, closest_named,
                 d_w_px, d_h_px, d_area_px,
             )
             if doc_context:
@@ -149,11 +141,9 @@ def describe(ctx, project_path, svg_id, neighbors):
 
         out = []
         for e, bb in all_elems:
-            out.append(_describe_one(
+            out.append(describe_element(
                 e, bb, d_bbox,
                 all_elems if neighbors else [],
-                px_to_mm, position_descriptor, aspect_ratio, bbox_area,
-                bbox_overlap, closest_named,
                 d_w_px, d_h_px, d_area_px,
             ))
         payload = {
@@ -166,55 +156,6 @@ def describe(ctx, project_path, svg_id, neighbors):
         if doc_context:
             payload["document_context"] = doc_context
         emit(ctx, payload)
-
-
-def _describe_one(elem, bb, d_bbox, all_elems,
-                  px_to_mm, position_descriptor, aspect_ratio, bbox_area,
-                  bbox_overlap, closest_named,
-                  d_w_px, d_h_px, d_area_px) -> dict:
-    """Build the description payload for one element. Helper kept module-local
-    so the command function reads top-down."""
-    summary = element_summary(elem)
-    out: dict = {
-        "id": elem.get("id"),
-        "tag": summary["tag"],
-        "stitch_type": summary["stitch_type"],
-        "fill": summary["fill"],
-        "stroke": summary["stroke"],
-        "color_name": closest_named(summary["fill"]) if summary["fill"] else None,
-    }
-    if summary.get("warnings"):
-        out["warnings"] = summary["warnings"]
-    if bb is None:
-        out["bbox"] = None
-        out["note"] = "geometry not parseable (transforms or unsupported tag)"
-        return out
-
-    w_px = bb[2] - bb[0]
-    h_px = bb[3] - bb[1]
-    area_px = bbox_area(bb)
-
-    out["bbox_mm"] = [round(px_to_mm(v), 2) for v in bb]
-    out["size_mm"] = [round(px_to_mm(w_px), 2), round(px_to_mm(h_px), 2)]
-    out["bbox_pct_of_design"] = {
-        "width": round(100.0 * w_px / d_w_px, 1),
-        "height": round(100.0 * h_px / d_h_px, 1),
-        "area": round(100.0 * area_px / d_area_px, 1),
-    }
-    out["position"] = position_descriptor(bb, d_bbox)
-    ar = aspect_ratio(bb)
-    out["aspect_ratio"] = round(ar, 2) if ar is not None else None
-
-    if all_elems:
-        nbrs = []
-        for other, other_bb in all_elems:
-            if other is elem or other_bb is None:
-                continue
-            rel = bbox_overlap(bb, other_bb)
-            if rel:
-                nbrs.append({"id": other.get("id"), "relation": rel})
-        out["neighbors"] = nbrs
-    return out
 
 
 @element.command("identify")
