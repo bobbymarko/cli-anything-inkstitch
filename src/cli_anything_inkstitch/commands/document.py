@@ -273,6 +273,27 @@ def set_min_stitch_len(ctx, project_path, mm):
         emit(ctx, {"min_stitch_len_mm": float(mm)})
 
 
+@document.command("set-binary")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--binary", "binary_path", required=True, type=click.Path(),
+              help="Absolute path to the Ink/Stitch binary.")
+@click.pass_context
+def set_binary(ctx, project_path, binary_path):
+    """Record the Ink/Stitch binary path in this project.
+
+    Saves to session.inkstitch_binary so you don't need --inkstitch-binary
+    on every export, validate run, or tools command.
+    """
+    p = Path(require_absolute(binary_path, "binary"))
+    if not p.exists():
+        raise UserError(f"binary not found: {p}")
+    if not p.is_file():
+        raise UserError(f"not a file: {p}")
+    with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+        proj.session["inkstitch_binary"] = str(p)
+        emit(ctx, {"inkstitch_binary": str(p)})
+
+
 # --- design-intent context for AI reasoning -------------------------------
 #
 # These commands capture the *non-geometric* facts the LLM needs to make good
