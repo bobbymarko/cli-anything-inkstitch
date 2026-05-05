@@ -91,6 +91,8 @@ def all_addressable_elements(tree):
     root = tree.getroot()
     tags = {"path", "rect", "circle", "ellipse", "line", "polygon", "polyline", "use", "image", "text"}
     for elem in root.iter():
+        if not isinstance(elem.tag, str):
+            continue
         local = etree.QName(elem.tag).localname
         if local in tags:
             yield elem
