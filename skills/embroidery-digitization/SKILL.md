@@ -43,7 +43,7 @@ When `element describe` returns an element you need to assign params to, think i
   └────────────┬────────────┘
                │
   ┌────────────▼────────────┐
-  │ 6. Trim / start / end   │  ← color order + element neighbors
+  │ 6. Trim / start / end   │  ← does travel cross open fabric? (see §8)
   └─────────────────────────┘
 ```
 
@@ -204,7 +204,7 @@ DST and most modern embroidery formats split the design into "color blocks" — 
 3. **Light to dark when adjacent** — when light and dark colors butt up against each other, stitch the dark one second so its outline covers any light-thread bleed.
 4. **Background fills before foreground details** — a face has skin (background) then hair, eyes, mouth (foreground). Always fill skin first; small details on top.
 5. **Avoid stitching over satin borders** — once a satin border is down, fills should not cross it. Order fills *before* their border satins.
-6. **Trim between distant elements** — if two same-color elements are > ~3 cm apart, attach a trim command (`commands attach --command trim`) between them so no long thread floats over the design.
+6. **Trim between elements that have open fabric between them** — see §8 for the full decision rubric. The short version: if the travel stitch from the exit of one element to the entry of the next crosses uncovered fabric, set `trim_after=True` on the departing element (or `commands attach --command trim`).
 
 ### Inkstitch ordering
 
@@ -212,7 +212,64 @@ Element stitch order follows the SVG's z-order (top to bottom in the document). 
 
 ---
 
-## 8. Push/pull, compensation, and the fabric-stretch axis
+## 8. Trim and jump stitch decisions
+
+This is step 6 of the per-element flow and must be evaluated **for every element** before export, not as an afterthought.
+
+### Primary rule: does the travel path cross open fabric?
+
+Between any two consecutive elements, Inkstitch routes a travel stitch from the exit of the first to the entry of the second. If `underpath=True` (default), that travel runs under the fill. Ask:
+
+> **Would the travel stitch — at any point along its path — pass over fabric with no fill stitching on top?**
+
+If yes → set `trim_after=True` on the departing element.
+
+This is a geometric question about the SVG, not a fabric question. Check it with `element describe` (look at `bbox_mm` positions) or by inspecting the stitch plan with `preview generate`.
+
+### Decision checklist
+
+Run through this for each element pair in sequence order:
+
+| Condition | Decision |
+| --- | --- |
+| Elements are disconnected shapes with a visible gap between them | `trim_after=True` on the first |
+| Elements touch or overlap (no open gap) | trim optional; underpath handles it |
+| Jump would cross a different color region | `trim_after=True` |
+| Color change between elements | Always `trim_after=True` on the departing element |
+| Same shape, split into subpaths by the fill router | Usually fine; no trim needed |
+
+### Jump length threshold
+
+Inkstitch collapses jumps shorter than `session.collapse_len_mm` (default 3 mm) automatically. Anything longer than that which crosses open fabric needs an explicit trim. You can check the threshold with `session status --project $PROJ`.
+
+### Fabric as amplifier, not the primary trigger
+
+Pile, knit, and fleece fabrics make unseen travel stitches *worse* — underpath routing that looks clean on woven fabric will punch visible needle tracks through pile even when fully hidden on a flat substrate. But the trim decision should already be made on geometric grounds before you even consider fabric. If the geometry says trim, trim regardless of fabric. If the geometry says no trim needed, fabric might still push you to trim anyway on pile/fleece.
+
+### How to apply
+
+```bash
+# Via params (preferred — persists in project JSON)
+cli-anything-inkstitch params set --project $PROJ --id <id> --trim_after true
+
+# Via visual command (alternative)
+cli-anything-inkstitch commands attach --project $PROJ --id <id> --command trim
+```
+
+Set `trim_after=True` on all elements **except the last one stitched**. The last element needs no trim — there is no subsequent travel.
+
+### Verifying trims in the stitch plan
+
+After setting trims, regenerate the preview and check that the stitch plan contains one separate path segment per trimmed group:
+
+```bash
+cli-anything-inkstitch preview generate --project $PROJ --out /tmp/preview.svg
+# Count <path> elements under __inkstitch_stitch_plan__ — should equal number of trim groups
+```
+
+---
+
+## 9. Push/pull, compensation, and the fabric-stretch axis
 
 Stretchy fabrics (knits, performance wear, fleece) deserve special care. Symptoms of under-compensated stretchy designs:
 
@@ -231,7 +288,7 @@ Fixes (in order of strength):
 
 ---
 
-## 9. Stabilizer & substrate notes
+## 10. Stabilizer & substrate notes
 
 Stabilizer is the "second layer" hooped behind (sometimes in front of) the fabric to provide a stable surface to stitch onto. The CLI doesn't control stabilizer — it's a physical step at hooping time — but `document set-context --stabilizer ...` records the choice so subsequent decisions can account for it.
 
@@ -246,7 +303,7 @@ Stabilizer is the "second layer" hooped behind (sometimes in front of) the fabri
 
 ---
 
-## 10. Reading stitch-plan previews — visual failure modes
+## 11. Reading stitch-plan previews — visual failure modes
 
 When `preview generate` produces a stitch-plan SVG (or `preview stats` shows red flags), here's what the symptoms mean:
 
@@ -263,7 +320,7 @@ When `preview generate` produces a stitch-plan SVG (or `preview stats` shows red
 
 ---
 
-## 11. Small-detail survival guide
+## 12. Small-detail survival guide
 
 Anything below 5 mm in any dimension is a "small detail" — text, dots, fine outlines, eyes in a face. These need different treatment from regular elements.
 
@@ -282,7 +339,7 @@ Small auto-fills (< 5×5mm) over-stitch quickly:
 
 ---
 
-## 12. Recommended starting recipes
+## 13. Recommended starting recipes
 
 When in doubt, start here. Always sample-stitch first.
 
@@ -302,6 +359,9 @@ cli-anything-inkstitch params set --project $PROJ --id <id> \
     --fill-underlay true \
     --fill-underlay-angle "45 -45" \
     --staggers 4
+
+# Trim after each element except the last (see §8)
+# cli-anything-inkstitch params set --project $PROJ --id <all-but-last> --trim_after true
 
 # For each satin border
 cli-anything-inkstitch params set --project $PROJ --id <id> \
@@ -362,7 +422,7 @@ cli-anything-inkstitch params set --project $PROJ --id <id> \
 
 ---
 
-## 13. Common questions
+## 14. Common questions
 
 **Q: Should I always use `--fill-underlay`?**
 A: For any fill > 5 mm in any direction, yes. Skip only for tiny details where underlay would over-stitch.
@@ -389,7 +449,7 @@ Note: there's no per-element `inkstitch:thread_color` attribute. Inkstitch reads
 
 ---
 
-## 14. When this skill doesn't have the answer
+## 15. When this skill doesn't have the answer
 
 Test sew-out. Embroidery is empirical. Take a 5×5cm scrap of the actual fabric you'll use, hoop with the actual stabilizer, run the design at the actual machine speed, then look at it under good light. If it looks wrong, the symptom usually maps to one of the entries in §10 above. Iterate.
 
