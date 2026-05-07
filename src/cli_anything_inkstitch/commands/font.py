@@ -274,6 +274,7 @@ def _default_font_json(name: str, units_per_em: float, size_mm: float,
         "glyphs": [],
         "default_variant": "→",
         "text_direction": "ltr",
+        "baseline_y": 0,
     }
 
 
@@ -1452,6 +1453,7 @@ def font_import(ctx, name, source_dir, output_dir, pick_ext, size_mm, stitch_len
     kw_list = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else []
     font_data = _default_font_json(name, units_per_em, actual_size_mm, leading,
                                     description=description, keywords=kw_list)
+    font_data["baseline_y"] = baseline_svg_y
 
     font_root = font_tree.getroot()
     added = []
@@ -1681,8 +1683,13 @@ def font_preview(ctx, font_dir, chars):
 @click.option("--height", "img_height", type=int, default=160, show_default=True)
 @click.option("--guides/--no-guides", "show_guides", default=True, show_default=True,
               help="Draw vertical lines at each letter's advance boundary.")
+@click.option("--baseline/--no-baseline", "show_baseline", default=True, show_default=True,
+              help="Draw a red horizontal line at the baseline.")
+@click.option("--xheight/--no-xheight", "show_xheight", default=True, show_default=True,
+              help="Draw a green horizontal line at the x-height.")
 @click.pass_context
-def font_render_test(ctx, font_dir, phrase, output, img_width, img_height, show_guides):
+def font_render_test(ctx, font_dir, phrase, output, img_width, img_height, show_guides,
+                     show_baseline, show_xheight):
     """Render a phrase to a large PNG for visual advance-width inspection.
 
     Each letter's advance boundary is drawn as a faint vertical line so you
@@ -1772,6 +1779,22 @@ def font_render_test(ctx, font_dir, phrase, output, img_width, img_height, show_
                 for gy in range(H):
                     img[gy][gx] = guide_color
 
+    # Draw baseline and x-height lines (behind glyph strokes)
+    _baseline_y_val = font_data.get("baseline_y", 0)
+    if _baseline_y_val:
+        units_per_em_val = font_data.get("units_per_em", 400.0)
+        if show_baseline:
+            _, bl_py = to_px(min_x, _baseline_y_val)
+            if 0 <= bl_py < H:
+                for bx_px in range(W):
+                    img[bl_py][bx_px] = (220, 60, 60)
+        if show_xheight:
+            xh_y = _baseline_y_val - units_per_em_val * 0.52
+            _, xh_py = to_px(min_x, xh_y)
+            if 0 <= xh_py < H:
+                for bx_px in range(W):
+                    img[xh_py][bx_px] = (60, 180, 60)
+
     # Draw strokes
     ink = (30, 30, 30)
     for x0, y0, x1, y1 in segments:
@@ -1781,3 +1804,388 @@ def font_render_test(ctx, font_dir, phrase, output, img_width, img_height, show_
 
     _write_png(dest, img, W, H)
     emit(ctx, {"render_test": str(dest)})
+
+
+# ---------------------------------------------------------------------------
+# font validate
+# ---------------------------------------------------------------------------
+
+_REQUIRED_FIELDS = [
+    "name", "units_per_em", "leading", "size", "min_scale", "max_scale",
+    "horiz_adv_x_default", "horiz_adv_x_space", "horiz_adv_x", "glyphs",
+    "default_variant", "text_direction",
+]
+_RECOMMENDED_FIELDS = [
+    "description", "keywords", "auto_satin", "reversible", "sortable",
+    "letter_case", "default_glyph", "kerning_pairs",
+]
+
+
+def _validate_font(font_dir: Path) -> dict:
+    errors = []
+    warnings = []
+    fdir = font_dir
+
+    svg_path = fdir / "→.svg"
+    json_path = fdir / "font.json"
+    preview_path = fdir / "preview.png"
+    license_path = fdir / "LICENSE"
+
+    # Check required files
+    if not svg_path.exists():
+        errors.append({"code": "missing_svg", "message": "→.svg not found"})
+    if not json_path.exists():
+        errors.append({"code": "missing_json", "message": "font.json not found"})
+
+    # Warnings for optional files
+    if not preview_path.exists():
+        warnings.append({"code": "missing_preview", "message": "preview.png not found"})
+    if not license_path.exists():
+        warnings.append({"code": "missing_license", "message": "LICENSE file not found"})
+
+    # Can't do further checks if core files are missing
+    if not json_path.exists() or not svg_path.exists():
+        return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
+
+    # Load font.json
+    try:
+        with open(json_path, encoding="utf-8") as f:
+            font_data = json.load(f)
+    except Exception as e:
+        errors.append({"code": "missing_json", "message": f"font.json parse error: {e}"})
+        return {"valid": False, "errors": errors, "warnings": warnings}
+
+    # Check required fields
+    for field in _REQUIRED_FIELDS:
+        if field not in font_data:
+            errors.append({
+                "code": "missing_field",
+                "message": f"required field '{field}' absent from font.json",
+            })
+
+    # Check recommended fields
+    for field in _RECOMMENDED_FIELDS:
+        if field not in font_data:
+            warnings.append({
+                "code": "recommended_field",
+                "message": f"recommended field '{field}' absent from font.json",
+            })
+
+    # Load SVG
+    try:
+        parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
+        tree = etree.parse(str(svg_path), parser)
+        svg_root = tree.getroot()
+    except Exception as e:
+        errors.append({"code": "missing_svg", "message": f"→.svg parse error: {e}"})
+        return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
+
+    # Build set of GlyphLayer chars present in SVG
+    svg_glyph_chars: set[str] = set()
+    svg_glyph_layers: dict[str, object] = {}
+    for elem in svg_root.iter():
+        if not isinstance(elem.tag, str):
+            continue
+        label = elem.get(f"{{{INKSCAPE_NS}}}label", "")
+        if label.startswith("GlyphLayer-") and len(label) > len("GlyphLayer-"):
+            char = label[len("GlyphLayer-"):]
+            svg_glyph_chars.add(char)
+            svg_glyph_layers[char] = elem
+
+    glyphs_list = font_data.get("glyphs", [])
+
+    # Check glyph_layer_missing: char in glyphs[] but no matching layer
+    for char in glyphs_list:
+        if char not in svg_glyph_chars:
+            errors.append({
+                "code": "glyph_layer_missing",
+                "message": f"GlyphLayer-{char!r} not found in →.svg",
+            })
+
+    # Check orphan_layer: layer exists but char not in glyphs[]
+    glyphs_set = set(glyphs_list)
+    for char in svg_glyph_chars:
+        if char not in glyphs_set:
+            warnings.append({
+                "code": "orphan_layer",
+                "message": f"GlyphLayer-{char!r} exists in SVG but '{char}' is not in glyphs[]",
+            })
+
+    # Check missing_advance: char in glyphs[] but no entry in horiz_adv_x
+    horiz_adv = font_data.get("horiz_adv_x", {})
+    for char in glyphs_list:
+        if char not in horiz_adv:
+            warnings.append({
+                "code": "missing_advance",
+                "message": f"no horiz_adv_x entry for '{char}' (will use default)",
+            })
+
+    # Per-glyph layer checks: path_no_style, unsupported_feature
+    for char, layer_elem in svg_glyph_layers.items():
+        for node in layer_elem.iter():
+            if not isinstance(node.tag, str):
+                continue
+            local = etree.QName(node.tag).localname
+
+            # unsupported_feature: <use> element
+            if local == "use":
+                errors.append({
+                    "code": "unsupported_feature",
+                    "message": f"<use> (clone) element found in GlyphLayer-{char}",
+                })
+            # unsupported_feature: inkscape:path-effect attribute
+            if node.get(f"{{{INKSCAPE_NS}}}path-effect") is not None:
+                errors.append({
+                    "code": "unsupported_feature",
+                    "message": f"inkscape:path-effect found in GlyphLayer-{char}",
+                })
+            # unsupported_feature: gradients
+            if local in ("linearGradient", "radialGradient"):
+                errors.append({
+                    "code": "unsupported_feature",
+                    "message": f"<{local}> found in GlyphLayer-{char}",
+                })
+
+            # path_no_style: path with no fill or stroke
+            if local == "path":
+                style_attr = node.get("style", "")
+                fill_attr = node.get("fill")
+                stroke_attr = node.get("stroke")
+                has_fill_in_style = "fill" in style_attr
+                has_stroke_in_style = "stroke" in style_attr
+                has_style = has_fill_in_style or has_stroke_in_style
+                has_standalone = fill_attr is not None or stroke_attr is not None
+                if not has_style and not has_standalone:
+                    errors.append({
+                        "code": "path_no_style",
+                        "message": (
+                            f"path in GlyphLayer-{char} has neither fill nor stroke"
+                        ),
+                    })
+
+    return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
+
+
+@font.command("validate")
+@click.option("--font-dir", "font_dir", required=True, type=click.Path(),
+              help="Font directory to validate.")
+@click.pass_context
+def font_validate(ctx, font_dir):
+    """Check a font directory and return a structured validation report."""
+    fdir = Path(font_dir)
+    report = _validate_font(fdir)
+    emit(ctx, report)
+
+
+# ---------------------------------------------------------------------------
+# font adjust-advances
+# ---------------------------------------------------------------------------
+
+@font.command("adjust-advances")
+@click.option("--font-dir", "font_dir", required=True, type=click.Path())
+@click.option("--padding", "padding", type=float, default=0.0, show_default=True,
+              help="Add this value (SVG px) to every advance.")
+@click.option("--scale", "scale", type=float, default=1.0, show_default=True,
+              help="Multiply every advance by this factor (applied before padding).")
+@click.option("--chars", "chars_csv", default=None,
+              help="Comma-separated characters to adjust. If omitted, adjusts all.")
+@click.option("--dry-run", is_flag=True, help="Print what would change without writing.")
+@click.pass_context
+def font_adjust_advances(ctx, font_dir, padding, scale, chars_csv, dry_run):
+    """Adjust horizontal advance widths for glyphs in a font."""
+    fdir = Path(font_dir)
+    font_data = _load_font_json(fdir)
+
+    target_chars: set[str] | None = None
+    if chars_csv is not None:
+        target_chars = {c.strip() for c in chars_csv.split(",") if c.strip()}
+
+    horiz_adv = font_data.get("horiz_adv_x", {})
+    adjusted: dict[str, dict] = {}
+
+    new_horiz_adv = dict(horiz_adv)
+    for char, before_val in horiz_adv.items():
+        if target_chars is not None and char not in target_chars:
+            continue
+        after_val = round(float(before_val) * scale + padding, 1)
+        if after_val != before_val:
+            adjusted[char] = {"before": before_val, "after": after_val}
+        new_horiz_adv[char] = after_val
+
+    # Also adjust defaults when no specific chars selected
+    new_default = font_data.get("horiz_adv_x_default", 0.0)
+    new_space = font_data.get("horiz_adv_x_space", 0.0)
+    if target_chars is None:
+        before_default = font_data.get("horiz_adv_x_default", 0.0)
+        before_space = font_data.get("horiz_adv_x_space", 0.0)
+        new_default = round(float(before_default) * scale + padding, 1)
+        new_space = round(float(before_space) * scale + padding, 1)
+        if new_default != before_default:
+            adjusted["__default__"] = {"before": before_default, "after": new_default}
+        if new_space != before_space:
+            adjusted["__space__"] = {"before": before_space, "after": new_space}
+
+    if not dry_run:
+        font_data["horiz_adv_x"] = new_horiz_adv
+        if target_chars is None:
+            font_data["horiz_adv_x_default"] = new_default
+            font_data["horiz_adv_x_space"] = new_space
+        _save_font_json(fdir, font_data)
+
+    emit(ctx, {"adjusted": adjusted, "dry_run": dry_run})
+
+
+# ---------------------------------------------------------------------------
+# font set-field
+# ---------------------------------------------------------------------------
+
+_PROTECTED_FIELDS = {"horiz_adv_x", "glyphs"}
+
+
+@font.command("set-field")
+@click.option("--font-dir", "font_dir", required=True, type=click.Path())
+@click.option("--key", "key", required=True, help="Top-level key in font.json to set.")
+@click.option("--value", "value", required=True,
+              help="Value to set (parsed as JSON; falls back to plain string).")
+@click.pass_context
+def font_set_field(ctx, font_dir, key, value):
+    """Set a single top-level key in font.json."""
+    if key in _PROTECTED_FIELDS:
+        raise UserError(
+            f"'{key}' cannot be set via set-field (use a dedicated command)."
+        )
+    fdir = Path(font_dir)
+    font_data = _load_font_json(fdir)
+
+    # Parse value as JSON; fall back to plain string
+    try:
+        parsed_value = json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        parsed_value = value
+
+    before = font_data.get(key)
+    font_data[key] = parsed_value
+    _save_font_json(fdir, font_data)
+    emit(ctx, {"key": key, "before": before, "after": parsed_value})
+
+
+# ---------------------------------------------------------------------------
+# font import-bx-pack
+# ---------------------------------------------------------------------------
+
+def _extract_size_label(name: str) -> str | None:
+    """Extract a size label like '1 inch' or '1.5 inch' from a name."""
+    m = re.search(r'(\d+\.?\d*)\s*inch', name, flags=re.IGNORECASE)
+    if m:
+        return f"{m.group(1)} inch"
+    return None
+
+
+@font.command("import-bx-pack")
+@click.option("--bx-dir", "bx_dir", required=True, type=click.Path(exists=True),
+              help="Directory containing *.bx font files.")
+@click.option("--exp-dir", "exp_dir", required=True, type=click.Path(exists=True),
+              help="Directory containing per-size EXP subdirectories.")
+@click.option("--output-dir", "output_dir", required=True, type=click.Path(),
+              help="Root output directory; fonts are written to subdirs.")
+@click.option("--name-prefix", "name_prefix", default=None,
+              help="Font name prefix (default: derived from BX filename).")
+@click.option("--advance-padding", "advance_padding", type=float, default=0.0,
+              show_default=True, help="Extra SVG px added to every advance width.")
+@click.option("--dry-run", is_flag=True, help="Print matched pairs without importing.")
+@click.pass_context
+def font_import_bx_pack(ctx, bx_dir, exp_dir, output_dir, name_prefix, advance_padding, dry_run):
+    """Import a pack of BX font files (one per size) with matching EXP directories."""
+    bx_path = Path(bx_dir)
+    exp_path = Path(exp_dir)
+    out_path = Path(output_dir)
+
+    # Find all .bx files
+    bx_files: list[Path] = sorted(bx_path.glob("*.bx"))
+
+    # Build size → bx_file mapping
+    bx_by_size: dict[str, Path] = {}
+    derived_prefix: str | None = None
+    for bf in bx_files:
+        label = _extract_size_label(bf.stem)
+        if label:
+            bx_by_size[label] = bf
+            if derived_prefix is None and name_prefix is None:
+                # Strip the size part from the stem to get a base name
+                stripped = re.sub(r'\s*\d+\.?\d*\s*inch', '', bf.stem,
+                                  flags=re.IGNORECASE).strip()
+                # Replace hyphens/underscores with spaces and clean up
+                stripped = re.sub(r'[-_]+', ' ', stripped).strip()
+                derived_prefix = stripped
+
+    prefix = name_prefix if name_prefix is not None else (derived_prefix or "Font")
+
+    # Find all EXP subdirectories
+    exp_subdirs: dict[str, Path] = {}
+    for item in exp_path.iterdir():
+        if item.is_dir():
+            label = item.name.strip()
+            exp_subdirs[label] = item
+
+    # Match BX files with EXP subdirs by size label
+    matches: list[tuple[str, Path, Path]] = []
+    for label, bf in sorted(bx_by_size.items()):
+        if label in exp_subdirs:
+            matches.append((label, bf, exp_subdirs[label]))
+
+    if dry_run:
+        pairs = [
+            {"size": label, "bx_file": str(bf.name), "exp_dir": str(ed.name)}
+            for label, bf, ed in matches
+        ]
+        emit(ctx, {"matched": pairs, "dry_run": True})
+        return
+
+    results = []
+    for label, bf, ed in matches:
+        font_name = f"{prefix} {label}"
+        size_slug = label.replace(" ", "_")
+        font_out = out_path / size_slug
+
+        try:
+            # Use ctx.invoke to call font_import with appropriate arguments
+            import_result = ctx.invoke(
+                font_import,
+                name=font_name,
+                source_dir=str(ed),
+                output_dir=str(font_out),
+                pick_ext="exp",
+                size_mm=None,
+                stitch_length_mm=1.5,
+                baseline_from_bottom_mm=0.0,
+                skip_alts=True,
+                is_script=True,
+                bx_file=str(bf),
+                advance_padding=advance_padding,
+                description="",
+                keywords="script,handwriting,connected,running_stitch,latin",
+                dry_run=False,
+            )
+            # font_import calls emit(ctx, result) — we can't easily capture its output
+            # So we read font.json for the glyph count
+            fj = font_out / "font.json"
+            glyphs_added = 0
+            if fj.exists():
+                with open(fj, encoding="utf-8") as f:
+                    fd = json.load(f)
+                glyphs_added = len(fd.get("glyphs", []))
+            results.append({
+                "size": label,
+                "font_dir": str(font_out),
+                "glyphs_added": glyphs_added,
+                "errors": [],
+            })
+        except Exception as e:
+            results.append({
+                "size": label,
+                "font_dir": str(font_out),
+                "glyphs_added": 0,
+                "errors": [str(e)],
+            })
+
+    emit(ctx, {"results": results, "dry_run": False})
