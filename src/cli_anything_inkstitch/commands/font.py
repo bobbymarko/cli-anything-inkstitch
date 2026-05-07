@@ -823,6 +823,7 @@ def _emb_to_svg_paths(
         el = etree.Element(f"{{{SVG_NS}}}path")
         el.set("d", d)
         el.set("style", f"fill:none;stroke:{color};stroke-width:1")
+        el.set(f"{{{INKSTITCH_NS}}}color_sort_index", str(cidx))
         el.set(f"{{{INKSTITCH_NS}}}running_stitch_length_mm", str(stitch_length_mm))
         el.set(f"{{{INKSTITCH_NS}}}min_stitch_length_mm", "0.5")
         el.set(f"{{{INKSTITCH_NS}}}min_jump_stitch_length_mm", "3.0")
