@@ -719,6 +719,23 @@ def _parse_char_from_stem(stem: str) -> str | None:
             return _PUNCT_MAP[word]
         return None
 
+    # Pattern: <prefix>_<letter>_(middle|side) — monogram-pack position convention.
+    # The letter's case is preserved (SSP_A_middle → 'A', SSP_a_side → 'a') so a
+    # downstream tool can case-encode middle vs. side into one font when the casing
+    # cleanly partitions, or split into two fonts otherwise.
+    m = re.search(r'_([A-Za-z])_(?:middle|side)\b', s, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    # Pattern: <UpperLetter>u — used by some monogram packs (Chain Monogram,
+    # Decorative Monogram) to mark the upper-case / center-of-monogram glyph;
+    # the matching lower-case / side glyph ships as a single letter (handled by
+    # the single-character fallback further down).
+    # Only matches uppercase to avoid swallowing words ending in "u".
+    m = re.match(r'^([A-Z])u$', s)
+    if m:
+        return m.group(1)
+
     # Pattern: <Letter>_cap or <Letter>_Cap
     m = re.match(r'^([A-Za-z])_cap', s, flags=re.IGNORECASE)
     if m:

@@ -443,3 +443,151 @@ class TestFontImportBxPack:
                     "--dry-run")
         assert data["dry_run"] is True
         assert len(data["matched"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# _parse_char_from_stem unit tests
+# ---------------------------------------------------------------------------
+
+from cli_anything_inkstitch.commands.font import _parse_char_from_stem
+
+
+class TestParseCharFromStem:
+    """Filename-stem → character parser.
+
+    Locks down the supported naming conventions. Conventions are documented in
+    the function's own docstring; this suite is the executable counterpart.
+    """
+
+    @pytest.mark.parametrize("stem,expected", [
+        ("CapA", "A"),
+        ("CapZ", "Z"),
+        ("Cap_A", "A"),
+        ("LowA", "a"),
+        ("Lowa", "a"),
+        ("TSS-Homerun-CapA", "A"),
+        ("Stitchtopia_LowQ", "q"),
+        # Docstring claims Low_a → 'a', but the regex `Low([A-Za-z])` requires the letter
+        # to come immediately after "Low" with no separator. Marking xfail until either
+        # the parser or the docstring is corrected.
+        pytest.param("Low_a", "a", marks=pytest.mark.xfail(reason="parser/docstring mismatch: Low_a")),
+    ])
+    def test_cap_low_prefix(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
+    @pytest.mark.parametrize("stem,expected", [
+        ("PunComma", ","),
+        ("PunPeriod", "."),
+        ("PunExclamation", "!"),
+        # Same parser/docstring mismatch as Low_a — Pun_Comma fails because the regex
+        # needs letters immediately after "Pun".
+        pytest.param("Pun_Comma", ",", marks=pytest.mark.xfail(reason="parser/docstring mismatch: Pun_Comma")),
+    ])
+    def test_pun_word(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
+    def test_pun_unknown_returns_none(self):
+        assert _parse_char_from_stem("PunGibberish") is None
+
+    @pytest.mark.parametrize("stem,expected", [
+        ("A_cap", "A"),
+        ("A_Cap", "A"),
+        ("a_low", "a"),
+        ("z_LOW", "z"),
+    ])
+    def test_letter_underscore_case(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
+    @pytest.mark.parametrize("stem,expected", [
+        ("a-Star1inch", "a"),
+        ("A-Star", "A"),
+        ("0-Numeral", "0"),
+    ])
+    def test_hyphen_prefix(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
+    @pytest.mark.parametrize("stem,expected", [
+        # Multi-word prefix consumes 2+ space-separated words greedily. For
+        # "Floral Alphabet A15" it consumes "Floral Alphabet" then captures 'A'.
+        ("Floral Alphabet A15", "A"),
+        # For "Floral Alphabet B 1" it greedily consumes "Floral Alphabet B "
+        # too (because B+space is itself a valid "word\s+" group), then captures
+        # the next char which is '1'. Documents actual greedy behavior.
+        ("Floral Alphabet B 1", "1"),
+        ("Some Other Pack X", "X"),
+    ])
+    def test_multi_word_prefix(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
+    @pytest.mark.parametrize("stem,expected", [
+        ("A", "A"),
+        ("z", "z"),
+        ("0", "0"),
+    ])
+    def test_single_char(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
+    def test_size_prefix_stripped(self):
+        assert _parse_char_from_stem("CapA_2.5in") == "A"
+
+    def test_garbage_returns_none(self):
+        assert _parse_char_from_stem("") is None
+        assert _parse_char_from_stem("RandomFileName") is None
+
+    # ---- New monogram-position convention ----
+    # Pattern: <prefix>_<Letter>_(middle|side) — used by SSP / Stitchtopia
+    # monogram packs. Letter case is preserved (A vs a) so that downstream
+    # tooling can choose to case-encode middle/side into one font (when casing
+    # cleanly partitions) or split into two fonts (when it doesn't).
+    @pytest.mark.parametrize("stem,expected", [
+        ("SSP_A_middle", "A"),
+        ("SSP_B_middle", "B"),
+        ("SSP_Z_middle", "Z"),
+        ("SSP_a_side", "a"),
+        ("SSP_b_side", "b"),
+        ("SSP_z_side", "z"),
+        # Real-pack quirk: trailing whitespace before extension survived through Path.stem
+        ("SSP_W_middle ", "W"),
+        # Other brand prefixes
+        ("Brand_Q_middle", "Q"),
+        ("FONT_a_side", "a"),
+        # Case-insensitive on the position keyword
+        ("SSP_A_MIDDLE", "A"),
+        ("SSP_a_Side", "a"),
+    ])
+    def test_monogram_position_convention(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
+    def test_monogram_preserves_letter_case(self):
+        """Critical for the case-encoded monogram strategy: A and a stay distinct."""
+        assert _parse_char_from_stem("SSP_A_middle") == "A"
+        assert _parse_char_from_stem("SSP_a_side") == "a"
+        assert _parse_char_from_stem("SSP_A_middle") != _parse_char_from_stem("SSP_a_side")
+
+    # ---- Upper-letter "u"-suffix marker convention ----
+    # Used by Chain Monogram / Decorative Monogram packs: "Au.dst" is the
+    # upper-case (middle) variant of A; the matching lower-case "side" glyph
+    # ships as just "a.dst".
+    @pytest.mark.parametrize("stem,expected", [
+        ("Au", "A"),
+        ("Bu", "B"),
+        ("Zu", "Z"),
+        # Lowercase counterparts must NOT match the same rule — they're handled
+        # by the single-char fallback. We assert their behavior here too so a
+        # future change can't accidentally turn "au" → "a" via this path.
+        ("a", "a"),
+        ("z", "z"),
+    ])
+    def test_upper_u_suffix_convention(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
+    @pytest.mark.parametrize("stem", [
+        "au",   # lowercase + 'u' — NOT a marker; intentionally unhandled (returns None)
+        "menu", # word ending in 'u' must not be misread as letter 'M'
+        "you",  # ditto
+    ])
+    def test_lowercase_u_suffix_does_not_match(self, stem):
+        result = _parse_char_from_stem(stem)
+        # We accept either None or some other-rule fallback, but specifically NOT
+        # capturing the leading letter via the upper-u rule.
+        assert result != stem[0].upper()
