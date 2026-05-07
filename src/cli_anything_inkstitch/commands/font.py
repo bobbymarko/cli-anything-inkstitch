@@ -734,6 +734,14 @@ def _parse_char_from_stem(stem: str) -> str | None:
     if m:
         return m.group(1)
 
+    # Pattern: "Multi Word Prefix {char}..." e.g. "Floral Alphabet A15" → 'A',
+    # "Floral Alphabet 0 2 1" → '0', "Floral Alphabet 215 1" → '2'.
+    # Two or more title-case words precede the glyph character.
+    m = re.match(r'^(?:[A-Za-z][A-Za-z\-]*\s+){2,}([A-Za-z0-9])', s)
+    if m:
+        ch = m.group(1)
+        return ch if (ch.isupper() or ch.isdigit()) else ch.lower()
+
     # Pattern: "Floral Alphabet A15" → look for '<Word> <SingleLetter><digits>'
     m = re.search(r'\b([A-Za-z])\d', s)
     if m:
@@ -1264,8 +1272,9 @@ def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
 
 @font.command("import")
 @click.option("--name", required=True, help="Human-readable font name.")
-@click.option("--source-dir", "source_dir", required=True, type=click.Path(exists=True),
-              help="Directory containing per-letter embroidery files (DST, PES, etc.).")
+@click.option("--source-dir", "source_dirs", required=True, multiple=True, type=click.Path(exists=True),
+              help="Directory containing per-letter embroidery files (DST, PES, etc.). "
+                   "May be specified multiple times to combine several directories.")
 @click.option("--output-dir", "output_dir", required=True, type=click.Path(),
               help="Font output directory (will be created).")
 @click.option("--ext", "pick_ext", default=None,
@@ -1292,15 +1301,24 @@ def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
 @click.option("--advance-padding", "advance_padding", type=float, default=0.0, show_default=True,
               help="Extra SVG px added to every auto-computed advance width.  Use a small "
                    "positive value (e.g. 3–6) if connected-script letters feel too tight.")
+@click.option("--per-char", "per_char", default="all",
+              type=click.Choice(["all", "first", "last"], case_sensitive=False),
+              show_default=True,
+              help="When multiple source files resolve to the same character, "
+                   "'first' keeps the alphabetically first stem, 'last' keeps the last, "
+                   "'all' imports all (last one written wins).")
+@click.option("--sortable", "sortable", is_flag=True, default=False,
+              help="Mark the font as sortable (multicolor). Sets sortable=true in font.json "
+                   "so Inkstitch shows the color-sort controls in the lettering dialog.")
 @click.option("--description", "description", default="", show_default=False,
               help="Short description of the font written into font.json.")
 @click.option("--keywords", "keywords", default="", show_default=False,
               help="Comma-separated keywords for the font (e.g. 'script,handwriting,latin').")
 @click.option("--dry-run", is_flag=True, help="Parse filenames only; don't write anything.")
 @click.pass_context
-def font_import(ctx, name, source_dir, output_dir, pick_ext, size_mm, stitch_length_mm,
+def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_length_mm,
                 baseline_from_bottom_mm, skip_alts, is_script, bx_file, advance_padding,
-                description, keywords, dry_run):
+                per_char, sortable, description, keywords, dry_run):
     """Create an Inkstitch font by importing per-letter embroidery files (DST, PES, etc.).
 
     Each file in SOURCE_DIR is matched to a character via its filename. Supported
@@ -1318,7 +1336,7 @@ def font_import(ctx, name, source_dir, output_dir, pick_ext, size_mm, stitch_len
     """
     import pyembroidery
 
-    sdir = Path(source_dir)
+    sdirs = [Path(d) for d in source_dirs]
     odir = Path(output_dir)
 
     # --bx-file: extract per-letter connection Y from BX binary
@@ -1331,26 +1349,35 @@ def font_import(ctx, name, source_dir, output_dir, pick_ext, size_mm, stitch_len
             # baseline reference (e.g. -83 for Homerun 1in).
             bx_y_min_baseline = max(bx_offsets.values())  # e.g. -83.0
 
-    # Determine extension preference
+    # Determine extension preference (per first source dir, consistent across all)
     ext_filter = None
     if pick_ext:
         ext_filter = f".{pick_ext.lstrip('.').lower()}"
     else:
         # Prefer DST, then PES, then whatever's there
+        all_files_flat = [p for sd in sdirs for p in sd.iterdir() if p.is_file()]
         for preferred in [".dst", ".pes", ".vp3", ".jef"]:
-            if any(p.suffix.lower() == preferred for p in sdir.iterdir() if p.is_file()):
+            if any(p.suffix.lower() == preferred for p in all_files_flat):
                 ext_filter = preferred
                 break
 
-    files = _find_embroidery_files(sdir, ext_filter)
-    if not files:
-        raise UserError(f"no embroidery files found in {sdir} (ext filter: {ext_filter})")
+    # Collect files from all source dirs
+    all_raw_files: list[Path] = []
+    for sd in sdirs:
+        all_raw_files.extend(_find_embroidery_files(sd, ext_filter))
+    all_raw_files.sort(key=lambda p: p.name)
+
+    if not all_raw_files:
+        raise UserError(
+            f"no embroidery files found in {[str(d) for d in sdirs]} "
+            f"(ext filter: {ext_filter})"
+        )
 
     # Parse characters from filenames
     ALT_RE = re.compile(r'Alt[A-Za-z]', re.IGNORECASE)
-    parsed: list[tuple[str, Path]] = []
+    parsed_all: list[tuple[str, Path]] = []
     skipped: list[str] = []
-    for f in files:
+    for f in all_raw_files:
         stem = f.stem
         if skip_alts and ALT_RE.search(stem):
             skipped.append(stem)
@@ -1359,25 +1386,35 @@ def font_import(ctx, name, source_dir, output_dir, pick_ext, size_mm, stitch_len
         if char is None:
             skipped.append(stem)
             continue
-        parsed.append((char, f))
+        parsed_all.append((char, f))
 
-    if not parsed:
+    if not parsed_all:
         raise UserError(
-            f"could not parse any characters from filenames in {sdir}. "
+            f"could not parse any characters from filenames. "
             f"Try --dry-run to see what's being detected."
         )
 
-    # De-duplicate: keep first file per character (alphabetical sort already applied)
-    seen_chars: dict[str, Path] = {}
+    # --per-char: when multiple files map to the same character, pick first/last/all
+    from collections import defaultdict as _dd
+    char_variants: dict[str, list[Path]] = _dd(list)
+    for char, f in parsed_all:
+        char_variants[char].append(f)
+
+    parsed: list[tuple[str, Path]] = []
     duplicates: list[str] = []
-    deduped: list[tuple[str, Path]] = []
-    for char, f in parsed:
-        if char in seen_chars:
-            duplicates.append(f.name)
-        else:
-            seen_chars[char] = f
-            deduped.append((char, f))
-    parsed = deduped
+    for char in sorted(char_variants):
+        variants = sorted(char_variants[char], key=lambda p: p.name)
+        if per_char == "first":
+            chosen = variants[:1]
+            dropped = variants[1:]
+        elif per_char == "last":
+            chosen = variants[-1:]
+            dropped = variants[:-1]
+        else:  # "all" — last written wins; add all in order
+            chosen = variants
+            dropped = []
+        parsed.extend((char, f) for f in chosen)
+        duplicates.extend(f.name for f in dropped)
 
     if dry_run:
         result = {"parsed": [{"char": c, "file": str(f.name)} for c, f in parsed],
@@ -1454,6 +1491,8 @@ def font_import(ctx, name, source_dir, output_dir, pick_ext, size_mm, stitch_len
     font_data = _default_font_json(name, units_per_em, actual_size_mm, leading,
                                     description=description, keywords=kw_list)
     font_data["baseline_y"] = baseline_svg_y
+    if sortable:
+        font_data["sortable"] = True
 
     font_root = font_tree.getroot()
     added = []
