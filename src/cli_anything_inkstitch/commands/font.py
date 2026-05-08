@@ -1179,6 +1179,89 @@ def _generate_preview_png(
 # BX font file — per-letter connection-offset extraction
 # ---------------------------------------------------------------------------
 
+def _locate_bzip2_payload(raw: bytes, bx_path: "Path") -> bytes:
+    """Locate and decompress the bzip2 payload embedded in a BX font file.
+
+    Handles two stream variants found in the wild:
+
+    * **Full bzip2 stream** – starts with ``BZh[1-9]`` (intact header, e.g.
+      SSP-style packs where the stream appears somewhere inside the binary).
+    * **Stripped-header stream** – the 4-byte ``BZh9`` header is omitted and
+      only the bzip2 block marker ``0x314159265359`` (leading digits of π) is
+      present in the raw bytes.  Embrilliance TSS-Homerun files use this
+      variant; the header is reconstructed by prepending ``BZh9`` before
+      decompressing.
+
+    Trailing bytes after the bzip2 end-of-stream marker (common when the
+    stream is embedded mid-file) are tolerated via :class:`bz2.BZ2Decompressor`.
+
+    Returns the raw decompressed bytes.  Raises :class:`UserError` if no
+    usable stream can be found.
+    """
+    import bz2
+
+    if not raw:
+        raise UserError(f"BX file is empty: {bx_path}")
+
+    def _try_decompress(data: bytes) -> bytes | None:
+        """Decompress *data*, tolerating trailing garbage after stream end."""
+        # First try the straightforward path (works when data is a complete file).
+        try:
+            result = bz2.decompress(data)
+            if len(result) > 30:   # must produce something non-trivial
+                return result
+        except OSError:
+            pass
+        # BZ2Decompressor stops cleanly at end-of-stream and ignores trailing bytes.
+        try:
+            dec = bz2.BZ2Decompressor()
+            result = dec.decompress(data)
+            if len(result) > 30:
+                return result
+        except OSError:
+            pass
+        return None
+
+    # ---- Strategy A: intact BZh stream header ----------------------------
+    # Scan for "BZh" followed by a valid block-size digit ('1'–'9').
+    _BZH = b"BZh"
+    pos = 0
+    while True:
+        idx = raw.find(_BZH, pos)
+        if idx == -1:
+            break
+        if idx + 3 < len(raw) and 0x31 <= raw[idx + 3] <= 0x39:
+            result = _try_decompress(raw[idx:])
+            if result is not None:
+                return result
+        pos = idx + 1
+
+    # ---- Strategy B: stripped-header — prepend BZh to block magic --------
+    # BZip2 block-header magic = 0x314159265359 (first 48 bits of π).
+    # Embrilliance omits the 4-byte stream header; reconstruct it before
+    # decompressing.  Try block-size digits 9, 1, 5 in that order.
+    _BLOCK_MAGIC = bytes([0x31, 0x41, 0x59, 0x26, 0x53, 0x59])
+    pos = 0
+    last_exc: Exception | None = None
+    while True:
+        idx = raw.find(_BLOCK_MAGIC, pos)
+        if idx == -1:
+            break
+        for hdr in (b"BZh9", b"BZh1", b"BZh5"):
+            try:
+                result = _try_decompress(hdr + raw[idx:])
+                if result is not None:
+                    return result
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        pos = idx + 1
+
+    raise UserError(
+        f"No decompressible bzip2 stream found in BX file {bx_path}"
+        + (f": {last_exc}" if last_exc else "")
+    )
+
+
 def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
     """Return per-character y_min values (in BF units, 1 BF = 0.1 mm) from a BX font file.
 
@@ -1191,53 +1274,46 @@ def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
         ascender letters  (b, h, k …)  → y_min ≈ −117
         descender letters (g, p, y …)  → y_min ≈ −130
 
-    The BX file structure:
-        bytes  0 .. 13342  – plain-text header / metadata
-        bytes 13343 ..     – bzip2 bitstream missing the 4-byte "BZh9" magic
-                             (prepend it before decompressing with bz2.decompress)
+    **BX stream location** is handled by :func:`_locate_bzip2_payload`, which
+    scans for either a full ``BZh`` header or the bare bzip2 block magic.
+    This generalises over the fixed offset that only works for TSS-Homerun.
 
-    Each glyph block is located by searching the decompressed data for the
-    PES filename string ``TSS-Homerun1inLow{ch}.PES`` (lower-case) or
-    ``TSS-Homerun1inCap{Ch}.PES`` (upper-case) then scanning forward for the
-    10-byte prefix ``\\x05\\x00\\x00\\x00\\x13\\x00\\x18\\x00\\x00\\x00``
-    which marks  pre=5, tag=0x0013, vlen=24.
+    Each glyph block in the decompressed data is located by searching for a
+    PES filename string.  The following naming conventions are tried in order:
+
+    1. ``TSS-Homerun1inLow{ch}.PES`` / ``TSS-Homerun1inCap{Ch}.PES``
+       – Embrilliance / TSS commercial packs
+    2. ``{ch}.PES`` / ``{Ch}.PES``
+       – generic single-char name used by most other packs (SSP, etc.)
+
+    **Positional fallback**: if fewer than 10 glyphs are matched by filename
+    the function enumerates *all* ``BBOX_PREFIX`` occurrences in the
+    decompressed data and maps them in document order to ``a–z`` (26 hits) or
+    ``a–z A–Z`` (52 hits).  An unexpected count leaves those glyphs absent.
 
     Returns a mapping ``{'a': -83.0, 'b': -117.0, ...}`` for every glyph
     whose bbox could be found.  Missing glyphs are simply absent from the dict
     so callers can fall back to the global ``--baseline-from-bottom-mm``.
     """
-    import bz2
     import struct
 
     bx_path = Path(bx_path)
     raw = bx_path.read_bytes()
 
-    # The bzip2 stream starts after the plain header.  Find it by looking for
-    # the BZ block marker 0x314159265359 (pi digits) after stripping the
-    # first 4 header bytes that Embrilliance omits.
-    BX_BZIP_OFFSET = 13343
-    if len(raw) <= BX_BZIP_OFFSET:
-        raise UserError(f"BX file too short: {bx_path}")
-
-    bz_magic = b"BZh9"
-    compressed = bz_magic + raw[BX_BZIP_OFFSET:]
-    try:
-        bf_data = bz2.decompress(compressed)
-    except OSError as exc:
-        raise UserError(f"Failed to decompress BX font data: {exc}") from exc
+    bf_data = _locate_bzip2_payload(raw, bx_path)
 
     # 10-byte prefix that immediately precedes the 24-byte glyph bbox payload:
-    #   uint32-le pre = 5
-    #   uint16-le tag = 0x0013
-    #   uint32-le vlen = 24  (0x18)
-    BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,   # pre = 5
-                         0x13, 0x00,                # tag = 0x0013
-                         0x18, 0x00, 0x00, 0x00])   # vlen = 24
-
-    offsets: dict[str, float] = {}
+    #   uint32-le  pre  = 5
+    #   uint16-le  tag  = 0x0013
+    #   uint32-le  vlen = 24  (0x18)
+    BBOX_PREFIX = bytes([
+        0x05, 0x00, 0x00, 0x00,   # pre  = 5
+        0x13, 0x00,               # tag  = 0x0013
+        0x18, 0x00, 0x00, 0x00,   # vlen = 24
+    ])
 
     def _find_bbox_near(block_start: int) -> float | None:
-        """Search up to 1500 bytes from block_start for BBOX_PREFIX."""
+        """Search up to 1500 bytes from *block_start* for BBOX_PREFIX."""
         window = bf_data[block_start: block_start + 1500]
         idx = window.find(BBOX_PREFIX)
         if idx == -1:
@@ -1246,44 +1322,69 @@ def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
         if payload_start + 24 > len(window):
             return None
         floats = struct.unpack_from('<6f', window, payload_start)
-        # floats = [x_min, y_min, 0, x_max, y_max, 0]
-        return float(floats[1])   # y_min
+        # layout: [x_min, y_min, 0, x_max, y_max, 0]
+        return float(floats[1])
 
-    # Lowercase a–z
+    def _search_glyph(candidates: list[bytes]) -> float | None:
+        """Return y_min for the first filename pattern that hits in *bf_data*."""
+        for marker in candidates:
+            idx = bf_data.find(marker)
+            if idx == -1:
+                continue
+            block_start = idx + len(marker)
+            # Skip NUL / TAB separators between filename and block content.
+            while block_start < len(bf_data) and bf_data[block_start] in (0, 9):
+                block_start += 1
+            y = _find_bbox_near(block_start)
+            if y is not None:
+                return y
+        return None
+
+    offsets: dict[str, float] = {}
+
+    # ---- Lowercase a–z ----
     for ch in "abcdefghijklmnopqrstuvwxyz":
-        # TSS Homerun naming: e.g. "TSS-Homerun1inLowa.PES"
-        marker = f"TSS-Homerun1inLow{ch}.PES".encode()
-        idx = bf_data.find(marker)
-        if idx == -1:
-            # Try simple single-char name: "a.PES"
-            marker = f"{ch}.PES".encode()
-            idx = bf_data.find(marker)
-        if idx == -1:
-            continue
-        # Block starts just after the '\t' separator that follows the filename
-        block_start = idx + len(marker)
-        # Skip over the null terminator + '\t'
-        while block_start < len(bf_data) and bf_data[block_start] in (0, 9):
-            block_start += 1
-        y_min = _find_bbox_near(block_start)
-        if y_min is not None:
-            offsets[ch] = y_min
+        y = _search_glyph([
+            f"TSS-Homerun1inLow{ch}.PES".encode(),
+            f"{ch}.PES".encode(),
+        ])
+        if y is not None:
+            offsets[ch] = y
 
-    # Uppercase A–Z
+    # ---- Uppercase A–Z ----
     for Ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        marker = f"TSS-Homerun1inCap{Ch}.PES".encode()
-        idx = bf_data.find(marker)
-        if idx == -1:
-            marker = f"{Ch}.PES".encode()
-            idx = bf_data.find(marker)
-        if idx == -1:
-            continue
-        block_start = idx + len(marker)
-        while block_start < len(bf_data) and bf_data[block_start] in (0, 9):
-            block_start += 1
-        y_min = _find_bbox_near(block_start)
-        if y_min is not None:
-            offsets[Ch] = y_min
+        y = _search_glyph([
+            f"TSS-Homerun1inCap{Ch}.PES".encode(),
+            f"{Ch}.PES".encode(),
+        ])
+        if y is not None:
+            offsets[Ch] = y
+
+    # ---- Positional fallback -----------------------------------------------
+    # Activates when filename search found very few glyphs — the pack likely
+    # uses an unrecognised naming convention.  Walk every BBOX_PREFIX hit and
+    # assign in document order: 26 hits → a–z; 52 hits → a–z then A–Z.
+    if len(offsets) < 10:
+        all_hits: list[float] = []
+        pos = 0
+        while True:
+            idx = bf_data.find(BBOX_PREFIX, pos)
+            if idx == -1:
+                break
+            payload_start = idx + len(BBOX_PREFIX)
+            if payload_start + 24 <= len(bf_data):
+                floats = struct.unpack_from('<6f', bf_data, payload_start)
+                all_hits.append(float(floats[1]))
+            pos = idx + 1
+
+        order_26 = list("abcdefghijklmnopqrstuvwxyz")
+        order_52 = order_26 + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+        if len(all_hits) == 52:
+            offsets = {ch: y for ch, y in zip(order_52, all_hits)}
+        elif len(all_hits) == 26:
+            offsets = {ch: y for ch, y in zip(order_26, all_hits)}
+        # else: unexpected count → leave offsets empty so callers degrade gracefully
 
     return offsets
 

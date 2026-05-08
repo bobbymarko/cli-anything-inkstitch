@@ -591,3 +591,253 @@ class TestParseCharFromStem:
         # We accept either None or some other-rule fallback, but specifically NOT
         # capturing the leading letter via the upper-u rule.
         assert result != stem[0].upper()
+
+
+# ---------------------------------------------------------------------------
+# _extract_bx_connection_offsets unit tests
+# ---------------------------------------------------------------------------
+
+from cli_anything_inkstitch.commands.font import (
+    _extract_bx_connection_offsets,
+    _locate_bzip2_payload,
+)
+from cli_anything_inkstitch.errors import UserError
+
+
+# ---- Synthetic BX fixture builder -----------------------------------------
+
+def _make_bx_payload(glyphs: dict[str, float]) -> bytes:
+    """Build the *decompressed* BX payload for *glyphs* (char → y_min in BF units).
+
+    Each glyph record in the decompressed stream looks like::
+
+        {filename}\\x00\\t{padding}BBOX_PREFIX{24-byte-bbox}{padding}
+
+    The BBOX_PREFIX is ``\\x05\\x00\\x00\\x00\\x13\\x00\\x18\\x00\\x00\\x00``
+    (pre=5, tag=0x0013, vlen=24) and the 24-byte bbox encodes six LE floats
+    ``[x_min, y_min, 0.0, x_max, y_max, 0.0]``.
+    """
+    BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,
+                         0x13, 0x00,
+                         0x18, 0x00, 0x00, 0x00])
+    out = b""
+    for ch, y_min in glyphs.items():
+        filename = f"{ch}.PES".encode()
+        bbox = struct.pack('<6f', -10.0, y_min, 0.0, 10.0, abs(y_min) * 0.3, 0.0)
+        out += filename + b"\x00\t" + b"\x00" * 50 + BBOX_PREFIX + bbox + b"\x00" * 100
+    return out
+
+
+def _make_bx_file_stripped(glyphs: dict[str, float], header_size: int = 200) -> bytes:
+    """BX binary with *stripped* BZh header (TSS-Homerun style).
+
+    Layout: ``{header_size random bytes}{bzip2 block magic onwards}``
+    i.e. the 4-byte ``BZh9`` stream header is removed so only the block
+    marker ``0x314159265359`` remains in the raw bytes.
+    """
+    import bz2
+    payload = _make_bx_payload(glyphs)
+    compressed = bz2.compress(payload)
+    # bz2.compress → b"BZh9" + compressed blocks
+    assert compressed[:4] == b"BZh9", "unexpected bz2 header"
+    stream_body = compressed[4:]          # drop the 4-byte header
+    return b"\xff" * header_size + stream_body
+
+
+def _make_bx_file_full(glyphs: dict[str, float], header_size: int = 200) -> bytes:
+    """BX binary with a *full* intact BZh9 header embedded at *header_size*."""
+    import bz2
+    payload = _make_bx_payload(glyphs)
+    compressed = bz2.compress(payload)
+    return b"\xff" * header_size + compressed
+
+
+def _make_bx_file_tss(glyphs: dict[str, float], header_size: int = 200) -> bytes:
+    """BX binary using TSS-Homerun filename convention (``TSS-Homerun1inLow{ch}.PES``)."""
+    import bz2
+
+    BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,
+                         0x13, 0x00,
+                         0x18, 0x00, 0x00, 0x00])
+    out = b""
+    for ch, y_min in glyphs.items():
+        if ch.islower():
+            filename = f"TSS-Homerun1inLow{ch}.PES".encode()
+        else:
+            filename = f"TSS-Homerun1inCap{ch}.PES".encode()
+        bbox = struct.pack('<6f', -10.0, y_min, 0.0, 10.0, abs(y_min) * 0.3, 0.0)
+        out += filename + b"\x00\t" + b"\x00" * 50 + BBOX_PREFIX + bbox + b"\x00" * 100
+
+    compressed = bz2.compress(out)
+    assert compressed[:4] == b"BZh9"
+    return b"\xff" * header_size + compressed[4:]
+
+
+# ---- _locate_bzip2_payload tests ------------------------------------------
+
+class TestLocateBzip2Payload:
+    """Unit tests for the stream-locating helper."""
+
+    def test_stripped_header_found(self, tmp_path):
+        """Block-magic scan correctly locates a stripped-header stream."""
+        glyphs = {"a": -83.0, "b": -117.0}
+        raw = _make_bx_file_stripped(glyphs, header_size=300)
+        result = _locate_bzip2_payload(raw, tmp_path / "test.bx")
+        assert b"a.PES" in result
+        assert b"b.PES" in result
+
+    def test_full_header_found(self, tmp_path):
+        """Full-BZh stream embedded at non-zero offset is located."""
+        glyphs = {"x": -83.0}
+        raw = _make_bx_file_full(glyphs, header_size=512)
+        result = _locate_bzip2_payload(raw, tmp_path / "test.bx")
+        assert b"x.PES" in result
+
+    def test_stripped_header_at_start(self, tmp_path):
+        """Works even when the block magic sits at the very first byte."""
+        import bz2
+        glyphs = {"z": -83.0}
+        payload = _make_bx_payload(glyphs)
+        compressed = bz2.compress(payload)
+        raw = compressed[4:]   # stripped, at offset 0
+        result = _locate_bzip2_payload(raw, tmp_path / "test.bx")
+        assert b"z.PES" in result
+
+    def test_corrupt_raises_user_error(self, tmp_path):
+        """A file with no valid bzip2 stream raises UserError."""
+        raw = b"\x00\xff\xaa" * 500   # garbage
+        with pytest.raises(UserError, match="No decompressible bzip2 stream"):
+            _locate_bzip2_payload(raw, tmp_path / "bad.bx")
+
+    def test_empty_raises_user_error(self, tmp_path):
+        with pytest.raises(UserError, match="empty"):
+            _locate_bzip2_payload(b"", tmp_path / "empty.bx")
+
+
+# ---- _extract_bx_connection_offsets tests ---------------------------------
+
+class TestExtractBxConnectionOffsets:
+
+    # ---- Generic single-char filename convention (SSP style) --------
+
+    def test_generic_lowercase(self, tmp_path):
+        """Lowercase glyphs with ``{ch}.PES`` naming are extracted."""
+        glyphs = {ch: -83.0 for ch in "abcde"}
+        bx = tmp_path / "ssp.bx"
+        bx.write_bytes(_make_bx_file_full(glyphs))
+        offsets = _extract_bx_connection_offsets(bx)
+        for ch in "abcde":
+            assert ch in offsets
+            assert abs(offsets[ch] - (-83.0)) < 0.01
+
+    def test_generic_uppercase(self, tmp_path):
+        """Uppercase glyphs with ``{Ch}.PES`` naming are extracted."""
+        glyphs = {Ch: -117.0 for Ch in "ABCDE"}
+        bx = tmp_path / "ssp_caps.bx"
+        bx.write_bytes(_make_bx_file_full(glyphs))
+        offsets = _extract_bx_connection_offsets(bx)
+        for Ch in "ABCDE":
+            assert Ch in offsets
+            assert abs(offsets[Ch] - (-117.0)) < 0.01
+
+    def test_mixed_case_same_file(self, tmp_path):
+        """Lower and upper glyphs co-existing in one file."""
+        glyphs = {"a": -83.0, "A": -117.0, "g": -130.0, "G": -117.0}
+        bx = tmp_path / "mixed.bx"
+        bx.write_bytes(_make_bx_file_full(glyphs))
+        offsets = _extract_bx_connection_offsets(bx)
+        assert abs(offsets["a"] - (-83.0)) < 0.01
+        assert abs(offsets["A"] - (-117.0)) < 0.01
+        assert abs(offsets["g"] - (-130.0)) < 0.01
+
+    # ---- TSS-Homerun filename convention (stripped BZh header) ------
+
+    def test_tss_homerun_stripped_header(self, tmp_path):
+        """TSS-Homerun naming + stripped BZh header: both features work together."""
+        glyphs = {"a": -83.0, "b": -117.0, "A": -117.0}
+        bx = tmp_path / "tss.bx"
+        bx.write_bytes(_make_bx_file_tss(glyphs))
+        offsets = _extract_bx_connection_offsets(bx)
+        assert "a" in offsets
+        assert "b" in offsets
+        assert "A" in offsets
+        assert abs(offsets["a"] - (-83.0)) < 0.01
+
+    def test_tss_header_at_nonstandard_offset(self, tmp_path):
+        """Stream found even when it does NOT start at the old hard-coded offset 13343."""
+        glyphs = {"m": -83.0}
+        # Use an unusual header size — definitely not 13343
+        bx = tmp_path / "tss_offset.bx"
+        bx.write_bytes(_make_bx_file_tss(glyphs, header_size=999))
+        offsets = _extract_bx_connection_offsets(bx)
+        assert "m" in offsets
+
+    # ---- Positional fallback ----------------------------------------
+
+    def test_positional_fallback_26(self, tmp_path):
+        """26 anonymous BBOX hits are assigned to a–z in order."""
+        import bz2
+
+        BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,
+                             0x13, 0x00,
+                             0x18, 0x00, 0x00, 0x00])
+        # Build payload with NO filename markers — just raw BBOX blocks
+        y_values = [-80.0 - i for i in range(26)]
+        payload = b""
+        for y in y_values:
+            bbox = struct.pack('<6f', -10.0, y, 0.0, 10.0, 50.0, 0.0)
+            payload += b"\x00" * 200 + BBOX_PREFIX + bbox
+
+        compressed = bz2.compress(payload)
+        raw = b"\x00" * 100 + compressed   # full-header style
+
+        bx = tmp_path / "positional.bx"
+        bx.write_bytes(raw)
+        offsets = _extract_bx_connection_offsets(bx)
+
+        for i, ch in enumerate("abcdefghijklmnopqrstuvwxyz"):
+            assert ch in offsets, f"missing glyph '{ch}'"
+            assert abs(offsets[ch] - y_values[i]) < 0.01
+
+    def test_positional_fallback_52(self, tmp_path):
+        """52 anonymous BBOX hits are assigned to a–z then A–Z."""
+        import bz2
+
+        BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,
+                             0x13, 0x00,
+                             0x18, 0x00, 0x00, 0x00])
+        letters = list("abcdefghijklmnopqrstuvwxyz") + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        y_values = [-80.0 - i for i in range(52)]
+        payload = b""
+        for y in y_values:
+            bbox = struct.pack('<6f', -10.0, y, 0.0, 10.0, 50.0, 0.0)
+            payload += b"\x00" * 200 + BBOX_PREFIX + bbox
+
+        compressed = bz2.compress(payload)
+        raw = b"\x00" * 50 + compressed
+
+        bx = tmp_path / "positional52.bx"
+        bx.write_bytes(raw)
+        offsets = _extract_bx_connection_offsets(bx)
+
+        for i, ch in enumerate(letters):
+            assert ch in offsets
+            assert abs(offsets[ch] - y_values[i]) < 0.01
+
+    # ---- Error cases ------------------------------------------------
+
+    def test_corrupt_bx_raises_user_error(self, tmp_path):
+        """A file with no valid bzip2 stream raises UserError."""
+        bx = tmp_path / "corrupt.bx"
+        bx.write_bytes(b"\xde\xad\xbe\xef" * 200)
+        with pytest.raises(UserError):
+            _extract_bx_connection_offsets(bx)
+
+    def test_missing_glyphs_are_absent_not_error(self, tmp_path):
+        """Glyphs not present in the BX file are simply absent from the result."""
+        glyphs = {"a": -83.0}   # only 'a'
+        bx = tmp_path / "sparse.bx"
+        bx.write_bytes(_make_bx_file_full(glyphs))
+        offsets = _extract_bx_connection_offsets(bx)
+        assert "a" in offsets
+        assert "b" not in offsets   # graceful absence
