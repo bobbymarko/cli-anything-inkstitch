@@ -604,108 +604,93 @@ from cli_anything_inkstitch.commands.font import (
 from cli_anything_inkstitch.errors import UserError
 
 
-# ---- Synthetic BX fixture builder -----------------------------------------
+# ---- Synthetic BX fixture builder (proper IDMDTL + char-record structure) ----
 
-def _make_bx_payload(glyphs: dict[str, float]) -> bytes:
-    """Build the *decompressed* BX payload for *glyphs* (char → y_min in BF units).
+def _make_structural_bx(
+    glyphs: dict[str, float],
+    header_size: int = 200,
+    stripped: bool = True,
+) -> bytes:
+    """Build a minimal but structurally correct BX binary.
 
-    Each glyph record in the decompressed stream looks like::
+    Each glyph contributes two records in the decompressed payload:
 
-        {filename}\\x00\\t{padding}BBOX_PREFIX{24-byte-bbox}{padding}
+    1. **IDMDTL block** — geometry record with one attribute
+       (pre=5, tag=0x0013, vlen=24) encoding the bbox as six LE float32::
 
-    The BBOX_PREFIX is ``\\x05\\x00\\x00\\x00\\x13\\x00\\x18\\x00\\x00\\x00``
-    (pre=5, tag=0x0013, vlen=24) and the 24-byte bbox encodes six LE floats
-    ``[x_min, y_min, 0.0, x_max, y_max, 0.0]``.
-    """
-    BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,
-                         0x13, 0x00,
-                         0x18, 0x00, 0x00, 0x00])
-    out = b""
-    for ch, y_min in glyphs.items():
-        filename = f"{ch}.PES".encode()
-        bbox = struct.pack('<6f', -10.0, y_min, 0.0, 10.0, abs(y_min) * 0.3, 0.0)
-        out += filename + b"\x00\t" + b"\x00" * 50 + BBOX_PREFIX + bbox + b"\x00" * 100
-    return out
+           [x_min, y_min, 0, x_max, y_max, 0]
 
+    2. **Character record** — ``{filename}\\t\\x00`` followed by the first
+       attribute (pre=8, tag=0x0050, vlen=2, UTF-16LE char).
 
-def _make_bx_file_stripped(glyphs: dict[str, float], header_size: int = 200) -> bytes:
-    """BX binary with *stripped* BZh header (TSS-Homerun style).
-
-    Layout: ``{header_size random bytes}{bzip2 block magic onwards}``
-    i.e. the 4-byte ``BZh9`` stream header is removed so only the block
-    marker ``0x314159265359`` remains in the raw bytes.
+    This matches the real file structure extracted from TSS-Homerun,
+    NitkaBonitka, LD Signature, Stitchtopia, and Chinoiserie BX files.
     """
     import bz2
-    payload = _make_bx_payload(glyphs)
-    compressed = bz2.compress(payload)
-    # bz2.compress → b"BZh9" + compressed blocks
-    assert compressed[:4] == b"BZh9", "unexpected bz2 header"
-    stream_body = compressed[4:]          # drop the 4-byte header
-    return b"\xff" * header_size + stream_body
 
-
-def _make_bx_file_full(glyphs: dict[str, float], header_size: int = 200) -> bytes:
-    """BX binary with a *full* intact BZh9 header embedded at *header_size*."""
-    import bz2
-    payload = _make_bx_payload(glyphs)
-    compressed = bz2.compress(payload)
-    return b"\xff" * header_size + compressed
-
-
-def _make_bx_file_tss(glyphs: dict[str, float], header_size: int = 200) -> bytes:
-    """BX binary using TSS-Homerun filename convention (``TSS-Homerun1inLow{ch}.PES``)."""
-    import bz2
-
-    BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,
-                         0x13, 0x00,
-                         0x18, 0x00, 0x00, 0x00])
-    out = b""
+    payload = b""
     for ch, y_min in glyphs.items():
-        if ch.islower():
-            filename = f"TSS-Homerun1inLow{ch}.PES".encode()
-        else:
-            filename = f"TSS-Homerun1inCap{ch}.PES".encode()
-        bbox = struct.pack('<6f', -10.0, y_min, 0.0, 10.0, abs(y_min) * 0.3, 0.0)
-        out += filename + b"\x00\t" + b"\x00" * 50 + BBOX_PREFIX + bbox + b"\x00" * 100
+        # IDMDTL block: 1 entry, pre=5, vlen=24 bbox
+        bbox = struct.pack("<6f", -10.0, y_min, 0.0, 10.0, abs(y_min) * 0.3, 0.0)
+        idmdtl = (
+            b"IDMDTL"
+            + struct.pack("<I", 1)                       # 1 entry
+            + struct.pack("<IHI", 5, 0x0013, 24) + bbox  # pre=5, tag, vlen=24
+        )
+        # Character record: filename + \t\x00 + char attribute (pre=8, vlen=2)
+        filename = f"{ch}.JEF".encode()   # use .JEF so no PES-name-based shortcut
+        char_attr = struct.pack("<IHI", 8, 0x0050, 2) + struct.pack("<H", ord(ch))
+        char_rec = filename + b"\t\x00" + char_attr
 
-    compressed = bz2.compress(out)
+        payload += b"\x00" * 40 + idmdtl + b"\x00" * 80 + char_rec + b"\x00" * 40
+
+    compressed = bz2.compress(payload)
     assert compressed[:4] == b"BZh9"
-    return b"\xff" * header_size + compressed[4:]
+    body = compressed[4:] if stripped else compressed
+    return b"\xff" * header_size + body
+
+
+# ---- Minimal payload builder for _locate_bzip2_payload tests ---------------
+# (These helpers only need something decompressible — they don't need IDMDTL.)
+
+def _make_raw_payload(marker: bytes = b"HELLO") -> bytes:
+    """Return a small bzip2-compressed payload that contains *marker*."""
+    import bz2
+    return bz2.compress(b"\x00" * 50 + marker + b"\x00" * 50)
 
 
 # ---- _locate_bzip2_payload tests ------------------------------------------
 
 class TestLocateBzip2Payload:
-    """Unit tests for the stream-locating helper."""
+    """Unit tests for the bzip2-stream locating helper."""
 
     def test_stripped_header_found(self, tmp_path):
-        """Block-magic scan correctly locates a stripped-header stream."""
-        glyphs = {"a": -83.0, "b": -117.0}
-        raw = _make_bx_file_stripped(glyphs, header_size=300)
+        """Block-magic scan locates a stream whose BZh9 header was removed."""
+        import bz2
+        compressed = bz2.compress(b"HELLO" * 100)
+        raw = b"\xff" * 300 + compressed[4:]  # strip BZh9
         result = _locate_bzip2_payload(raw, tmp_path / "test.bx")
-        assert b"a.PES" in result
-        assert b"b.PES" in result
+        assert b"HELLO" in result
 
     def test_full_header_found(self, tmp_path):
-        """Full-BZh stream embedded at non-zero offset is located."""
-        glyphs = {"x": -83.0}
-        raw = _make_bx_file_full(glyphs, header_size=512)
+        """Full BZh stream embedded at a non-zero offset is located."""
+        import bz2
+        compressed = bz2.compress(b"WORLD" * 100)
+        raw = b"\xff" * 512 + compressed
         result = _locate_bzip2_payload(raw, tmp_path / "test.bx")
-        assert b"x.PES" in result
+        assert b"WORLD" in result
 
     def test_stripped_header_at_start(self, tmp_path):
-        """Works even when the block magic sits at the very first byte."""
+        """Works when the block magic is at byte 0 (no preceding header)."""
         import bz2
-        glyphs = {"z": -83.0}
-        payload = _make_bx_payload(glyphs)
-        compressed = bz2.compress(payload)
+        compressed = bz2.compress(b"ZERO" * 100)
         raw = compressed[4:]   # stripped, at offset 0
         result = _locate_bzip2_payload(raw, tmp_path / "test.bx")
-        assert b"z.PES" in result
+        assert b"ZERO" in result
 
     def test_corrupt_raises_user_error(self, tmp_path):
         """A file with no valid bzip2 stream raises UserError."""
-        raw = b"\x00\xff\xaa" * 500   # garbage
+        raw = b"\x00\xff\xaa" * 500
         with pytest.raises(UserError, match="No decompressible bzip2 stream"):
             _locate_bzip2_payload(raw, tmp_path / "bad.bx")
 
@@ -716,113 +701,158 @@ class TestLocateBzip2Payload:
 
 # ---- _extract_bx_connection_offsets tests ---------------------------------
 
+from cli_anything_inkstitch.commands.font import _parse_bx_glyphs
+
+BX_FIXTURES = Path(__file__).parent / "fixtures" / "bx"
+
+
 class TestExtractBxConnectionOffsets:
 
-    # ---- Generic single-char filename convention (SSP style) --------
+    # ---- Synthetic structural tests (format fidelity) ---------------
 
-    def test_generic_lowercase(self, tmp_path):
-        """Lowercase glyphs with ``{ch}.PES`` naming are extracted."""
-        glyphs = {ch: -83.0 for ch in "abcde"}
-        bx = tmp_path / "ssp.bx"
-        bx.write_bytes(_make_bx_file_full(glyphs))
-        offsets = _extract_bx_connection_offsets(bx)
-        for ch in "abcde":
-            assert ch in offsets
-            assert abs(offsets[ch] - (-83.0)) < 0.01
-
-    def test_generic_uppercase(self, tmp_path):
-        """Uppercase glyphs with ``{Ch}.PES`` naming are extracted."""
-        glyphs = {Ch: -117.0 for Ch in "ABCDE"}
-        bx = tmp_path / "ssp_caps.bx"
-        bx.write_bytes(_make_bx_file_full(glyphs))
-        offsets = _extract_bx_connection_offsets(bx)
-        for Ch in "ABCDE":
-            assert Ch in offsets
-            assert abs(offsets[Ch] - (-117.0)) < 0.01
-
-    def test_mixed_case_same_file(self, tmp_path):
-        """Lower and upper glyphs co-existing in one file."""
-        glyphs = {"a": -83.0, "A": -117.0, "g": -130.0, "G": -117.0}
-        bx = tmp_path / "mixed.bx"
-        bx.write_bytes(_make_bx_file_full(glyphs))
+    def test_structural_lowercase(self, tmp_path):
+        """Structural IDMDTL+char-record parser extracts lowercase glyphs."""
+        glyphs = {"a": -83.0, "g": -130.0, "b": -117.0}
+        bx = tmp_path / "s.bx"
+        bx.write_bytes(_make_structural_bx(glyphs, stripped=False))
         offsets = _extract_bx_connection_offsets(bx)
         assert abs(offsets["a"] - (-83.0)) < 0.01
+        assert abs(offsets["g"] - (-130.0)) < 0.01
+        assert abs(offsets["b"] - (-117.0)) < 0.01
+
+    def test_structural_uppercase(self, tmp_path):
+        """Structural parser handles uppercase glyphs."""
+        glyphs = {"A": -117.0, "Q": -135.0}
+        bx = tmp_path / "s.bx"
+        bx.write_bytes(_make_structural_bx(glyphs, stripped=False))
+        offsets = _extract_bx_connection_offsets(bx)
         assert abs(offsets["A"] - (-117.0)) < 0.01
+        assert abs(offsets["Q"] - (-135.0)) < 0.01
+
+    def test_structural_mixed_case(self, tmp_path):
+        """Lower and upper coexist correctly in one file."""
+        glyphs = {"a": -83.0, "A": -117.0, "g": -130.0}
+        bx = tmp_path / "s.bx"
+        bx.write_bytes(_make_structural_bx(glyphs, stripped=False))
+        offsets = _extract_bx_connection_offsets(bx)
+        assert offsets["a"] != offsets["A"]   # case is preserved
         assert abs(offsets["g"] - (-130.0)) < 0.01
 
-    # ---- TSS-Homerun filename convention (stripped BZh header) ------
-
-    def test_tss_homerun_stripped_header(self, tmp_path):
-        """TSS-Homerun naming + stripped BZh header: both features work together."""
-        glyphs = {"a": -83.0, "b": -117.0, "A": -117.0}
-        bx = tmp_path / "tss.bx"
-        bx.write_bytes(_make_bx_file_tss(glyphs))
-        offsets = _extract_bx_connection_offsets(bx)
-        assert "a" in offsets
-        assert "b" in offsets
-        assert "A" in offsets
-        assert abs(offsets["a"] - (-83.0)) < 0.01
-
-    def test_tss_header_at_nonstandard_offset(self, tmp_path):
-        """Stream found even when it does NOT start at the old hard-coded offset 13343."""
-        glyphs = {"m": -83.0}
-        # Use an unusual header size — definitely not 13343
-        bx = tmp_path / "tss_offset.bx"
-        bx.write_bytes(_make_bx_file_tss(glyphs, header_size=999))
+    def test_structural_stripped_bzip2_header(self, tmp_path):
+        """Stream is found even when the BZh9 header is stripped."""
+        glyphs = {"m": -83.0, "j": -160.0}
+        bx = tmp_path / "s.bx"
+        bx.write_bytes(_make_structural_bx(glyphs, stripped=True))
         offsets = _extract_bx_connection_offsets(bx)
         assert "m" in offsets
+        assert "j" in offsets
 
-    # ---- Positional fallback ----------------------------------------
-
-    def test_positional_fallback_26(self, tmp_path):
-        """26 anonymous BBOX hits are assigned to a–z in order."""
-        import bz2
-
-        BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,
-                             0x13, 0x00,
-                             0x18, 0x00, 0x00, 0x00])
-        # Build payload with NO filename markers — just raw BBOX blocks
-        y_values = [-80.0 - i for i in range(26)]
-        payload = b""
-        for y in y_values:
-            bbox = struct.pack('<6f', -10.0, y, 0.0, 10.0, 50.0, 0.0)
-            payload += b"\x00" * 200 + BBOX_PREFIX + bbox
-
-        compressed = bz2.compress(payload)
-        raw = b"\x00" * 100 + compressed   # full-header style
-
-        bx = tmp_path / "positional.bx"
-        bx.write_bytes(raw)
+    def test_structural_arbitrary_offset(self, tmp_path):
+        """bzip2 stream found at an offset far from 13343 (old hardcoded value)."""
+        glyphs = {"z": -83.0}
+        bx = tmp_path / "s.bx"
+        bx.write_bytes(_make_structural_bx(glyphs, header_size=27_000, stripped=True))
         offsets = _extract_bx_connection_offsets(bx)
+        assert "z" in offsets
 
-        for i, ch in enumerate("abcdefghijklmnopqrstuvwxyz"):
-            assert ch in offsets, f"missing glyph '{ch}'"
-            assert abs(offsets[ch] - y_values[i]) < 0.01
-
-    def test_positional_fallback_52(self, tmp_path):
-        """52 anonymous BBOX hits are assigned to a–z then A–Z."""
-        import bz2
-
-        BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,
-                             0x13, 0x00,
-                             0x18, 0x00, 0x00, 0x00])
-        letters = list("abcdefghijklmnopqrstuvwxyz") + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-        y_values = [-80.0 - i for i in range(52)]
-        payload = b""
-        for y in y_values:
-            bbox = struct.pack('<6f', -10.0, y, 0.0, 10.0, 50.0, 0.0)
-            payload += b"\x00" * 200 + BBOX_PREFIX + bbox
-
-        compressed = bz2.compress(payload)
-        raw = b"\x00" * 50 + compressed
-
-        bx = tmp_path / "positional52.bx"
-        bx.write_bytes(raw)
+    def test_structural_digits(self, tmp_path):
+        """Digit glyphs (0–9) are extracted correctly."""
+        glyphs = {str(d): -128.0 for d in range(10)}
+        bx = tmp_path / "s.bx"
+        bx.write_bytes(_make_structural_bx(glyphs, stripped=False))
         offsets = _extract_bx_connection_offsets(bx)
+        for d in "0123456789":
+            assert d in offsets
 
-        for i, ch in enumerate(letters):
-            assert ch in offsets
-            assert abs(offsets[ch] - y_values[i]) < 0.01
+    def test_structural_absent_glyphs_not_error(self, tmp_path):
+        """Characters missing from the file are absent, not errors."""
+        glyphs = {"a": -83.0}
+        bx = tmp_path / "s.bx"
+        bx.write_bytes(_make_structural_bx(glyphs, stripped=False))
+        offsets = _extract_bx_connection_offsets(bx)
+        assert "a" in offsets
+        assert "b" not in offsets
+
+    # ---- Real BX file tests (5 vendors) -----------------------------
+
+    @pytest.mark.skipif(
+        not (BX_FIXTURES / "tss_homerun_1in.bx").exists(),
+        reason="fixture not present",
+    )
+    def test_tss_homerun_1in(self):
+        """TSS-Homerun 1 inch: correct y_min ranges for three letter classes."""
+        offsets = _extract_bx_connection_offsets(BX_FIXTURES / "tss_homerun_1in.bx")
+        # x-height letters (a, c, e, m, n, …) → ~−83
+        for ch in "acemnorsuv":
+            assert ch in offsets, f"missing '{ch}'"
+            assert -100 < offsets[ch] < -70, f"'{ch}' y_min={offsets[ch]:.1f} out of range"
+        # ascender letters (b, h, k, l, …) → ~−117
+        for ch in "bhklt":
+            assert -135 < offsets[ch] < -100, f"'{ch}' y_min={offsets[ch]:.1f}"
+        # descender letters (g, p, y, …) → ~−130
+        for ch in "gpqy":
+            assert -150 < offsets[ch] < -115, f"'{ch}' y_min={offsets[ch]:.1f}"
+        # uppercase present
+        assert "A" in offsets
+        assert "Z" in offsets
+
+    @pytest.mark.skipif(
+        not (BX_FIXTURES / "nitkabonitka_bubble_1in.bx").exists(),
+        reason="fixture not present",
+    )
+    def test_nitkabonitka_bubble_1in(self):
+        """NitkaBonitka Bubble Font: caps + digits, all similar y_min (uniform cap height)."""
+        offsets = _extract_bx_connection_offsets(BX_FIXTURES / "nitkabonitka_bubble_1in.bx")
+        # Bubble font is all-caps with digits; all letters roughly same height
+        for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            assert ch in offsets, f"missing '{ch}'"
+            assert -135 < offsets[ch] < -115, f"'{ch}' y_min={offsets[ch]:.1f}"
+        for d in "0123456789":
+            assert d in offsets
+
+    @pytest.mark.skipif(
+        not (BX_FIXTURES / "ld_signature_1.bx").exists(),
+        reason="fixture not present",
+    )
+    def test_ld_signature_1(self):
+        """LD Signature: descender letters have more-negative y_min than baseline letters."""
+        offsets = _extract_bx_connection_offsets(BX_FIXTURES / "ld_signature_1.bx")
+        assert len(offsets) >= 26   # at least one case present
+        # Descenders should dip further below baseline than regular letters
+        descenders = {ch: offsets[ch] for ch in "gjpqy" if ch in offsets}
+        non_descenders = {ch: offsets[ch] for ch in "aceiou" if ch in offsets}
+        if descenders and non_descenders:
+            assert min(descenders.values()) < min(non_descenders.values()), (
+                "expected descenders to have more-negative y_min"
+            )
+
+    @pytest.mark.skipif(
+        not (BX_FIXTURES / "stitchtopia_romantic_1in.bx").exists(),
+        reason="fixture not present",
+    )
+    def test_stitchtopia_romantic_1in(self):
+        """Stitchtopia ActuallyRomantic: both cases present, wide glyph set."""
+        offsets = _extract_bx_connection_offsets(
+            BX_FIXTURES / "stitchtopia_romantic_1in.bx"
+        )
+        assert len(offsets) >= 52   # full a–z + A–Z at minimum
+        # Characters from both cases
+        assert any(ch.islower() for ch in offsets)
+        assert any(ch.isupper() for ch in offsets)
+
+    @pytest.mark.skipif(
+        not (BX_FIXTURES / "chinoiserie_3in.bx").exists(),
+        reason="fixture not present",
+    )
+    def test_chinoiserie_3in(self):
+        """Chinoiserie 3 inch: uppercase-only font, all 26 letters present."""
+        offsets = _extract_bx_connection_offsets(BX_FIXTURES / "chinoiserie_3in.bx")
+        for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            assert ch in offsets, f"missing '{ch}'"
+        # No lowercase (uppercase-only font)
+        assert not any(ch.islower() for ch in offsets)
+        # 3-inch font → y_min should be in the hundreds of BF units (larger font)
+        assert offsets["A"] < -200, f"expected deep y_min for 3in font, got {offsets['A']}"
 
     # ---- Error cases ------------------------------------------------
 
@@ -832,12 +862,3 @@ class TestExtractBxConnectionOffsets:
         bx.write_bytes(b"\xde\xad\xbe\xef" * 200)
         with pytest.raises(UserError):
             _extract_bx_connection_offsets(bx)
-
-    def test_missing_glyphs_are_absent_not_error(self, tmp_path):
-        """Glyphs not present in the BX file are simply absent from the result."""
-        glyphs = {"a": -83.0}   # only 'a'
-        bx = tmp_path / "sparse.bx"
-        bx.write_bytes(_make_bx_file_full(glyphs))
-        offsets = _extract_bx_connection_offsets(bx)
-        assert "a" in offsets
-        assert "b" not in offsets   # graceful absence

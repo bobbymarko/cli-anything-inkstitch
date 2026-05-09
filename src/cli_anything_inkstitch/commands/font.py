@@ -1262,131 +1262,135 @@ def _locate_bzip2_payload(raw: bytes, bx_path: "Path") -> bytes:
     )
 
 
+def _parse_bx_glyphs(bf_data: bytes) -> dict[str, float]:
+    """Parse per-glyph y_min values from decompressed BX font data.
+
+    Every Embrilliance BX file (regardless of vendor) decompresses to a binary
+    stream containing two types of records per glyph:
+
+    **IDMDTL block** — geometry record::
+
+        b"IDMDTL"  {n_entries: u32}  [{pre: u32}  {tag: u16}  {vlen: u32}  {data: vlen}] ...
+
+        The entry with ``pre == 5`` and ``vlen == 24`` encodes the glyph's
+        axis-aligned bounding box as six LE float32 values::
+
+            [x_min, y_min, 0, x_max, y_max, 0]
+
+        ``y_min`` is the connection-line Y in BF units (1 BF = 0.1 mm),
+        centred at 0 (origin = glyph baseline entry/exit point).  Typical:
+        x-height letters ≈ −83, ascenders ≈ −117, descenders ≈ −130.
+
+        The *tag* number varies by vendor (0x000c, 0x0011, 0x0012, 0x0013, …);
+        we match on ``pre=5, vlen=24`` which is consistent across all tested
+        packs (TSS-Homerun, NitkaBonitka, LD Signature, Stitchtopia, Chinoiserie).
+
+    **Character record** — attribute record immediately following the filename::
+
+        {filename}  b"\\t\\x00"  {pre=8: u32}  {tag: u16}  {vlen=2|3: u32}  {char_bytes}
+
+        The first attribute always has ``pre == 8`` and ``vlen ∈ {2, 3}``.
+        ``char_bytes[0]`` is the ASCII codepoint of the glyph.  The tag number
+        varies by vendor; we match structurally.
+
+    **Matching strategy**: after building an ordered list of all IDMDTL bbox
+    positions, each character record is paired with the nearest preceding IDMDTL
+    bbox via binary search.  This is order-stable even when glyph records
+    contain multiple IDMDTL blocks (e.g. a ``treeitem``/``original`` metadata
+    block followed by the actual geometry block).
+    """
+    import bisect
+    import struct
+
+    # ---- Step 1: collect all IDMDTL bbox offsets in file order ----
+    # Each entry is (file_offset_of_IDMDTL_marker, y_min_float).
+    idmdtl_bboxes: list[tuple[int, float]] = []
+    pos = 0
+    while True:
+        idx = bf_data.find(b"IDMDTL", pos)
+        if idx == -1:
+            break
+        after = idx + 6
+        if after + 4 > len(bf_data):
+            pos = idx + 1
+            continue
+        n_entries = struct.unpack_from("<I", bf_data, after)[0]
+        if n_entries == 0 or n_entries > 200:   # sanity guard
+            pos = idx + 1
+            continue
+        after += 4
+        for _ in range(n_entries):
+            if after + 10 > len(bf_data):
+                break
+            pre, tag, vlen = struct.unpack_from("<IHI", bf_data, after)
+            if vlen > 100_000:
+                break
+            # Bbox attribute: pre=5, vlen=24 (six LE float32).
+            if pre == 5 and vlen == 24 and after + 34 <= len(bf_data):
+                floats = struct.unpack_from("<6f", bf_data, after + 10)
+                idmdtl_bboxes.append((idx, float(floats[1])))  # y_min
+            after += 10 + vlen
+        pos = idx + 1
+
+    if not idmdtl_bboxes:
+        return {}
+
+    bbox_offsets = [t[0] for t in idmdtl_bboxes]  # sorted ascending (file order)
+
+    # ---- Step 2: find character records and pair with preceding bbox ----
+    # Character record separator is b'\t\x00' (TAB + NUL) after the filename.
+    # The immediately following attribute has pre=8, vlen∈{2,3}, data[0]=ASCII char.
+    offsets: dict[str, float] = {}
+    sep = b"\t\x00"
+    pos = 0
+    while True:
+        idx = bf_data.find(sep, pos)
+        if idx == -1:
+            break
+        pos = idx + 2   # advance past separator for next iteration
+
+        attr_pos = idx + 2
+        if attr_pos + 10 > len(bf_data):
+            continue
+        pre, _tag, vlen = struct.unpack_from("<IHI", bf_data, attr_pos)
+        if pre != 8 or vlen not in (2, 3):
+            continue
+        ch_bytes = bf_data[attr_pos + 10: attr_pos + 10 + vlen]
+        if not ch_bytes or not (0x20 <= ch_bytes[0] <= 0x7E):
+            continue   # not a printable ASCII glyph
+
+        ch = chr(ch_bytes[0])
+
+        # Binary-search for the nearest IDMDTL block *before* this record.
+        ins = bisect.bisect_right(bbox_offsets, idx)
+        if ins == 0:
+            continue   # no IDMDTL block precedes this record
+        _, y_min = idmdtl_bboxes[ins - 1]
+
+        if ch not in offsets:   # first occurrence wins
+            offsets[ch] = y_min
+
+    return offsets
+
+
 def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
     """Return per-character y_min values (in BF units, 1 BF = 0.1 mm) from a BX font file.
 
-    Embrilliance BX files embed per-letter IDMDTL blocks that each carry a
-    24-byte glyph bounding-box at internal tag 0x0013.  The y_min field of
-    that bbox equals the connection line Y for the letter (exit/entry Y in BF
-    units centred at 0).  Typical values:
+    Locates and decompresses the embedded bzip2 stream via
+    :func:`_locate_bzip2_payload`, then delegates to :func:`_parse_bx_glyphs`
+    for structure-based glyph extraction.
 
-        x-height letters  (a, c, e …)  → y_min ≈ −83
-        ascender letters  (b, h, k …)  → y_min ≈ −117
-        descender letters (g, p, y …)  → y_min ≈ −130
-
-    **BX stream location** is handled by :func:`_locate_bzip2_payload`, which
-    scans for either a full ``BZh`` header or the bare bzip2 block magic.
-    This generalises over the fixed offset that only works for TSS-Homerun.
-
-    Each glyph block in the decompressed data is located by searching for a
-    PES filename string.  The following naming conventions are tried in order:
-
-    1. ``TSS-Homerun1inLow{ch}.PES`` / ``TSS-Homerun1inCap{Ch}.PES``
-       – Embrilliance / TSS commercial packs
-    2. ``{ch}.PES`` / ``{Ch}.PES``
-       – generic single-char name used by most other packs (SSP, etc.)
-
-    **Positional fallback**: if fewer than 10 glyphs are matched by filename
-    the function enumerates *all* ``BBOX_PREFIX`` occurrences in the
-    decompressed data and maps them in document order to ``a–z`` (26 hits) or
-    ``a–z A–Z`` (52 hits).  An unexpected count leaves those glyphs absent.
+    Tested against five real-world vendors (TSS-Homerun, NitkaBonitka Bubble,
+    LD Signature, Stitchtopia, Chinoiserie) with no vendor-specific code paths.
 
     Returns a mapping ``{'a': -83.0, 'b': -117.0, ...}`` for every glyph
-    whose bbox could be found.  Missing glyphs are simply absent from the dict
-    so callers can fall back to the global ``--baseline-from-bottom-mm``.
+    whose bbox could be found.  Missing glyphs are simply absent so callers
+    can fall back to the global ``--baseline-from-bottom-mm``.
     """
-    import struct
-
     bx_path = Path(bx_path)
     raw = bx_path.read_bytes()
-
     bf_data = _locate_bzip2_payload(raw, bx_path)
-
-    # 10-byte prefix that immediately precedes the 24-byte glyph bbox payload:
-    #   uint32-le  pre  = 5
-    #   uint16-le  tag  = 0x0013
-    #   uint32-le  vlen = 24  (0x18)
-    BBOX_PREFIX = bytes([
-        0x05, 0x00, 0x00, 0x00,   # pre  = 5
-        0x13, 0x00,               # tag  = 0x0013
-        0x18, 0x00, 0x00, 0x00,   # vlen = 24
-    ])
-
-    def _find_bbox_near(block_start: int) -> float | None:
-        """Search up to 1500 bytes from *block_start* for BBOX_PREFIX."""
-        window = bf_data[block_start: block_start + 1500]
-        idx = window.find(BBOX_PREFIX)
-        if idx == -1:
-            return None
-        payload_start = idx + len(BBOX_PREFIX)
-        if payload_start + 24 > len(window):
-            return None
-        floats = struct.unpack_from('<6f', window, payload_start)
-        # layout: [x_min, y_min, 0, x_max, y_max, 0]
-        return float(floats[1])
-
-    def _search_glyph(candidates: list[bytes]) -> float | None:
-        """Return y_min for the first filename pattern that hits in *bf_data*."""
-        for marker in candidates:
-            idx = bf_data.find(marker)
-            if idx == -1:
-                continue
-            block_start = idx + len(marker)
-            # Skip NUL / TAB separators between filename and block content.
-            while block_start < len(bf_data) and bf_data[block_start] in (0, 9):
-                block_start += 1
-            y = _find_bbox_near(block_start)
-            if y is not None:
-                return y
-        return None
-
-    offsets: dict[str, float] = {}
-
-    # ---- Lowercase a–z ----
-    for ch in "abcdefghijklmnopqrstuvwxyz":
-        y = _search_glyph([
-            f"TSS-Homerun1inLow{ch}.PES".encode(),
-            f"{ch}.PES".encode(),
-        ])
-        if y is not None:
-            offsets[ch] = y
-
-    # ---- Uppercase A–Z ----
-    for Ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        y = _search_glyph([
-            f"TSS-Homerun1inCap{Ch}.PES".encode(),
-            f"{Ch}.PES".encode(),
-        ])
-        if y is not None:
-            offsets[Ch] = y
-
-    # ---- Positional fallback -----------------------------------------------
-    # Activates when filename search found very few glyphs — the pack likely
-    # uses an unrecognised naming convention.  Walk every BBOX_PREFIX hit and
-    # assign in document order: 26 hits → a–z; 52 hits → a–z then A–Z.
-    if len(offsets) < 10:
-        all_hits: list[float] = []
-        pos = 0
-        while True:
-            idx = bf_data.find(BBOX_PREFIX, pos)
-            if idx == -1:
-                break
-            payload_start = idx + len(BBOX_PREFIX)
-            if payload_start + 24 <= len(bf_data):
-                floats = struct.unpack_from('<6f', bf_data, payload_start)
-                all_hits.append(float(floats[1]))
-            pos = idx + 1
-
-        order_26 = list("abcdefghijklmnopqrstuvwxyz")
-        order_52 = order_26 + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
-        if len(all_hits) == 52:
-            offsets = {ch: y for ch, y in zip(order_52, all_hits)}
-        elif len(all_hits) == 26:
-            offsets = {ch: y for ch, y in zip(order_26, all_hits)}
-        # else: unexpected count → leave offsets empty so callers degrade gracefully
-
-    return offsets
+    return _parse_bx_glyphs(bf_data)
 
 
 @font.command("import")
