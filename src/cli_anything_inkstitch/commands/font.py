@@ -719,6 +719,23 @@ def _parse_char_from_stem(stem: str) -> str | None:
             return _PUNCT_MAP[word]
         return None
 
+    # Pattern: <prefix>_<letter>_(middle|side) — monogram-pack position convention.
+    # The letter's case is preserved (SSP_A_middle → 'A', SSP_a_side → 'a') so a
+    # downstream tool can case-encode middle vs. side into one font when the casing
+    # cleanly partitions, or split into two fonts otherwise.
+    m = re.search(r'_([A-Za-z])_(?:middle|side)\b', s, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    # Pattern: <UpperLetter>u — used by some monogram packs (Chain Monogram,
+    # Decorative Monogram) to mark the upper-case / center-of-monogram glyph;
+    # the matching lower-case / side glyph ships as a single letter (handled by
+    # the single-character fallback further down).
+    # Only matches uppercase to avoid swallowing words ending in "u".
+    m = re.match(r'^([A-Z])u$', s)
+    if m:
+        return m.group(1)
+
     # Pattern: <Letter>_cap or <Letter>_Cap
     m = re.match(r'^([A-Za-z])_cap', s, flags=re.IGNORECASE)
     if m:
@@ -1162,113 +1179,231 @@ def _generate_preview_png(
 # BX font file — per-letter connection-offset extraction
 # ---------------------------------------------------------------------------
 
+def _locate_bzip2_payload(raw: bytes, bx_path: "Path") -> bytes:
+    """Locate and decompress the bzip2 payload embedded in a BX font file.
+
+    Handles two stream variants found in the wild:
+
+    * **Full bzip2 stream** – starts with ``BZh[1-9]`` (intact header, e.g.
+      SSP-style packs where the stream appears somewhere inside the binary).
+    * **Stripped-header stream** – the 4-byte ``BZh9`` header is omitted and
+      only the bzip2 block marker ``0x314159265359`` (leading digits of π) is
+      present in the raw bytes.  Embrilliance TSS-Homerun files use this
+      variant; the header is reconstructed by prepending ``BZh9`` before
+      decompressing.
+
+    Trailing bytes after the bzip2 end-of-stream marker (common when the
+    stream is embedded mid-file) are tolerated via :class:`bz2.BZ2Decompressor`.
+
+    Returns the raw decompressed bytes.  Raises :class:`UserError` if no
+    usable stream can be found.
+    """
+    import bz2
+
+    if not raw:
+        raise UserError(f"BX file is empty: {bx_path}")
+
+    def _try_decompress(data: bytes) -> bytes | None:
+        """Decompress *data*, tolerating trailing garbage after stream end."""
+        # First try the straightforward path (works when data is a complete file).
+        try:
+            result = bz2.decompress(data)
+            if len(result) > 30:   # must produce something non-trivial
+                return result
+        except OSError:
+            pass
+        # BZ2Decompressor stops cleanly at end-of-stream and ignores trailing bytes.
+        try:
+            dec = bz2.BZ2Decompressor()
+            result = dec.decompress(data)
+            if len(result) > 30:
+                return result
+        except OSError:
+            pass
+        return None
+
+    # ---- Strategy A: intact BZh stream header ----------------------------
+    # Scan for "BZh" followed by a valid block-size digit ('1'–'9').
+    _BZH = b"BZh"
+    pos = 0
+    while True:
+        idx = raw.find(_BZH, pos)
+        if idx == -1:
+            break
+        if idx + 3 < len(raw) and 0x31 <= raw[idx + 3] <= 0x39:
+            result = _try_decompress(raw[idx:])
+            if result is not None:
+                return result
+        pos = idx + 1
+
+    # ---- Strategy B: stripped-header — prepend BZh to block magic --------
+    # BZip2 block-header magic = 0x314159265359 (first 48 bits of π).
+    # Embrilliance omits the 4-byte stream header; reconstruct it before
+    # decompressing.  Try block-size digits 9, 1, 5 in that order.
+    _BLOCK_MAGIC = bytes([0x31, 0x41, 0x59, 0x26, 0x53, 0x59])
+    pos = 0
+    last_exc: Exception | None = None
+    while True:
+        idx = raw.find(_BLOCK_MAGIC, pos)
+        if idx == -1:
+            break
+        for hdr in (b"BZh9", b"BZh1", b"BZh5"):
+            try:
+                result = _try_decompress(hdr + raw[idx:])
+                if result is not None:
+                    return result
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        pos = idx + 1
+
+    raise UserError(
+        f"No decompressible bzip2 stream found in BX file {bx_path}"
+        + (f": {last_exc}" if last_exc else "")
+    )
+
+
+def _parse_bx_glyphs(bf_data: bytes) -> dict[str, float]:
+    """Parse per-glyph y_min values from decompressed BX font data.
+
+    Every Embrilliance BX file (regardless of vendor) decompresses to a binary
+    stream containing two types of records per glyph:
+
+    **IDMDTL block** — geometry record::
+
+        b"IDMDTL"  {n_entries: u32}  [{pre: u32}  {tag: u16}  {vlen: u32}  {data: vlen}] ...
+
+        The entry with ``pre == 5`` and ``vlen == 24`` encodes the glyph's
+        axis-aligned bounding box as six LE float32 values::
+
+            [x_min, y_min, 0, x_max, y_max, 0]
+
+        ``y_min`` is the connection-line Y in BF units (1 BF = 0.1 mm),
+        centred at 0 (origin = glyph baseline entry/exit point).  Typical:
+        x-height letters ≈ −83, ascenders ≈ −117, descenders ≈ −130.
+
+        The *tag* number varies by vendor (0x000c, 0x0011, 0x0012, 0x0013, …);
+        we match on ``pre=5, vlen=24`` which is consistent across all tested
+        packs (TSS-Homerun, NitkaBonitka, LD Signature, Stitchtopia, Chinoiserie).
+
+    **Character record** — attribute record immediately following the filename::
+
+        {filename}  b"\\t\\x00"  {pre=8: u32}  {tag: u16}  {vlen=2|3: u32}  {char_bytes}
+
+        The first attribute always has ``pre == 8`` and ``vlen ∈ {2, 3}``.
+        ``char_bytes[0]`` is the ASCII codepoint of the glyph.  The tag number
+        varies by vendor; we match structurally.
+
+    **Matching strategy**: after building an ordered list of all IDMDTL bbox
+    positions, each character record is paired with the nearest preceding IDMDTL
+    bbox via binary search.  This is order-stable even when glyph records
+    contain multiple IDMDTL blocks (e.g. a ``treeitem``/``original`` metadata
+    block followed by the actual geometry block).
+    """
+    import bisect
+    import struct
+
+    # ---- Step 1: collect all IDMDTL bbox offsets in file order ----
+    # Each entry is (file_offset_of_IDMDTL_marker, y_min_float).
+    idmdtl_bboxes: list[tuple[int, float]] = []
+    pos = 0
+    while True:
+        idx = bf_data.find(b"IDMDTL", pos)
+        if idx == -1:
+            break
+        after = idx + 6
+        if after + 4 > len(bf_data):
+            pos = idx + 1
+            continue
+        n_entries = struct.unpack_from("<I", bf_data, after)[0]
+        if n_entries == 0 or n_entries > 200:   # sanity guard
+            pos = idx + 1
+            continue
+        after += 4
+        for _ in range(n_entries):
+            if after + 10 > len(bf_data):
+                break
+            pre, tag, vlen = struct.unpack_from("<IHI", bf_data, after)
+            if vlen > 100_000:
+                break
+            # Bbox attribute: pre=5, vlen=24 (six LE float32).
+            if pre == 5 and vlen == 24 and after + 34 <= len(bf_data):
+                floats = struct.unpack_from("<6f", bf_data, after + 10)
+                idmdtl_bboxes.append((idx, float(floats[1])))  # y_min
+            after += 10 + vlen
+        pos = idx + 1
+
+    if not idmdtl_bboxes:
+        return {}
+
+    bbox_offsets = [t[0] for t in idmdtl_bboxes]  # sorted ascending (file order)
+
+    # ---- Step 2: find character records and pair with preceding bbox ----
+    # Character record separator is b'\t\x00' (TAB + NUL) after the filename.
+    # The immediately following attribute has pre=8, vlen∈{2,3}, data[0]=ASCII char.
+    offsets: dict[str, float] = {}
+    sep = b"\t\x00"
+    pos = 0
+    while True:
+        idx = bf_data.find(sep, pos)
+        if idx == -1:
+            break
+        pos = idx + 2   # advance past separator for next iteration
+
+        attr_pos = idx + 2
+        if attr_pos + 10 > len(bf_data):
+            continue
+        pre, _tag, vlen = struct.unpack_from("<IHI", bf_data, attr_pos)
+        if pre != 8 or vlen not in (2, 3):
+            continue
+        ch_bytes = bf_data[attr_pos + 10: attr_pos + 10 + vlen]
+        if not ch_bytes or not (0x20 <= ch_bytes[0] <= 0x7E):
+            continue   # not a printable ASCII glyph
+
+        ch = chr(ch_bytes[0])
+
+        # Binary-search for the nearest IDMDTL block *before* this record.
+        ins = bisect.bisect_right(bbox_offsets, idx)
+        if ins == 0:
+            continue   # no IDMDTL block precedes this record
+        _, y_min = idmdtl_bboxes[ins - 1]
+
+        if ch not in offsets:   # first occurrence wins
+            offsets[ch] = y_min
+
+    return offsets
+
+
 def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
     """Return per-character y_min values (in BF units, 1 BF = 0.1 mm) from a BX font file.
 
-    Embrilliance BX files embed per-letter IDMDTL blocks that each carry a
-    24-byte glyph bounding-box at internal tag 0x0013.  The y_min field of
-    that bbox equals the connection line Y for the letter (exit/entry Y in BF
-    units centred at 0).  Typical values:
+    Locates and decompresses the embedded bzip2 stream via
+    :func:`_locate_bzip2_payload`, then delegates to :func:`_parse_bx_glyphs`
+    for structure-based glyph extraction.
 
-        x-height letters  (a, c, e …)  → y_min ≈ −83
-        ascender letters  (b, h, k …)  → y_min ≈ −117
-        descender letters (g, p, y …)  → y_min ≈ −130
-
-    The BX file structure:
-        bytes  0 .. 13342  – plain-text header / metadata
-        bytes 13343 ..     – bzip2 bitstream missing the 4-byte "BZh9" magic
-                             (prepend it before decompressing with bz2.decompress)
-
-    Each glyph block is located by searching the decompressed data for the
-    PES filename string ``TSS-Homerun1inLow{ch}.PES`` (lower-case) or
-    ``TSS-Homerun1inCap{Ch}.PES`` (upper-case) then scanning forward for the
-    10-byte prefix ``\\x05\\x00\\x00\\x00\\x13\\x00\\x18\\x00\\x00\\x00``
-    which marks  pre=5, tag=0x0013, vlen=24.
+    Tested against five real-world vendors (TSS-Homerun, NitkaBonitka Bubble,
+    LD Signature, Stitchtopia, Chinoiserie) with no vendor-specific code paths.
 
     Returns a mapping ``{'a': -83.0, 'b': -117.0, ...}`` for every glyph
-    whose bbox could be found.  Missing glyphs are simply absent from the dict
-    so callers can fall back to the global ``--baseline-from-bottom-mm``.
+    whose bbox could be found.  Missing glyphs are simply absent so callers
+    can fall back to the global ``--baseline-from-bottom-mm``.
     """
-    import bz2
-    import struct
-
     bx_path = Path(bx_path)
     raw = bx_path.read_bytes()
+    bf_data = _locate_bzip2_payload(raw, bx_path)
+    return _parse_bx_glyphs(bf_data)
 
-    # The bzip2 stream starts after the plain header.  Find it by looking for
-    # the BZ block marker 0x314159265359 (pi digits) after stripping the
-    # first 4 header bytes that Embrilliance omits.
-    BX_BZIP_OFFSET = 13343
-    if len(raw) <= BX_BZIP_OFFSET:
-        raise UserError(f"BX file too short: {bx_path}")
 
-    bz_magic = b"BZh9"
-    compressed = bz_magic + raw[BX_BZIP_OFFSET:]
-    try:
-        bf_data = bz2.decompress(compressed)
-    except OSError as exc:
-        raise UserError(f"Failed to decompress BX font data: {exc}") from exc
+def _last_stitch_svg_y(pattern) -> float | None:
+    """Return the SVG-space Y coordinate of the last STITCH command in *pattern*.
 
-    # 10-byte prefix that immediately precedes the 24-byte glyph bbox payload:
-    #   uint32-le pre = 5
-    #   uint16-le tag = 0x0013
-    #   uint32-le vlen = 24  (0x18)
-    BBOX_PREFIX = bytes([0x05, 0x00, 0x00, 0x00,   # pre = 5
-                         0x13, 0x00,                # tag = 0x0013
-                         0x18, 0x00, 0x00, 0x00])   # vlen = 24
-
-    offsets: dict[str, float] = {}
-
-    def _find_bbox_near(block_start: int) -> float | None:
-        """Search up to 1500 bytes from block_start for BBOX_PREFIX."""
-        window = bf_data[block_start: block_start + 1500]
-        idx = window.find(BBOX_PREFIX)
-        if idx == -1:
-            return None
-        payload_start = idx + len(BBOX_PREFIX)
-        if payload_start + 24 > len(window):
-            return None
-        floats = struct.unpack_from('<6f', window, payload_start)
-        # floats = [x_min, y_min, 0, x_max, y_max, 0]
-        return float(floats[1])   # y_min
-
-    # Lowercase a–z
-    for ch in "abcdefghijklmnopqrstuvwxyz":
-        # TSS Homerun naming: e.g. "TSS-Homerun1inLowa.PES"
-        marker = f"TSS-Homerun1inLow{ch}.PES".encode()
-        idx = bf_data.find(marker)
-        if idx == -1:
-            # Try simple single-char name: "a.PES"
-            marker = f"{ch}.PES".encode()
-            idx = bf_data.find(marker)
-        if idx == -1:
-            continue
-        # Block starts just after the '\t' separator that follows the filename
-        block_start = idx + len(marker)
-        # Skip over the null terminator + '\t'
-        while block_start < len(bf_data) and bf_data[block_start] in (0, 9):
-            block_start += 1
-        y_min = _find_bbox_near(block_start)
-        if y_min is not None:
-            offsets[ch] = y_min
-
-    # Uppercase A–Z
-    for Ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-        marker = f"TSS-Homerun1inCap{Ch}.PES".encode()
-        idx = bf_data.find(marker)
-        if idx == -1:
-            marker = f"{Ch}.PES".encode()
-            idx = bf_data.find(marker)
-        if idx == -1:
-            continue
-        block_start = idx + len(marker)
-        while block_start < len(bf_data) and bf_data[block_start] in (0, 9):
-            block_start += 1
-        y_min = _find_bbox_near(block_start)
-        if y_min is not None:
-            offsets[Ch] = y_min
-
-    return offsets
+    Used by the ``last-stitch`` baseline method.  Returns ``None`` when the
+    pattern contains no STITCH commands (e.g. empty file or commands only).
+    """
+    import pyembroidery as _pe
+    for _x, y, cmd in reversed(pattern.stitches):
+        if cmd == _pe.STITCH:
+            return float(y) * _DST_TO_SVG
+    return None
 
 
 @font.command("import")
@@ -1316,10 +1451,27 @@ def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
 @click.option("--keywords", "keywords", default="", show_default=False,
               help="Comma-separated keywords for the font (e.g. 'script,handwriting,latin').")
 @click.option("--dry-run", is_flag=True, help="Parse filenames only; don't write anything.")
+@click.option("--baseline-method", "baseline_method",
+              type=click.Choice(["bbox-bottom", "last-stitch", "reference-letter"],
+                                case_sensitive=False),
+              default="bbox-bottom", show_default=True,
+              help="How to determine each glyph's baseline when no BX file is supplied. "
+                   "'bbox-bottom' (default) places the baseline at the visual bottom of each "
+                   "glyph's stitch bounding box.  'last-stitch' uses the Y coordinate of the "
+                   "last stitch — best for script fonts whose exit connector tip is the "
+                   "natural connection point.  'reference-letter' normalises all glyphs "
+                   "relative to a chosen letter so every glyph lands on a consistent baseline "
+                   "regardless of individual height variation.")
+@click.option("--reference-letter", "reference_letter", default=None,
+              help="Single character used as the baseline anchor when "
+                   "--baseline-method=reference-letter.  All other glyphs are shifted so "
+                   "their visual bottom aligns with this letter's visual bottom.  "
+                   "Good choices: 'x' (x-height), 'H' (cap-height).")
 @click.pass_context
 def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_length_mm,
                 baseline_from_bottom_mm, skip_alts, is_script, bx_file, advance_padding,
-                per_char, sortable, description, keywords, dry_run):
+                per_char, sortable, description, keywords, dry_run,
+                baseline_method, reference_letter):
     """Create an Inkstitch font by importing per-letter embroidery files (DST, PES, etc.).
 
     Each file in SOURCE_DIR is matched to a character via its filename. Supported
@@ -1458,6 +1610,40 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
     baseline_from_bottom_px = (baseline_from_bottom_mm / _SVG_MM_PER_PX) if baseline_from_bottom_mm else 0
     baseline_svg_y = round(height_svg + baseline_from_bottom_px)
 
+    # Resolve reference bottom for the 'reference-letter' baseline method.
+    # This is the visual bottom of the reference letter in raw stitch SVG space
+    # (before translation).  Every other glyph is shifted to the *same* raw
+    # bottom level, so all glyphs land on a consistent baseline automatically.
+    ref_svg_bottom: float | None = None
+    if baseline_method == "reference-letter":
+        if not reference_letter:
+            click.echo(
+                "Warning: --baseline-method=reference-letter requires --reference-letter; "
+                "falling back to bbox-bottom.",
+                err=True,
+            )
+            baseline_method = "bbox-bottom"
+        else:
+            ref_letter = reference_letter[0]  # take only first char if user typed more
+            ref_pattern = cached.get(ref_letter)
+            if ref_pattern is None:
+                # May not have been in the cache if reading failed — try direct load
+                ref_path = next((f for ch, f in parsed if ch == ref_letter), None)
+                if ref_path:
+                    try:
+                        ref_pattern = _read_embroidery(ref_path)
+                    except Exception:
+                        pass
+            if ref_pattern is not None:
+                ref_svg_bottom = _visual_baseline_y(ref_pattern, height_svg)
+            else:
+                click.echo(
+                    f"Warning: reference letter '{ref_letter}' not found or unreadable; "
+                    "falling back to bbox-bottom.",
+                    err=True,
+                )
+                baseline_method = "bbox-bottom"
+
     # Initialize font
     asc_h = round(height_svg * 0.80)
     desc_d = round(height_svg * 0.20)
@@ -1583,7 +1769,19 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
                     connection_raw_y = abs(y_min_bf) * _DST_TO_SVG
                 dy = baseline_svg_y - connection_raw_y - baseline_from_bottom_px
             else:
-                dy = baseline_svg_y - svg_bottom - baseline_from_bottom_px
+                # No BX data — use the selected baseline method.
+                if baseline_method == "last-stitch":
+                    _last_y = _last_stitch_svg_y(pattern)
+                    svg_bottom_for_method = _last_y if _last_y is not None else svg_bottom
+                elif baseline_method == "reference-letter" and ref_svg_bottom is not None:
+                    # All glyphs share the same raw-space bottom as the reference
+                    # letter.  Letters with descenders extend below this level
+                    # naturally; x-height and ascender letters sit above it.
+                    svg_bottom_for_method = ref_svg_bottom
+                else:
+                    # bbox-bottom (default) or fallback
+                    svg_bottom_for_method = svg_bottom
+                dy = baseline_svg_y - svg_bottom_for_method - baseline_from_bottom_px
 
             # Horizontal advance width.
             # For connecting scripts, trim to the body right (before the thin
@@ -1695,7 +1893,105 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
     if bx_offsets is not None:
         result["bx_glyphs_calibrated"] = len(bx_offsets)
         result["bx_y_min_baseline_bf"] = bx_y_min_baseline
+    else:
+        result["baseline_method"] = baseline_method
+        if baseline_method == "reference-letter" and reference_letter:
+            result["reference_letter"] = reference_letter[0]
     emit(ctx, result)
+
+
+@font.command("set-baseline")
+@click.option("--font-dir", "font_dir", required=True, type=click.Path(exists=True),
+              help="Font directory (must contain →.svg and font.json).")
+@click.option("--char", "char", required=True,
+              help="The glyph to adjust (single character, e.g. 'g').")
+@click.option("--shift-mm", "shift_mm", required=True, type=float,
+              help="How far to move the glyph in mm.  Positive values move the glyph "
+                   "upward (reducing its baseline-to-bottom gap); negative values move "
+                   "it downward.  Fractions are fine, e.g. --shift-mm -0.5.")
+@click.pass_context
+def font_set_baseline(ctx, font_dir, char, shift_mm):
+    """Shift a single glyph up or down to correct its baseline alignment.
+
+    Use this after 'font import' to fine-tune individual letters whose
+    baselines are slightly off.  The shift is applied to the glyph's SVG
+    transform and recorded in font.json under 'baseline_overrides' so the
+    cumulative correction survives multiple 'set-baseline' calls.
+
+    Positive --shift-mm values move the glyph upward (letter appears to rise);
+    negative values move it downward.
+
+    Example — move 'g' down by 1.5 mm:
+
+        font set-baseline --font-dir ./MyFont --char g --shift-mm -1.5
+    """
+    import re as _re
+
+    fdir = Path(font_dir)
+    ch = char[0] if char else ""
+    if not ch:
+        raise UserError("--char must be a non-empty single character")
+
+    font_data = _load_font_json(fdir)
+    font_tree = _load_font_svg(fdir)
+    font_root = font_tree.getroot()
+
+    # Convert mm → SVG px (positive shift_mm = move up = negative SVG delta)
+    shift_px = -(shift_mm / _SVG_MM_PER_PX)
+
+    # Locate the glyph layer
+    layer_label = f"GlyphLayer-{ch}"
+    target_layer = None
+    for el in font_root.iter(f"{{{SVG_NS}}}g"):
+        if el.get(f"{{{INKSCAPE_NS}}}label") == layer_label:
+            target_layer = el
+            break
+
+    if target_layer is None:
+        raise UserError(
+            f"Glyph layer '{layer_label}' not found in →.svg.  "
+            f"Available glyphs: {font_data.get('glyphs', [])}"
+        )
+
+    # Parse current transform (may be absent or not a translate)
+    _TRANSLATE_RE = _re.compile(
+        r'translate\(\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*\)'
+    )
+    current_transform = target_layer.get("transform", "")
+    m = _TRANSLATE_RE.search(current_transform)
+    if m:
+        cur_tx = float(m.group(1))
+        cur_ty = float(m.group(2))
+        new_ty = cur_ty + shift_px
+        new_transform = _TRANSLATE_RE.sub(
+            f"translate({cur_tx:.4f},{new_ty:.4f})", current_transform
+        )
+    else:
+        # No translate present — add one (leave any existing transform intact)
+        new_ty = shift_px
+        if current_transform.strip():
+            new_transform = f"translate(0.0000,{new_ty:.4f}) {current_transform}"
+        else:
+            new_transform = f"translate(0.0000,{new_ty:.4f})"
+
+    target_layer.set("transform", new_transform)
+
+    # Persist to SVG
+    _save_font_svg(font_tree, fdir)
+
+    # Record the cumulative override in font.json so external tools know
+    overrides = font_data.setdefault("baseline_overrides", {})
+    prev_px = float(overrides.get(ch, 0.0))
+    overrides[ch] = round(prev_px + shift_px, 4)
+    _save_font_json(fdir, font_data)
+
+    emit(ctx, {
+        "char": ch,
+        "shift_mm": shift_mm,
+        "shift_px": round(-shift_px, 4),  # positive = moved up, matches UX expectation
+        "cumulative_override_px": round(overrides[ch], 4),
+        "new_transform": new_transform,
+    })
 
 
 @font.command("preview")

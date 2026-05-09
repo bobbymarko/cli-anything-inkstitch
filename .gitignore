@@ -16,3 +16,5 @@ build/
 /CLI-Anything/
 /cli-anything-inkstitch-brief.md
 /sample-svgs/
+# Commercial BX font fixtures — licensed files, never commit
+tests/fixtures/bx/*.bx

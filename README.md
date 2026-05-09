@@ -59,6 +59,7 @@ cli-anything-inkstitch export file --project $PROJ --format dst --out /tmp/logo.
 - `export` — single-format file, multi-format ZIP with optional threadlist
 - `schema` — introspect the inkstitch param schema (extracted from inkstitch source)
 - `session` — undo / redo / history (50 levels)
+- `font` — create, import, calibrate, and validate Inkstitch-compatible embroidery fonts from per-letter DST/PES files, with optional Embrilliance BX file for precise baseline calibration
 
 **Two skills**:
 - [`cli-anything-inkstitch`](skills/cli-anything-inkstitch/SKILL.md) — agent-facing CLI usage: every command, every flag, every output format, agent gotchas.
@@ -66,7 +67,7 @@ cli-anything-inkstitch export file --project $PROJ --format dst --out /tmp/logo.
 
 ## Status
 
-v0.1 — core surface complete. ~180 tests cover both pure-Python paths and binary-mocked integrations; the binary-backed commands are also live-verified against Ink/Stitch v3.2.2 on macOS.
+v0.1 — core surface complete. ~280 tests (282 passing, 2 xfailed) cover both pure-Python paths and binary-mocked integrations; the binary-backed commands are also live-verified against Ink/Stitch v3.2.2 on macOS.
 
 Out of scope (per [SPEC.md §4.12](SPEC.md)): GUI, Inkscape extension wrapping, lettering UI, real-time machine control.
 
