@@ -1393,6 +1393,19 @@ def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
     return _parse_bx_glyphs(bf_data)
 
 
+def _last_stitch_svg_y(pattern) -> float | None:
+    """Return the SVG-space Y coordinate of the last STITCH command in *pattern*.
+
+    Used by the ``last-stitch`` baseline method.  Returns ``None`` when the
+    pattern contains no STITCH commands (e.g. empty file or commands only).
+    """
+    import pyembroidery as _pe
+    for _x, y, cmd in reversed(pattern.stitches):
+        if cmd == _pe.STITCH:
+            return float(y) * _DST_TO_SVG
+    return None
+
+
 @font.command("import")
 @click.option("--name", required=True, help="Human-readable font name.")
 @click.option("--source-dir", "source_dirs", required=True, multiple=True, type=click.Path(exists=True),
@@ -1438,10 +1451,27 @@ def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
 @click.option("--keywords", "keywords", default="", show_default=False,
               help="Comma-separated keywords for the font (e.g. 'script,handwriting,latin').")
 @click.option("--dry-run", is_flag=True, help="Parse filenames only; don't write anything.")
+@click.option("--baseline-method", "baseline_method",
+              type=click.Choice(["bbox-bottom", "last-stitch", "reference-letter"],
+                                case_sensitive=False),
+              default="bbox-bottom", show_default=True,
+              help="How to determine each glyph's baseline when no BX file is supplied. "
+                   "'bbox-bottom' (default) places the baseline at the visual bottom of each "
+                   "glyph's stitch bounding box.  'last-stitch' uses the Y coordinate of the "
+                   "last stitch — best for script fonts whose exit connector tip is the "
+                   "natural connection point.  'reference-letter' normalises all glyphs "
+                   "relative to a chosen letter so every glyph lands on a consistent baseline "
+                   "regardless of individual height variation.")
+@click.option("--reference-letter", "reference_letter", default=None,
+              help="Single character used as the baseline anchor when "
+                   "--baseline-method=reference-letter.  All other glyphs are shifted so "
+                   "their visual bottom aligns with this letter's visual bottom.  "
+                   "Good choices: 'x' (x-height), 'H' (cap-height).")
 @click.pass_context
 def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_length_mm,
                 baseline_from_bottom_mm, skip_alts, is_script, bx_file, advance_padding,
-                per_char, sortable, description, keywords, dry_run):
+                per_char, sortable, description, keywords, dry_run,
+                baseline_method, reference_letter):
     """Create an Inkstitch font by importing per-letter embroidery files (DST, PES, etc.).
 
     Each file in SOURCE_DIR is matched to a character via its filename. Supported
@@ -1580,6 +1610,40 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
     baseline_from_bottom_px = (baseline_from_bottom_mm / _SVG_MM_PER_PX) if baseline_from_bottom_mm else 0
     baseline_svg_y = round(height_svg + baseline_from_bottom_px)
 
+    # Resolve reference bottom for the 'reference-letter' baseline method.
+    # This is the visual bottom of the reference letter in raw stitch SVG space
+    # (before translation).  Every other glyph is shifted to the *same* raw
+    # bottom level, so all glyphs land on a consistent baseline automatically.
+    ref_svg_bottom: float | None = None
+    if baseline_method == "reference-letter":
+        if not reference_letter:
+            click.echo(
+                "Warning: --baseline-method=reference-letter requires --reference-letter; "
+                "falling back to bbox-bottom.",
+                err=True,
+            )
+            baseline_method = "bbox-bottom"
+        else:
+            ref_letter = reference_letter[0]  # take only first char if user typed more
+            ref_pattern = cached.get(ref_letter)
+            if ref_pattern is None:
+                # May not have been in the cache if reading failed — try direct load
+                ref_path = next((f for ch, f in parsed if ch == ref_letter), None)
+                if ref_path:
+                    try:
+                        ref_pattern = _read_embroidery(ref_path)
+                    except Exception:
+                        pass
+            if ref_pattern is not None:
+                ref_svg_bottom = _visual_baseline_y(ref_pattern, height_svg)
+            else:
+                click.echo(
+                    f"Warning: reference letter '{ref_letter}' not found or unreadable; "
+                    "falling back to bbox-bottom.",
+                    err=True,
+                )
+                baseline_method = "bbox-bottom"
+
     # Initialize font
     asc_h = round(height_svg * 0.80)
     desc_d = round(height_svg * 0.20)
@@ -1705,7 +1769,19 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
                     connection_raw_y = abs(y_min_bf) * _DST_TO_SVG
                 dy = baseline_svg_y - connection_raw_y - baseline_from_bottom_px
             else:
-                dy = baseline_svg_y - svg_bottom - baseline_from_bottom_px
+                # No BX data — use the selected baseline method.
+                if baseline_method == "last-stitch":
+                    _last_y = _last_stitch_svg_y(pattern)
+                    svg_bottom_for_method = _last_y if _last_y is not None else svg_bottom
+                elif baseline_method == "reference-letter" and ref_svg_bottom is not None:
+                    # All glyphs share the same raw-space bottom as the reference
+                    # letter.  Letters with descenders extend below this level
+                    # naturally; x-height and ascender letters sit above it.
+                    svg_bottom_for_method = ref_svg_bottom
+                else:
+                    # bbox-bottom (default) or fallback
+                    svg_bottom_for_method = svg_bottom
+                dy = baseline_svg_y - svg_bottom_for_method - baseline_from_bottom_px
 
             # Horizontal advance width.
             # For connecting scripts, trim to the body right (before the thin
@@ -1817,7 +1893,105 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
     if bx_offsets is not None:
         result["bx_glyphs_calibrated"] = len(bx_offsets)
         result["bx_y_min_baseline_bf"] = bx_y_min_baseline
+    else:
+        result["baseline_method"] = baseline_method
+        if baseline_method == "reference-letter" and reference_letter:
+            result["reference_letter"] = reference_letter[0]
     emit(ctx, result)
+
+
+@font.command("set-baseline")
+@click.option("--font-dir", "font_dir", required=True, type=click.Path(exists=True),
+              help="Font directory (must contain →.svg and font.json).")
+@click.option("--char", "char", required=True,
+              help="The glyph to adjust (single character, e.g. 'g').")
+@click.option("--shift-mm", "shift_mm", required=True, type=float,
+              help="How far to move the glyph in mm.  Positive values move the glyph "
+                   "upward (reducing its baseline-to-bottom gap); negative values move "
+                   "it downward.  Fractions are fine, e.g. --shift-mm -0.5.")
+@click.pass_context
+def font_set_baseline(ctx, font_dir, char, shift_mm):
+    """Shift a single glyph up or down to correct its baseline alignment.
+
+    Use this after 'font import' to fine-tune individual letters whose
+    baselines are slightly off.  The shift is applied to the glyph's SVG
+    transform and recorded in font.json under 'baseline_overrides' so the
+    cumulative correction survives multiple 'set-baseline' calls.
+
+    Positive --shift-mm values move the glyph upward (letter appears to rise);
+    negative values move it downward.
+
+    Example — move 'g' down by 1.5 mm:
+
+        font set-baseline --font-dir ./MyFont --char g --shift-mm -1.5
+    """
+    import re as _re
+
+    fdir = Path(font_dir)
+    ch = char[0] if char else ""
+    if not ch:
+        raise UserError("--char must be a non-empty single character")
+
+    font_data = _load_font_json(fdir)
+    font_tree = _load_font_svg(fdir)
+    font_root = font_tree.getroot()
+
+    # Convert mm → SVG px (positive shift_mm = move up = negative SVG delta)
+    shift_px = -(shift_mm / _SVG_MM_PER_PX)
+
+    # Locate the glyph layer
+    layer_label = f"GlyphLayer-{ch}"
+    target_layer = None
+    for el in font_root.iter(f"{{{SVG_NS}}}g"):
+        if el.get(f"{{{INKSCAPE_NS}}}label") == layer_label:
+            target_layer = el
+            break
+
+    if target_layer is None:
+        raise UserError(
+            f"Glyph layer '{layer_label}' not found in →.svg.  "
+            f"Available glyphs: {font_data.get('glyphs', [])}"
+        )
+
+    # Parse current transform (may be absent or not a translate)
+    _TRANSLATE_RE = _re.compile(
+        r'translate\(\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*\)'
+    )
+    current_transform = target_layer.get("transform", "")
+    m = _TRANSLATE_RE.search(current_transform)
+    if m:
+        cur_tx = float(m.group(1))
+        cur_ty = float(m.group(2))
+        new_ty = cur_ty + shift_px
+        new_transform = _TRANSLATE_RE.sub(
+            f"translate({cur_tx:.4f},{new_ty:.4f})", current_transform
+        )
+    else:
+        # No translate present — add one (leave any existing transform intact)
+        new_ty = shift_px
+        if current_transform.strip():
+            new_transform = f"translate(0.0000,{new_ty:.4f}) {current_transform}"
+        else:
+            new_transform = f"translate(0.0000,{new_ty:.4f})"
+
+    target_layer.set("transform", new_transform)
+
+    # Persist to SVG
+    _save_font_svg(font_tree, fdir)
+
+    # Record the cumulative override in font.json so external tools know
+    overrides = font_data.setdefault("baseline_overrides", {})
+    prev_px = float(overrides.get(ch, 0.0))
+    overrides[ch] = round(prev_px + shift_px, 4)
+    _save_font_json(fdir, font_data)
+
+    emit(ctx, {
+        "char": ch,
+        "shift_mm": shift_mm,
+        "shift_px": round(-shift_px, 4),  # positive = moved up, matches UX expectation
+        "cumulative_override_px": round(overrides[ch], 4),
+        "new_transform": new_transform,
+    })
 
 
 @font.command("preview")

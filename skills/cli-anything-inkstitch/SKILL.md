@@ -204,6 +204,27 @@ Undo / redo / history. Up to 50 levels.
 | `reset` | Drop history; current SVG state is retained |
 
 
+### Font
+
+Create, import, calibrate, and validate Inkstitch-compatible embroidery font packages from per-letter embroidery files (DST, PES, EXP, etc.). Font commands operate on a font directory directly — no `--project` file required.
+
+| Command | Description |
+|---------|-------------|
+| `init` | Create a blank font directory (SVG skeleton + `font.json`) |
+| `import` | Import per-letter embroidery files into a complete font package. Key options: `--bx-file` for Embrilliance BX baseline extraction; `--baseline-method bbox-bottom\|last-stitch\|reference-letter`; `--script` for connecting script fonts; `--advance-padding` for extra spacing. |
+| `set-baseline` | Per-glyph vertical shift correction (`--char`, `--shift-mm`). Positive = up. Cumulative; stored in `font.json["baseline_overrides"]`. |
+| `add-glyph` | Add or replace a single glyph from an embroidery file |
+| `remove-glyph` | Remove a glyph from an existing font |
+| `set-advance` | Manually override the advance width for a specific glyph |
+| `set-field` | Set any `font.json` field (name, description, keywords, etc.) |
+| `info` | Show font metadata, glyph inventory, and advance widths |
+| `preview` | Regenerate `preview.png` for an existing font |
+| `render-test` | Render a phrase to a large PNG for visual advance-width inspection |
+| `validate` | Validate all glyphs: missing characters, advance widths, SVG structure |
+| `adjust-advances` | Bulk-adjust advance widths (`--add`, `--subtract`, `--min`, `--max`) |
+| `import-bx-pack` | Batch-import a whole Embrilliance BX pack + matching EXP/DST directories |
+
+
 ## Examples
 
 
@@ -418,6 +439,57 @@ When using this CLI programmatically:
 16. **Use `preview generate --raster` to close the visual loop**: pass `--raster` (and optionally `--dpi 200` for higher resolution) to also produce a PNG alongside the SVG. The PNG can be loaded as an image by your agent harness, so you can visually evaluate stitch density, color order, and shape coverage rather than reasoning blind about the SVG XML. Inkscape 1.0+ must be installed (`INKSCAPE_BINARY` env var or default install path).
 
 
+### Import an embroidery font
+
+**Happy path — with a BX file (most accurate baselines):**
+
+```bash
+font import \
+    --name "My Script" \
+    --source-dir /path/to/dst-files/ \
+    --output-dir /path/to/fonts/my-script/ \
+    --bx-file /path/to/MyScript.bx \
+    --script \
+    --advance-padding 8
+```
+
+The BX file is a metadata-only Embrilliance installer package. The parser extracts per-glyph `y_min` values (baseline/connection-point Y in 0.1 mm units) for exact placement without any vendor-specific handling.
+
+**Without a BX file — using a reference letter for baseline alignment:**
+
+```bash
+font import \
+    --name "My Block" \
+    --source-dir /path/to/dst-files/ \
+    --output-dir /path/to/fonts/my-block/ \
+    --baseline-method reference-letter \
+    --reference-letter H \
+    --advance-padding 6
+```
+
+**Per-glyph correction after import:**
+
+If a specific glyph sits too high or low after import, adjust it in place without re-importing:
+
+```bash
+font set-baseline --font-dir /path/to/fonts/my-block/ --char g --shift-mm -0.8
+# Shifts 'g' descender down by 0.8 mm. Cumulative; safe to call multiple times.
+```
+
+**Visual advance-width inspection:**
+
+```bash
+font render-test \
+    --font-dir /path/to/fonts/my-block/ \
+    --text "Hamming distance" \
+    --out /tmp/render-test.png \
+    --dpi 150
+# Open the PNG and look for gaps or collisions between letters.
+# Adjust with: font set-advance --char <c> --advance <px>
+# Or bulk-pad: font adjust-advances --add 4 --min 20
+```
+
+
 ## More Information
 
 - Full technical specification: See `SPEC.md` in the package
@@ -428,4 +500,4 @@ When using this CLI programmatically:
 
 ## Version
 
-1.0.0
+0.1.3

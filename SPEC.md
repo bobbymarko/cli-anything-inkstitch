@@ -427,6 +427,69 @@ History depth is **50** (matches inkscape skill).
 
 ---
 
+### 2.14 `font` group
+
+Creates, imports, calibrates, and validates Inkstitch-compatible embroidery font packages from per-letter embroidery files (DST, PES, EXP, etc.). Font packages are a directory containing a per-glyph SVG file and a `font.json` metadata file consumed by Ink/Stitch's lettering extension.
+
+```
+font init           --name <name>  --output-dir <abs>  [--size-mm <f>]
+font import         --name <name>  --source-dir <abs>  --output-dir <abs>
+                    [--bx-file <abs>]
+                    [--baseline-method bbox-bottom|last-stitch|reference-letter]
+                    [--reference-letter <char>]
+                    [--script]
+                    [--advance-padding <f>]
+                    [--baseline-from-bottom-mm <f>]
+                    [--size-mm <f>]  [--stitch-length-mm <f>]
+                    [--skip-alts]  [--per-char]  [--sortable]
+                    [--description <str>]  [--keywords <str>]
+                    [--dry-run]
+font set-baseline   --font-dir <abs>  --char <char>  --shift-mm <f>
+font add-glyph      --font-dir <abs>  --char <char>  --file <abs>
+font remove-glyph   --font-dir <abs>  --char <char>
+font set-advance    --font-dir <abs>  --char <char>  --advance <f>
+font set-field      --font-dir <abs>  --field <name>  --value <str>
+font info           --font-dir <abs>  [--json]
+font preview        --font-dir <abs>  [--out <abs>]
+font render-test    --font-dir <abs>  --text <phrase>  --out <abs>  [--dpi <n>]
+font validate       --font-dir <abs>  [--json]
+font adjust-advances --font-dir <abs>
+                    [--add <f>]  [--subtract <f>]  [--min <f>]  [--max <f>]
+font import-bx-pack --bx-dir <abs>  --exp-dir <abs>  --output-dir <abs>
+                    [--dry-run]  [plus all font import options]
+```
+
+**Subcommands:**
+
+| Subcommand | Purpose |
+|---|---|
+| `init` | Create a blank Inkstitch font directory (→ SVG skeleton + `font.json`) |
+| `import` | Import per-letter embroidery files into a complete font package |
+| `set-baseline` | Per-glyph vertical shift correction; cumulative, stored in `font.json["baseline_overrides"]`. Positive `--shift-mm` moves the glyph up. |
+| `add-glyph` | Add or replace a single glyph from an embroidery file |
+| `remove-glyph` | Remove a glyph from an existing font |
+| `set-advance` | Manually override the advance width for a specific glyph |
+| `set-field` | Set any `font.json` top-level field (name, description, keywords, etc.) |
+| `info` | Show font metadata, glyph inventory, and advance widths |
+| `preview` | Regenerate `preview.png` for an existing font |
+| `render-test` | Render a phrase to a large PNG for visual advance-width inspection |
+| `validate` | Validate all glyphs: missing characters, advance widths, SVG structure |
+| `adjust-advances` | Bulk-adjust advance widths (add/subtract padding, enforce min/max bounds) |
+| `import-bx-pack` | Batch-import a whole Embrilliance BX pack + matching EXP/DST directories |
+
+**`font import` key options:**
+
+- `--bx-file PATH` — Embrilliance `.bx` font file for precise per-glyph baseline and connection-Y extraction. The `.bx` format is a metadata-only installer package containing a stripped bzip2 stream with IDMDTL block structure; the parser extracts per-glyph `y_min` values (in BF units = 0.1 mm) that locate each letter's baseline/connection point. Works generically across vendors (TSS, NitkaBonitka, LD Signature, Stitchtopia, Chinoiserie verified). Takes priority over `--baseline-method`.
+- `--baseline-method` — How to set baselines when no BX file is available: `bbox-bottom` (default, bottom of bounding box), `last-stitch` (final stitch coordinate), or `reference-letter` (align to a reference glyph via `--reference-letter`).
+- `--script` — Enable exit-connector detection for connecting script fonts.
+- `--advance-padding FLOAT` — Extra SVG px added to auto-computed advance widths.
+
+**`font.json` fields stored:** `name`, `description`, `keywords`, `units_per_em`, `leading`, `size` (mm), `horiz_adv_x` (per-char advance widths), `glyphs`, `baseline_y`, `baseline_overrides`, and optionally `sortable`, `letter_case`, `kerning_pairs`.
+
+**Does not require a `--project` file** — font commands operate directly on a font directory and are stateless (no undo history).
+
+---
+
 ## 3. INX / Param Schema Strategy
 
 ### 3.1 Source of truth
@@ -539,7 +602,8 @@ cli-anything-inkstitch/
 │       │   ├── preview.py
 │       │   ├── export.py
 │       │   ├── schema_group.py
-│       │   └── session.py
+│       │   ├── session.py
+│       │   └── font.py              # font command group (2200+ lines)
 │       ├── binary.py                # inkstitch binary discovery + invocation
 │       └── repl.py                  # REPL loop
 ├── bin/
@@ -548,11 +612,13 @@ cli-anything-inkstitch/
     ├── fixtures/
     │   ├── empty.svg
     │   ├── one_path.svg
-    │   └── multi_element.svg
+    │   ├── multi_element.svg
+    │   └── bx/                      # *.bx files NOT committed (licensed commercial fonts)
     ├── test_project.py
     ├── test_history.py
     ├── test_params.py
     ├── test_schema_extraction.py
+    ├── test_font.py                 # font group tests; BX tests skipif fixtures absent
     └── test_e2e_export.py           # requires inkstitch installed
 ```
 
@@ -672,7 +738,7 @@ Default WARNING to stderr. `--verbose` ⇒ INFO. `--debug` ⇒ DEBUG with subpro
 ### 4.12 What is explicitly out of scope for v1.0
 
 - No bitmap/PNG-to-SVG tracing (use cli-anything-inkscape upstream).
-- No font/text-to-stitch conversion (Ink/Stitch's `lettering` extension is not wrapped).
+- Wrapping Ink/Stitch's `lettering` extension for rendering text-to-stitch in-design is out of scope; importing pre-digitized per-letter embroidery files into Inkstitch-compatible font packages is implemented via the `font` command group.
 - No live machine output (no USB/serial transport).
 - No fill ordering optimization beyond what `auto-satin` / `auto-run` provide.
 - No multi-hooping or hoop splitting (cleanly out of scope for the CLI; users should use Ink/Stitch's own `auto_split_satin` if needed and we'll wrap it in v1.1).

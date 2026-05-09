@@ -862,3 +862,310 @@ class TestExtractBxConnectionOffsets:
         bx.write_bytes(b"\xde\xad\xbe\xef" * 200)
         with pytest.raises(UserError):
             _extract_bx_connection_offsets(bx)
+
+
+# ---------------------------------------------------------------------------
+# _last_stitch_svg_y unit tests
+# ---------------------------------------------------------------------------
+
+from cli_anything_inkstitch.commands.font import _last_stitch_svg_y
+
+
+class TestLastStitchSvgY:
+    """Unit tests for the last-stitch baseline helper."""
+
+    def _make_pattern(self, stitches):
+        """Build a minimal pyembroidery pattern from a list of (x, y, cmd) tuples."""
+        import pyembroidery
+        p = pyembroidery.EmbPattern()
+        for x, y, cmd in stitches:
+            p.add_stitch_absolute(cmd, x, y)
+        return p
+
+    def test_returns_last_stitch_y(self):
+        import pyembroidery
+        from cli_anything_inkstitch.commands.font import _DST_TO_SVG
+        p = self._make_pattern([
+            (0, 100, pyembroidery.STITCH),
+            (10, 200, pyembroidery.STITCH),
+            (20, 350, pyembroidery.STITCH),
+            (0, 0, pyembroidery.END),
+        ])
+        result = _last_stitch_svg_y(p)
+        assert result is not None
+        assert abs(result - 350 * _DST_TO_SVG) < 0.01
+
+    def test_ignores_non_stitch_commands(self):
+        import pyembroidery
+        from cli_anything_inkstitch.commands.font import _DST_TO_SVG
+        # TRIM at the end should NOT count — last STITCH is at y=200
+        p = self._make_pattern([
+            (0, 100, pyembroidery.STITCH),
+            (10, 200, pyembroidery.STITCH),
+            (20, 999, pyembroidery.TRIM),
+            (0, 0, pyembroidery.END),
+        ])
+        result = _last_stitch_svg_y(p)
+        assert result is not None
+        assert abs(result - 200 * _DST_TO_SVG) < 0.01
+
+    def test_no_stitches_returns_none(self):
+        import pyembroidery
+        p = self._make_pattern([(0, 0, pyembroidery.END)])
+        assert _last_stitch_svg_y(p) is None
+
+
+# ---------------------------------------------------------------------------
+# font import baseline-method tests
+# ---------------------------------------------------------------------------
+
+def _write_minimal_dst(path: Path, stitches_xy: list[tuple[int, int]]) -> None:
+    """Write a minimal DST file with the given stitch coordinates (in DST units)."""
+    import pyembroidery
+    p = pyembroidery.EmbPattern()
+    for x, y in stitches_xy:
+        p.add_stitch_absolute(pyembroidery.STITCH, x, y)
+    p.add_stitch_absolute(pyembroidery.END, 0, 0)
+    pyembroidery.write_dst(p, str(path))
+
+
+def _make_flat_font_dir(tmp_path: Path, glyphs: dict[str, list[tuple[int, int]]]) -> Path:
+    """Create a source directory of minimal DST files for a font.
+
+    *glyphs* maps each character to its list of (x, y) stitch coordinates.
+    Filenames follow the simple ``A.dst`` / ``a.dst`` convention.
+    """
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    for ch, coords in glyphs.items():
+        _write_minimal_dst(src / f"{ch}.dst", coords)
+    return src
+
+
+class TestFontImportBaselineMethod:
+    """Tests for --baseline-method and --reference-letter options."""
+
+    def _import(self, runner, src_dir, out_dir, extra_args=()):
+        """Run font import with common args and return parsed JSON result."""
+        args = [
+            "--json", "font", "import",
+            "--name", "TestFont",
+            "--source-dir", str(src_dir),
+            "--output-dir", str(out_dir),
+        ] + list(extra_args)
+        result = runner.invoke(root, args, catch_exceptions=False)
+        assert result.exit_code == 0, (
+            f"exit {result.exit_code}: {result.output!r}"
+        )
+        return json.loads(result.output)
+
+    def test_default_bbox_bottom_in_result(self, runner, tmp_path):
+        """When no --baseline-method is given, result reports 'bbox-bottom'."""
+        src = _make_flat_font_dir(tmp_path, {
+            "A": [(0, 0), (100, 0), (100, 500), (0, 500)],
+            "B": [(0, 0), (100, 0), (100, 500)],
+        })
+        data = self._import(runner, src, tmp_path / "out")
+        assert data.get("baseline_method") == "bbox-bottom"
+
+    def test_last_stitch_method_accepted(self, runner, tmp_path):
+        """--baseline-method=last-stitch is accepted and reported in result."""
+        src = _make_flat_font_dir(tmp_path, {
+            "A": [(0, 100), (100, 100), (100, 500), (50, 100)],
+            "B": [(0, 100), (100, 100), (100, 500), (50, 100)],
+        })
+        data = self._import(runner, src, tmp_path / "out",
+                            ["--baseline-method", "last-stitch"])
+        assert data.get("baseline_method") == "last-stitch"
+        assert data["glyphs_added"] == 2
+
+    def test_reference_letter_method_accepted(self, runner, tmp_path):
+        """--baseline-method=reference-letter with valid --reference-letter works."""
+        src = _make_flat_font_dir(tmp_path, {
+            "x": [(0, 0), (100, 0), (100, 300), (0, 300)],
+            "g": [(0, 0), (100, 0), (100, 300), (50, 500), (0, 500)],
+            "H": [(0, 0), (100, 0), (100, 400), (0, 400)],
+        })
+        data = self._import(runner, src, tmp_path / "out",
+                            ["--baseline-method", "reference-letter",
+                             "--reference-letter", "x"])
+        assert data.get("baseline_method") == "reference-letter"
+        assert data.get("reference_letter") == "x"
+        assert data["glyphs_added"] == 3
+
+    def test_reference_letter_fallback_when_missing(self, runner, tmp_path):
+        """When the reference letter isn't in the source dir, falls back to bbox-bottom."""
+        src = _make_flat_font_dir(tmp_path, {
+            "A": [(0, 0), (100, 0), (100, 500)],
+            "B": [(0, 0), (100, 0), (100, 400)],
+        })
+        # Reference letter 'x' is not present in src
+        result = runner.invoke(
+            root,
+            ["--json", "font", "import",
+             "--name", "TestFont",
+             "--source-dir", str(src),
+             "--output-dir", str(tmp_path / "out"),
+             "--baseline-method", "reference-letter",
+             "--reference-letter", "x"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        # Warning may precede the JSON; find the first '{' to isolate JSON
+        json_start = result.output.index("{")
+        data = json.loads(result.output[json_start:])
+        # Falls back to bbox-bottom; glyphs still imported
+        assert data["glyphs_added"] == 2
+        assert data.get("baseline_method") == "bbox-bottom"
+
+    def test_reference_letter_without_flag_falls_back(self, runner, tmp_path):
+        """--baseline-method=reference-letter without --reference-letter falls back."""
+        src = _make_flat_font_dir(tmp_path, {
+            "A": [(0, 0), (100, 0), (100, 500)],
+        })
+        result = runner.invoke(
+            root,
+            ["--json", "font", "import",
+             "--name", "TestFont",
+             "--source-dir", str(src),
+             "--output-dir", str(tmp_path / "out"),
+             "--baseline-method", "reference-letter"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0
+        json_start = result.output.index("{")
+        data = json.loads(result.output[json_start:])
+        assert data.get("baseline_method") == "bbox-bottom"
+
+
+# ---------------------------------------------------------------------------
+# font set-baseline tests
+# ---------------------------------------------------------------------------
+
+class TestFontSetBaseline:
+    """Tests for the `font set-baseline` command."""
+
+    def _make_imported_font(self, runner, tmp_path):
+        """Create a minimal imported font to use as set-baseline input."""
+        src = _make_flat_font_dir(tmp_path, {
+            "A": [(0, 0), (100, 0), (100, 500), (0, 500)],
+            "g": [(0, 0), (100, 0), (100, 500), (50, 700)],
+        })
+        result = runner.invoke(
+            root,
+            ["--json", "font", "import",
+             "--name", "TestFont",
+             "--source-dir", str(src),
+             "--output-dir", str(tmp_path / "font")],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        return tmp_path / "font"
+
+    def test_shift_updates_svg_transform(self, runner, tmp_path):
+        """set-baseline shifts the glyph's translate(ty) in →.svg."""
+        import re
+        fdir = self._make_imported_font(runner, tmp_path)
+
+        # Read original transform for 'A'
+        from lxml import etree as _etree
+        SVG_NS_URI = "http://www.w3.org/2000/svg"
+        INKSCAPE_URI = "http://www.inkscape.org/namespaces/inkscape"
+        tree_before = _etree.parse(str(fdir / "→.svg"))
+        root_el = tree_before.getroot()
+        layer_before = next(
+            el for el in root_el.iter(f"{{{SVG_NS_URI}}}g")
+            if el.get(f"{{{INKSCAPE_URI}}}label") == "GlyphLayer-A"
+        )
+        transform_before = layer_before.get("transform", "")
+        m_before = re.search(r'translate\(([^,]+),([^)]+)\)', transform_before)
+        ty_before = float(m_before.group(2)) if m_before else 0.0
+
+        # Shift 'A' up by 1 mm
+        result = runner.invoke(
+            root,
+            ["--json", "font", "set-baseline",
+             "--font-dir", str(fdir),
+             "--char", "A",
+             "--shift-mm", "1.0"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["char"] == "A"
+
+        # SVG should reflect new transform
+        tree_after = _etree.parse(str(fdir / "→.svg"))
+        root_after = tree_after.getroot()
+        layer_after = next(
+            el for el in root_after.iter(f"{{{SVG_NS_URI}}}g")
+            if el.get(f"{{{INKSCAPE_URI}}}label") == "GlyphLayer-A"
+        )
+        transform_after = layer_after.get("transform", "")
+        m_after = re.search(r'translate\(([^,]+),([^)]+)\)', transform_after)
+        ty_after = float(m_after.group(2)) if m_after else 0.0
+
+        from cli_anything_inkstitch.commands.font import _SVG_MM_PER_PX
+        expected_shift_px = -(1.0 / _SVG_MM_PER_PX)
+        assert abs((ty_after - ty_before) - expected_shift_px) < 0.1, (
+            f"expected ty to change by {expected_shift_px:.2f} px, "
+            f"got {ty_after - ty_before:.2f}"
+        )
+
+    def test_shift_recorded_in_font_json(self, runner, tmp_path):
+        """set-baseline stores the cumulative shift in font.json baseline_overrides."""
+        fdir = self._make_imported_font(runner, tmp_path)
+
+        runner.invoke(
+            root,
+            ["font", "set-baseline",
+             "--font-dir", str(fdir),
+             "--char", "g",
+             "--shift-mm", "-1.5"],
+            catch_exceptions=False,
+        )
+        font_json = json.loads((fdir / "font.json").read_text())
+        assert "baseline_overrides" in font_json
+        override_g = font_json["baseline_overrides"].get("g")
+        assert override_g is not None
+        # shift_mm=-1.5 means move down; shift_px = +(1.5 / _SVG_MM_PER_PX)
+        from cli_anything_inkstitch.commands.font import _SVG_MM_PER_PX
+        expected_px = 1.5 / _SVG_MM_PER_PX
+        assert abs(override_g - expected_px) < 0.1, (
+            f"expected override ~{expected_px:.2f} px, got {override_g}"
+        )
+
+    def test_cumulative_shifts(self, runner, tmp_path):
+        """Two consecutive set-baseline calls accumulate their shifts."""
+        fdir = self._make_imported_font(runner, tmp_path)
+
+        for shift in ("2.0", "-0.5"):
+            runner.invoke(
+                root,
+                ["font", "set-baseline",
+                 "--font-dir", str(fdir),
+                 "--char", "A",
+                 "--shift-mm", shift],
+                catch_exceptions=False,
+            )
+
+        font_json = json.loads((fdir / "font.json").read_text())
+        from cli_anything_inkstitch.commands.font import _SVG_MM_PER_PX
+        net_shift_mm = 2.0 + (-0.5)   # 1.5 mm upward net
+        expected_px = -(net_shift_mm / _SVG_MM_PER_PX)  # negative = upward in SVG
+        actual_px = font_json["baseline_overrides"].get("A", 0.0)
+        assert abs(actual_px - expected_px) < 0.1, (
+            f"expected {expected_px:.2f} px net, got {actual_px:.2f}"
+        )
+
+    def test_unknown_char_raises_user_error(self, runner, tmp_path):
+        """set-baseline on a glyph that doesn't exist raises UserError (non-zero exit)."""
+        fdir = self._make_imported_font(runner, tmp_path)
+        result = runner.invoke(
+            root,
+            ["font", "set-baseline",
+             "--font-dir", str(fdir),
+             "--char", "Z",   # not in the font
+             "--shift-mm", "1.0"],
+        )
+        assert result.exit_code != 0
