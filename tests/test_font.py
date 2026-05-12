@@ -475,6 +475,21 @@ class TestParseCharFromStem:
     def test_cap_low_prefix(self, stem, expected):
         assert _parse_char_from_stem(stem) == expected
 
+    # Full-word Capital / Lowercase prefixes — used by some packs (e.g. files
+    # named "CapitalA.xxx" / "Lowercaseb.xxx") that the shorter Cap/Low rules
+    # don't cover.
+    @pytest.mark.parametrize("stem,expected", [
+        ("CapitalA", "A"),
+        ("CapitalZ", "Z"),
+        ("Capital_B", "B"),
+        ("Lowercasea", "a"),
+        ("Lowercase_z", "z"),
+        ("MyPack_CapitalQ", "Q"),
+        ("Brand-Lowercasem", "m"),
+    ])
+    def test_capital_lowercase_full_word_prefix(self, stem, expected):
+        assert _parse_char_from_stem(stem) == expected
+
     @pytest.mark.parametrize("stem,expected", [
         ("PunComma", ","),
         ("PunPeriod", "."),

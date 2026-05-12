@@ -690,6 +690,8 @@ def _parse_char_from_stem(stem: str) -> str | None:
     Handles common naming conventions:
       CapA / Cap_A → 'A'
       LowA / Lowa / Low_a → 'a'
+      CapitalA → 'A'        (full-word "Capital" prefix)
+      Lowercaseb → 'b'      (full-word "Lowercase" prefix)
       PunComma / Pun_Comma → ','
       A_cap / a_low → 'A' / 'a'
       Single letter or digit → that char
@@ -700,6 +702,18 @@ def _parse_char_from_stem(stem: str) -> str | None:
     s = re.sub(r'\d+(\.\d+)?in', '', stem, flags=re.IGNORECASE)
     # Strip leading brand prefixes (e.g. "TSS-Homerun", "StitchtopiaActuallyRomantic")
     # by finding Cap/Low/Pun patterns or single-char patterns
+
+    # Pattern: Capital<Letter> / Lowercase<Letter> (full-word prefixes used by
+    # some packs, e.g. CapitalA.xxx, Lowercase_b.dst). Run BEFORE the shorter
+    # Cap/Low rules because otherwise "Low" matches the start of "Lowercaseb"
+    # and captures the wrong letter ('e'). Allow optional underscore/hyphen
+    # between the prefix and the letter.
+    m = re.search(r'Capital[_-]?([A-Za-z])', s, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    m = re.search(r'Lowercase[_-]?([A-Za-z])', s, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).lower()
 
     # Pattern: Cap<Letter>
     m = re.search(r'Cap([A-Z])', s)
