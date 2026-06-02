@@ -17,6 +17,7 @@ dependencies = [
     "rich>=13.0",
     "filelock>=3.12",
     "ulid-py>=1.1",
+    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]
