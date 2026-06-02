@@ -137,6 +137,160 @@ def rasterize_cmd(ctx, svg_in, out, dpi):
     emit(ctx, {"raster": out, "raster_bytes": png_bytes, "raster_dpi": dpi})
 
 
+@preview.command("stitch-sim")
+@click.option("--dst", "dst_path", required=True, type=click.Path(exists=True),
+              help="Embroidery file to simulate (DST, PES, JEF, etc.).")
+@click.option("--out", required=True, type=click.Path(),
+              help="Output PNG path.")
+@click.option("--width", "img_width", type=int, default=1600, show_default=True,
+              help="Output image width in pixels.")
+@click.option("--height", "img_height", type=int, default=1400, show_default=True,
+              help="Output image height in pixels.")
+@click.option("--thread-color", "thread_color", default=None,
+              help="Override thread color as hex (e.g. #e85454).  "
+                   "Defaults to the color stored in the file.")
+@click.option("--show-jumps/--hide-jumps", "show_jumps", default=True,
+              show_default=True,
+              help="Draw jump stitches as dashed gray lines.")
+@click.option("--background", "bg_color", default="#f5f5f5", show_default=True,
+              help="Background hex color.")
+@click.pass_context
+def stitch_sim(ctx, dst_path, out, img_width, img_height,
+               thread_color, show_jumps, bg_color):
+    """Render the actual needle path of an embroidery file as a PNG.
+
+    Unlike 'preview generate' (which renders filled stitch areas via Inkscape),
+    this command draws every individual stitch segment so you can see exactly
+    where the needle travels, where jumps occur, and how fill sections connect.
+
+    Jump stitches are drawn as thin dashed gray lines.  Regular stitches are
+    drawn in the thread color.  Useful for catching fill-order problems, messy
+    travel stitches, and unintended needle paths before a physical test-sew.
+
+    Example:
+
+        preview stitch-sim --dst design.dst --out sim.png
+    """
+    import pyembroidery
+    from PIL import Image, ImageDraw
+
+    dst_path = require_absolute(dst_path, "dst")
+    out = require_absolute(out, "out")
+
+    pattern = pyembroidery.read(dst_path)
+    if pattern is None:
+        raise UserError(f"could not read embroidery file: {dst_path}")
+
+    # ── Collect all coordinate extents ──────────────────────────────────────
+    xs = [s[0] for s in pattern.stitches]
+    ys = [s[1] for s in pattern.stitches]
+    if not xs:
+        raise UserError("embroidery file contains no stitches")
+
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    design_w = x_max - x_min or 1
+    design_h = y_max - y_min or 1
+
+    PADDING = 0.06   # 6% padding on each side
+    pad_x = design_w * PADDING
+    pad_y = design_h * PADDING
+    scale_x = img_width  / (design_w + 2 * pad_x)
+    scale_y = img_height / (design_h + 2 * pad_y)
+    scale = min(scale_x, scale_y)
+
+    # Center in image
+    render_w = (design_w + 2 * pad_x) * scale
+    render_h = (design_h + 2 * pad_y) * scale
+    off_x = (img_width  - render_w) / 2 + pad_x * scale
+    off_y = (img_height - render_h) / 2 + pad_y * scale
+
+    def to_px(x, y):
+        return (
+            off_x + (x - x_min) * scale,
+            off_y + (y - y_min) * scale,
+        )
+
+    # ── Resolve thread color ─────────────────────────────────────────────────
+    def _hex_to_rgb(h: str):
+        h = h.lstrip("#")
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    # Try to get color from first thread in pattern
+    stitch_rgb = (220, 80, 80)   # default warm red
+    if thread_color:
+        stitch_rgb = _hex_to_rgb(thread_color)
+    elif pattern.threads:
+        t = pattern.threads[0]
+        r = getattr(t, "color", None)
+        if r and isinstance(r, int):
+            stitch_rgb = ((r >> 16) & 0xFF, (r >> 8) & 0xFF, r & 0xFF)
+
+    jump_rgb  = (180, 180, 180)
+    trim_rgb  = (100, 180, 100)
+    bg_rgb    = _hex_to_rgb(bg_color)
+
+    # ── Draw ─────────────────────────────────────────────────────────────────
+    img = Image.new("RGB", (img_width, img_height), bg_rgb)
+    draw = ImageDraw.Draw(img)
+
+    STITCH_W = max(1, int(scale * 0.8))   # line width scales with zoom
+    JUMP_W   = max(1, STITCH_W - 1)
+
+    prev_px = None
+    in_jump = False
+
+    for sx, sy, cmd in pattern.stitches:
+        cur_px = to_px(sx, sy)
+
+        if cmd == pyembroidery.STITCH:
+            if prev_px is not None and not in_jump:
+                draw.line([prev_px, cur_px], fill=stitch_rgb, width=STITCH_W)
+            in_jump = False
+            prev_px = cur_px
+
+        elif cmd == pyembroidery.JUMP:
+            if show_jumps and prev_px is not None:
+                # Dashed line: draw short segments with gaps
+                dx = cur_px[0] - prev_px[0]
+                dy = cur_px[1] - prev_px[1]
+                seg_len = max(scale * 3, 4)
+                total = (dx**2 + dy**2) ** 0.5
+                if total > 0:
+                    steps = max(1, int(total / (seg_len * 2)))
+                    for i in range(steps):
+                        t0 = i / steps
+                        t1 = (i + 0.5) / steps
+                        p0 = (prev_px[0] + dx * t0, prev_px[1] + dy * t0)
+                        p1 = (prev_px[0] + dx * t1, prev_px[1] + dy * t1)
+                        draw.line([p0, p1], fill=jump_rgb, width=JUMP_W)
+            in_jump = True
+            prev_px = cur_px
+
+        elif cmd == pyembroidery.TRIM:
+            in_jump = True
+            prev_px = cur_px
+
+        elif cmd in (pyembroidery.END, pyembroidery.STOP):
+            prev_px = None
+            in_jump = False
+
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    img.save(out)
+
+    # Stats
+    n_stitches = sum(1 for _, _, c in pattern.stitches if c == pyembroidery.STITCH)
+    n_jumps    = sum(1 for _, _, c in pattern.stitches if c == pyembroidery.JUMP)
+    n_trims    = sum(1 for _, _, c in pattern.stitches if c == pyembroidery.TRIM)
+    emit(ctx, {
+        "sim_png":   out,
+        "stitches":  n_stitches,
+        "jumps":     n_jumps,
+        "trims":     n_trims,
+        "size_bytes": Path(out).stat().st_size,
+    })
+
+
 @preview.command("stats")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--id", "ids", multiple=True)
