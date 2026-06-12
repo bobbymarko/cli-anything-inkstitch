@@ -25,14 +25,19 @@ src/cli_anything_inkstitch/
         export.py
         schema_group.py
         session.py
-        font.py             # Font command group — 2200+ lines; the most complex module
+        font.py             # Font command group — 2500+ lines; the most complex module
     svg/                    # lxml helpers (namespace registration, attr get/set, element dispatch)
+        satin.py            # WIP: geometric fill-to-satin conversion (parked on feat/fill-to-satin)
     schema/                 # INX/param schema extraction and cache
     project.py              # ProjectFile dataclass, load/save, filelock
     history.py              # Patch types, apply/reverse, ring buffer
     binary.py               # Ink/Stitch binary discovery and invocation
     repl.py                 # Interactive REPL loop
 ```
+
+## Dependencies worth knowing
+
+- **Pillow** (`Pillow>=10.0`) — required by `preview stitch-sim`. Added to `pyproject.toml`; install automatically via `pip install -e '.[dev]'`.
 
 ## BX test fixtures
 

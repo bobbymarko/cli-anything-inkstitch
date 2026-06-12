@@ -160,9 +160,10 @@ Generate a stitch-plan preview SVG and extract stitch-plan statistics.
 
 | Command | Description |
 |---------|-------------|
-| `generate` | Render the stitch plan to an SVG file (`--render-mode simple\|realistic-300\|realistic-600\|realistic-vector`, `--needle-points`, `--visual-commands`, `--render-jumps`). Add `--raster --dpi 150` to also write a PNG via Inkscape so the LLM can visually consume it. |
-| `stats` | Return JSON with stitch count, jump count, trim count, color stops, estimated runtime, bounding box |
-| `rasterize` | Standalone SVG → PNG conversion via Inkscape (`--svg`, `--out`, `--dpi`). Useful for converting any SVG (validation layers, old previews) into something an LLM can look at. |
+| `generate` | Render the stitch plan to an SVG file (`--render-mode simple\|realistic-300\|realistic-600\|realistic-vector`, `--needle-points`, `--visual-commands`, `--render-jumps`). Add `--raster --dpi 150` to also write a PNG via Inkscape showing what the *design* will look like (filled areas, not individual stitches). |
+| `stitch-sim` | **Primary QA tool.** Renders the actual needle path of any DST/PES file as a PNG — stitches as solid colored lines, jump stitches as dashed gray lines. No project file or Ink/Stitch binary required. Options: `--dst <file>`, `--out <png>`, `--thread-color <hex>`, `--width`, `--height`, `--show-jumps/--hide-jumps`. Run after every export to catch fill-direction problems, excessive jumps, and travel stitches before a physical test-sew. |
+| `stats` | Return JSON with stitch count, color stops, and estimated runtime |
+| `rasterize` | Standalone SVG → PNG conversion via Inkscape (`--svg`, `--out`, `--dpi`). Useful for converting validation-layer SVGs or old previews into a visual. |
 
 
 ### Export
@@ -436,7 +437,37 @@ When using this CLI programmatically:
 13. **Always run `element describe` before `params set`**: parameter choices are dependent on what each element *is* (small detail vs big background, surrounded by what colors, near the edge vs centered) — not just its fill hex. Describe gives the LLM the geometric and relational context heuristic auto-digitization can't see.
 14. **Capture intent with `document set-context` early**: material, stretch, thread, stabilizer, hoop tension, what the design is for. This appears as `document_context` in every `element list` / `describe` call thereafter, so param choices ground in real conditions ("more pull comp because the substrate is stretchy") instead of assumed defaults.
 15. **Consult the `embroidery-digitization` skill** when choosing stitch types or parameter values. It encodes the per-element decision flow (stitch type → direction → spacing → underlay → comp), fabric-specific starting numbers, satin width thresholds, and visual failure modes — knowledge the CLI surface alone doesn't carry.
-16. **Use `preview generate --raster` to close the visual loop**: pass `--raster` (and optionally `--dpi 200` for higher resolution) to also produce a PNG alongside the SVG. The PNG can be loaded as an image by your agent harness, so you can visually evaluate stitch density, color order, and shape coverage rather than reasoning blind about the SVG XML. Inkscape 1.0+ must be installed (`INKSCAPE_BINARY` env var or default install path).
+16. **`preview generate --raster` shows design appearance; `preview stitch-sim` shows what the machine will do.** Use `generate --raster` to visually confirm design coverage and color layout (requires Inkscape). Use `stitch-sim` to inspect the actual needle path — fill sweep direction, jump distances, travel stitches around holes. They answer different questions; use both.
+17. **Run `preview stitch-sim` after every export, before test-sewing.** It requires no project file or binary — just the DST. Read the PNG and check: are fill rows sweeping the right direction? Are jump stitches (dashed gray) short and local, or do they cross the whole design? Are there unexpected travel paths inside a fill? This catches problems that neither `validate run` nor `preview generate` will surface.
+18. **Illustrator SVGs often have no physical size.** A bare `viewBox` with no `width`/`height` is interpreted by inkstitch as pixels at 96 dpi — a 300×300 viewBox unit design will digitize as ~79mm, not 300mm. Always check `document info` → `root_attrib` for explicit `width`/`height`. If absent, add them (e.g. `width="304.8mm"`) before assigning any params, or the output size will be wrong.
+19. **SVG element order is stitch order. Scattered elements cause long jumps.** Decorative elements (sparkles, dots, scattered accents) that appear in arbitrary document order will be stitched in that order, zigzagging across the design and producing long jump stitches. Reorder them geographically — a clockwise sweep, or left-to-right — so each sequential jump is short. Visible in `stitch-sim` output as long dashed lines crossing the design.
+20. **Compound paths with holes create fill travel stitches.** If an `auto_fill` element has cutout holes (eyes, smile, counters), inkstitch must navigate around each hole with travel stitches on every row that intersects it. Two clean solutions: (a) **`contour_fill`** — traces the outline spiraling inward, no row-by-row interruptions, good for organic shapes; creates visible concentric-line texture. (b) **Split the holes into separate elements** with a contrasting thread color stitched on top after the main fill — the main shape becomes a clean solid fill, and the face/counter features become second-color shapes that cover it.
+21. **`fill_start` placement controls sweep direction, not just entry point.** The fill sweeps from the `fill_start` marker edge toward `fill_end`. For shapes where a single fill angle creates disconnected row sections (e.g., star tips, concave indentations), place `fill_start` at the topmost (or leading) point of the shape so the narrow extremity is stitched first and naturally connects into the widening body below — rather than being discovered mid-sweep as an isolated island requiring a jump. Use `commands attach --command fill_start --at-x <mm> --at-y <mm>` positioned at the element's bounding box edge.
+22. **After any direct SVG edit outside the CLI, re-open with `--force`.** If you manipulate the SVG with Python/lxml directly (splitting compound paths, reordering elements, adding new elements), the project's stored SHA-256 will mismatch and the CLI will refuse to mutate. Resync with: `document open --project $PROJ --svg $SVG --force`.
+
+
+### QA a digitized file with stitch-sim
+
+Run this after every export — before loading into embroidery software or test-sewing:
+
+```bash
+cli-anything-inkstitch preview stitch-sim \
+    --dst /path/to/design.dst \
+    --out /path/to/design-sim.png \
+    --thread-color "#e85454" \
+    --width 1800 --height 1600
+
+# Read the PNG and check:
+# - Fill rows sweep in the intended direction with no disconnected sections
+# - Dashed gray lines (jumps) are short and local — not crossing the whole design
+# - No unexpected travel curves inside a filled area (sign of compound-path holes)
+# - Scattered small elements travel in a logical geographic sequence
+# - Underlay cross-hatch is visible beneath the top fill rows
+```
+
+If you see long jumps between scattered elements → reorder them in SVG document order geographically.
+If you see travel curves inside a fill → the element has compound-path holes; use `contour_fill` or split the holes into a separate color.
+If you see disconnected fill sections at a shape tip → move `fill_start` to that tip so it's stitched first.
 
 
 ### Import an embroidery font
