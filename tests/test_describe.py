@@ -93,6 +93,88 @@ def test_element_bbox_unsupported_returns_none():
     assert element_bbox(_e('<text xmlns="http://www.w3.org/2000/svg">hi</text>')) is None
 
 
+# --- geometry: transforms ---------------------------------------------------
+
+def test_parse_transform_translate_and_scale():
+    from cli_anything_inkstitch.svg.geometry import apply_matrix, parse_transform
+
+    m = parse_transform("translate(5,7)")
+    assert apply_matrix(m, 0, 0) == (5, 7)
+    m = parse_transform("scale(2)")
+    assert apply_matrix(m, 3, 4) == (6, 8)
+    m = parse_transform("scale(2,3)")
+    assert apply_matrix(m, 1, 1) == (2, 3)
+
+
+def test_parse_transform_rotate_90():
+    from cli_anything_inkstitch.svg.geometry import apply_matrix, parse_transform
+
+    m = parse_transform("rotate(90)")
+    x, y = apply_matrix(m, 10, 0)
+    assert abs(x - 0) < 1e-9 and abs(y - 10) < 1e-9
+
+
+def test_parse_transform_rotate_about_center():
+    from cli_anything_inkstitch.svg.geometry import apply_matrix, parse_transform
+
+    # rotating the center point about itself is a no-op
+    m = parse_transform("rotate(45, 10, 10)")
+    x, y = apply_matrix(m, 10, 10)
+    assert abs(x - 10) < 1e-9 and abs(y - 10) < 1e-9
+
+
+def test_parse_transform_list_composes_left_to_right():
+    from cli_anything_inkstitch.svg.geometry import apply_matrix, parse_transform
+
+    # per SVG spec: rightmost applies to local coords first
+    m = parse_transform("translate(10,0) scale(2)")
+    assert apply_matrix(m, 1, 1) == (12, 2)
+
+
+def test_element_bbox_in_root_translate():
+    from cli_anything_inkstitch.svg.geometry import element_bbox_in_root
+
+    e = _e('<rect xmlns="http://www.w3.org/2000/svg" transform="translate(5,7)" '
+           'x="0" y="0" width="10" height="10"/>')
+    bb, meta = element_bbox_in_root(e)
+    assert bb == (5, 7, 15, 17)
+    assert meta == {"has_transform": True}
+
+
+def test_element_bbox_in_root_no_transform_has_empty_meta():
+    from cli_anything_inkstitch.svg.geometry import element_bbox_in_root
+
+    e = _e('<rect xmlns="http://www.w3.org/2000/svg" x="0" y="0" width="10" height="10"/>')
+    bb, meta = element_bbox_in_root(e)
+    assert bb == (0, 0, 10, 10)
+    assert meta == {}
+
+
+def test_element_bbox_in_root_rotation_flags_approx():
+    from cli_anything_inkstitch.svg.geometry import element_bbox_in_root
+
+    e = _e('<rect xmlns="http://www.w3.org/2000/svg" transform="rotate(90)" '
+           'x="0" y="0" width="10" height="10"/>')
+    bb, meta = element_bbox_in_root(e)
+    assert meta == {"has_transform": True, "bbox_approx": True}
+    assert all(abs(a - b) < 1e-9 for a, b in zip(bb, (-10, 0, 0, 10)))
+
+
+def test_element_bbox_in_root_composes_ancestor_transforms():
+    from cli_anything_inkstitch.svg.geometry import element_bbox_in_root
+
+    svg = _e(
+        '<svg xmlns="http://www.w3.org/2000/svg">'
+        '<g transform="translate(10,0)"><g transform="scale(2)">'
+        '<rect id="r" x="0" y="0" width="5" height="5"/>'
+        '</g></g></svg>'
+    )
+    rect = svg.xpath("//*[@id='r']")[0]
+    bb, meta = element_bbox_in_root(rect)
+    assert bb == (10, 0, 20, 10)
+    assert meta == {"has_transform": True}
+
+
 # --- geometry: design_bbox_from_root --------------------------------------
 
 def test_design_bbox_from_viewbox():

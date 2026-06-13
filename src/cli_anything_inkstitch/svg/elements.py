@@ -181,7 +181,7 @@ def describe_element(elem, bb, d_bbox, all_elems, d_w_px: float, d_h_px: float, 
         out["warnings"] = summary["warnings"]
     if bb is None:
         out["bbox"] = None
-        out["note"] = "geometry not parseable (transforms or unsupported tag)"
+        out["note"] = "geometry not parseable (unsupported tag or malformed data)"
         return out
 
     w_px = bb[2] - bb[0]

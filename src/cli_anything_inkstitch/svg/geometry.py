@@ -2,14 +2,16 @@
 
 Pure-Python (no shapely) — bbox is approximate for curves (uses control points,
 which gives a safe over-estimate). Arcs are approximated by their endpoints.
-SVG transforms are not yet handled — designs with `transform="..."` will report
-bboxes in untransformed user-coordinate space.
+SVG transforms (translate/scale/rotate/matrix/skew, composed through ancestors)
+are applied by element_bbox_in_root(); for rotation/skew the result is the bbox
+of the transformed corners — a safe over-estimate, flagged `bbox_approx`.
 
 Inkstitch's PIXELS_PER_MM convention is used: 96/25.4 user units per mm.
 """
 
 from __future__ import annotations
 
+import math
 import re
 
 from lxml import etree
@@ -206,6 +208,126 @@ def element_bbox(elem) -> Bbox | None:
         xs = nums[0::2]; ys = nums[1::2]
         return (min(xs), min(ys), max(xs), max(ys))
     return None
+
+
+# --- SVG transforms ---------------------------------------------------------
+#
+# Matrices use the SVG (a, b, c, d, e, f) layout:
+#   | a c e |
+#   | b d f |
+#   | 0 0 1 |
+
+Matrix = tuple[float, float, float, float, float, float]
+
+IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+_TRANSFORM_RE = re.compile(r'(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)')
+_NUM_RE = re.compile(r'[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?')
+
+
+def matrix_multiply(m1: Matrix, m2: Matrix) -> Matrix:
+    a1, b1, c1, d1, e1, f1 = m1
+    a2, b2, c2, d2, e2, f2 = m2
+    return (
+        a1 * a2 + c1 * b2,
+        b1 * a2 + d1 * b2,
+        a1 * c2 + c1 * d2,
+        b1 * c2 + d1 * d2,
+        a1 * e2 + c1 * f2 + e1,
+        b1 * e2 + d1 * f2 + f1,
+    )
+
+
+def apply_matrix(m: Matrix, x: float, y: float) -> tuple[float, float]:
+    a, b, c, d, e, f = m
+    return (a * x + c * y + e, b * x + d * y + f)
+
+
+def parse_transform(s: str | None) -> Matrix:
+    """Parse an SVG `transform` attribute into one composed affine matrix.
+
+    Unknown function names are ignored; per the SVG spec, a list like
+    "translate(10) rotate(45)" composes left-to-right (rightmost applies to
+    local coordinates first).
+    """
+    if not s:
+        return IDENTITY
+    m = IDENTITY
+    for name, argstr in _TRANSFORM_RE.findall(s):
+        args = [float(v) for v in _NUM_RE.findall(argstr)]
+        if name == 'matrix' and len(args) == 6:
+            t: Matrix = tuple(args)  # type: ignore[assignment]
+        elif name == 'translate' and args:
+            t = (1.0, 0.0, 0.0, 1.0, args[0], args[1] if len(args) > 1 else 0.0)
+        elif name == 'scale' and args:
+            sx = args[0]
+            sy = args[1] if len(args) > 1 else sx
+            t = (sx, 0.0, 0.0, sy, 0.0, 0.0)
+        elif name == 'rotate' and args:
+            rad = math.radians(args[0])
+            cos_a, sin_a = math.cos(rad), math.sin(rad)
+            t = (cos_a, sin_a, -sin_a, cos_a, 0.0, 0.0)
+            if len(args) == 3:
+                cx, cy = args[1], args[2]
+                t = matrix_multiply(
+                    matrix_multiply((1.0, 0.0, 0.0, 1.0, cx, cy), t),
+                    (1.0, 0.0, 0.0, 1.0, -cx, -cy),
+                )
+        elif name == 'skewX' and args:
+            t = (1.0, 0.0, math.tan(math.radians(args[0])), 1.0, 0.0, 0.0)
+        elif name == 'skewY' and args:
+            t = (1.0, math.tan(math.radians(args[0])), 0.0, 1.0, 0.0, 0.0)
+        else:
+            continue
+        m = matrix_multiply(m, t)
+    return m
+
+
+def ctm_for(elem) -> Matrix:
+    """Composed transform from the SVG root down to elem (inclusive)."""
+    chain = []
+    node = elem
+    while node is not None and isinstance(node.tag, str):
+        t = node.get('transform')
+        if t:
+            chain.append(parse_transform(t))
+        node = node.getparent()
+    m = IDENTITY
+    for t in reversed(chain):
+        m = matrix_multiply(m, t)
+    return m
+
+
+def _is_axis_aligned(m: Matrix, eps: float = 1e-9) -> bool:
+    return abs(m[1]) < eps and abs(m[2]) < eps
+
+
+def transformed_bbox(bb: Bbox, m: Matrix) -> Bbox:
+    corners = [(bb[0], bb[1]), (bb[2], bb[1]), (bb[0], bb[3]), (bb[2], bb[3])]
+    pts = [apply_matrix(m, x, y) for x, y in corners]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def element_bbox_in_root(elem) -> tuple[Bbox | None, dict]:
+    """Bbox in root (design) coordinates plus geometry metadata.
+
+    Returns (bbox, meta) where meta may carry:
+      has_transform: a transform applies to this element (own or ancestor)
+      bbox_approx:   transform includes rotation/skew, so the bbox is the
+                     (safe, possibly larger) bound of the rotated corners
+    """
+    bb = element_bbox(elem)
+    if bb is None:
+        return None, {}
+    m = ctm_for(elem)
+    if m == IDENTITY:
+        return bb, {}
+    meta: dict = {"has_transform": True}
+    if not _is_axis_aligned(m):
+        meta["bbox_approx"] = True
+    return transformed_bbox(bb, m), meta
 
 
 def design_bbox_from_root(root) -> Bbox:

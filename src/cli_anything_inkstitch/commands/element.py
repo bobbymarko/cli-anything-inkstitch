@@ -102,7 +102,7 @@ def describe(ctx, project_path, svg_id, neighbors):
     from cli_anything_inkstitch.svg.geometry import (
         bbox_area,
         design_bbox_from_root,
-        element_bbox,
+        element_bbox_in_root,
         px_to_mm,
     )
 
@@ -114,13 +114,15 @@ def describe(ctx, project_path, svg_id, neighbors):
         d_area_px = bbox_area(d_bbox) or 1.0
 
         all_elems: list[tuple[object, object]] = []
+        geom_meta: dict[str, dict] = {}
         for e in all_addressable_elements(tree):
             if not e.get("id"):
                 continue
             try:
-                bb = element_bbox(e)
+                bb, meta = element_bbox_in_root(e)
             except Exception:  # noqa: BLE001
-                bb = None
+                bb, meta = None, {}
+            geom_meta[e.get("id")] = meta
             all_elems.append((e, bb))
 
         doc_context = proj.session.get("context") or {}
@@ -134,6 +136,7 @@ def describe(ctx, project_path, svg_id, neighbors):
                 all_elems if neighbors else [],
                 d_w_px, d_h_px, d_area_px,
             )
+            description.update(geom_meta.get(svg_id, {}))
             if doc_context:
                 description["document_context"] = doc_context
             emit(ctx, description)
@@ -141,11 +144,13 @@ def describe(ctx, project_path, svg_id, neighbors):
 
         out = []
         for e, bb in all_elems:
-            out.append(describe_element(
+            desc = describe_element(
                 e, bb, d_bbox,
                 all_elems if neighbors else [],
                 d_w_px, d_h_px, d_area_px,
-            ))
+            )
+            desc.update(geom_meta.get(e.get("id"), {}))
+            out.append(desc)
         payload = {
             "design_bbox_px": list(d_bbox),
             "design_size_mm": [round(px_to_mm(d_w_px), 2),
