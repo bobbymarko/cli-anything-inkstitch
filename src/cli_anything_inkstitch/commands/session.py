@@ -52,7 +52,7 @@ def undo(ctx, project_path, steps):
                 break
             patch = entry["patch"]
             if patch["type"] == "metadata_diff":
-                _reverse_metadata(proj, patch)
+                _reverse_metadata(proj, patch, tree)
             else:
                 if tree is None:
                     raise UserError("project has no SVG to undo against")
@@ -75,7 +75,7 @@ def redo(ctx, project_path, steps):
                 break
             patch = entry["patch"]
             if patch["type"] == "metadata_diff":
-                _apply_metadata(proj, patch)
+                _apply_metadata(proj, patch, tree)
             else:
                 if tree is None:
                     raise UserError("project has no SVG to redo against")
@@ -119,13 +119,23 @@ def reset(ctx, project_path):
         emit(ctx, {"reset": True})
 
 
-def _apply_metadata(proj, patch):
-    after = patch.get("after", {})
-    for k, v in after.items():
-        proj.session[k] = v
+def _apply_metadata(proj, patch, tree=None):
+    _set_session_keys(proj, patch.get("after", {}), tree)
 
 
-def _reverse_metadata(proj, patch):
-    before = patch.get("before", {})
-    for k, v in before.items():
-        proj.session[k] = v
+def _reverse_metadata(proj, patch, tree=None):
+    _set_session_keys(proj, patch.get("before", {}), tree)
+
+
+def _set_session_keys(proj, desired: dict, tree=None) -> None:
+    # None means "key absent", matching attr_diff semantics in history.py.
+    for k, v in desired.items():
+        if v is None:
+            proj.session.pop(k, None)
+        else:
+            proj.session[k] = v
+        if k == "thread_palette" and tree is not None:
+            # set-palette writes both session AND <metadata>/<inkstitch:thread-palette>;
+            # keep them in sync through undo/redo (None removes the metadata key).
+            from cli_anything_inkstitch.svg.document import set_inkstitch_metadata
+            set_inkstitch_metadata(tree, "thread-palette", v)

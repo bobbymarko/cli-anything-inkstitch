@@ -136,12 +136,16 @@ def set_hoop(ctx, project_path, name, width_mm, height_mm):
                 "width_mm": float(width_mm),
                 "height_mm": float(height_mm),
             }
-        from cli_anything_inkstitch.history import make_entry, metadata_diff
-        from cli_anything_inkstitch.history import push as _push
-        _push(proj.history, make_entry("document set-hoop", metadata_diff(
-            {"hoop": before}, {"hoop": proj.session["hoop"]}
-        ), scope="project"))
+        _record_session_change(proj, "document set-hoop",
+                               {"hoop": before}, {"hoop": proj.session["hoop"]})
         emit(ctx, {"hoop": proj.session["hoop"]})
+
+
+def _record_session_change(proj, command: str, before: dict, after: dict) -> None:
+    """Record a session-key mutation in history so it participates in undo/redo."""
+    from cli_anything_inkstitch.history import make_entry, metadata_diff
+    from cli_anything_inkstitch.history import push as _push
+    _push(proj.history, make_entry(command, metadata_diff(before, after), scope="project"))
 
 
 HOOP_PRESETS = {
@@ -160,7 +164,9 @@ HOOP_PRESETS = {
 @click.pass_context
 def set_units(ctx, project_path, units):
     with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+        before = {"units": proj.session.get("units")}
         proj.session["units"] = units
+        _record_session_change(proj, "document set-units", before, {"units": units})
         emit(ctx, {"units": units})
 
 
@@ -170,7 +176,10 @@ def set_units(ctx, project_path, units):
 @click.pass_context
 def set_machine_target(ctx, project_path, fmt):
     with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+        before = {"machine_target": proj.session.get("machine_target")}
         proj.session["machine_target"] = fmt
+        _record_session_change(proj, "document set-machine-target",
+                               before, {"machine_target": fmt})
         emit(ctx, {"machine_target": fmt})
 
 
@@ -190,9 +199,13 @@ def set_palette(ctx, project_path, palette):
     """
     from cli_anything_inkstitch.svg.document import set_inkstitch_metadata
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
+        before = {"thread_palette": proj.session.get("thread_palette")}
         proj.session["thread_palette"] = palette
         if tree is not None:
             set_inkstitch_metadata(tree, "thread-palette", palette)
+        # undo/redo re-syncs the SVG metadata for this key — see session._set_session_keys
+        _record_session_change(proj, "document set-palette",
+                               before, {"thread_palette": palette})
         emit(ctx, {"thread_palette": palette,
                    "wrote_svg_metadata": tree is not None})
 
@@ -259,7 +272,10 @@ def list_thread_colors(ctx, project_path):
 @click.pass_context
 def set_collapse_len(ctx, project_path, mm):
     with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+        before = {"collapse_len_mm": proj.session.get("collapse_len_mm")}
         proj.session["collapse_len_mm"] = float(mm)
+        _record_session_change(proj, "document set-collapse-len",
+                               before, {"collapse_len_mm": float(mm)})
         emit(ctx, {"collapse_len_mm": float(mm)})
 
 
@@ -269,7 +285,10 @@ def set_collapse_len(ctx, project_path, mm):
 @click.pass_context
 def set_min_stitch_len(ctx, project_path, mm):
     with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+        before = {"min_stitch_len_mm": proj.session.get("min_stitch_len_mm")}
         proj.session["min_stitch_len_mm"] = float(mm)
+        _record_session_change(proj, "document set-min-stitch-len",
+                               before, {"min_stitch_len_mm": float(mm)})
         emit(ctx, {"min_stitch_len_mm": float(mm)})
 
 
@@ -290,7 +309,10 @@ def set_binary(ctx, project_path, binary_path):
     if not p.is_file():
         raise UserError(f"not a file: {p}")
     with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+        before = {"inkstitch_binary": proj.session.get("inkstitch_binary")}
         proj.session["inkstitch_binary"] = str(p)
+        _record_session_change(proj, "document set-binary",
+                               before, {"inkstitch_binary": str(p)})
         emit(ctx, {"inkstitch_binary": str(p)})
 
 
@@ -345,6 +367,7 @@ def set_context(ctx, project_path, material, stretch, thread, stabilizer,
     """
     with open_project(ctx, project_path, mutate=True) as (proj, _tree):
         ctx_obj = _ensure_context(proj)
+        before = dict(ctx_obj)
         if clear:
             ctx_obj.clear()
         # Typed fields
@@ -364,6 +387,9 @@ def set_context(ctx, project_path, material, stretch, thread, stabilizer,
         # Removals
         for k in unset_keys:
             ctx_obj.pop(k, None)
+        if dict(ctx_obj) != before:
+            _record_session_change(proj, "document set-context",
+                                   {"context": before}, {"context": dict(ctx_obj)})
         emit(ctx, {"context": dict(ctx_obj)})
 
 

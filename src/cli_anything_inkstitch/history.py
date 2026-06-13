@@ -14,12 +14,17 @@ import uuid
 
 
 def _ulid() -> str:
-    # ulid-py's API varies across versions; uuid4 is good enough for a 50-entry
-    # ring buffer keyed only for human reference.
+    # uuid4 is good enough for a 50-entry ring buffer keyed only for human
+    # reference; no need for a sortable-ID dependency.
     return f"h_{uuid.uuid4().hex[:26].upper()}"
 
 
 HISTORY_LIMIT = 50
+
+# Patches embed XML strings directly in the project JSON, which is parsed and
+# rewritten on every command. Cap how much XML one entry may carry so a huge
+# subtree_replace can't balloon the project file (50-entry ring buffer × MBs).
+MAX_PATCH_XML_BYTES = 256 * 1024
 
 
 def _now_iso() -> str:
@@ -70,7 +75,25 @@ def metadata_diff(before: dict, after: dict) -> dict:
 
 # ---- entry construction + ring buffer ----
 
+def _patch_xml_bytes(patch: dict) -> int:
+    return sum(
+        len(v.encode("utf-8", "ignore"))
+        for k, v in patch.items()
+        if isinstance(v, str) and k.endswith("_xml")
+    )
+
+
 def make_entry(command: str, patch: dict, scope: str = "svg") -> dict:
+    size = _patch_xml_bytes(patch)
+    if size > MAX_PATCH_XML_BYTES:
+        # Record the command but not the (huge) XML payload. apply_patch
+        # refuses these with a clear message instead of silently bloating
+        # the project file.
+        patch = {
+            "type": "oversize",
+            "original_type": patch.get("type"),
+            "xml_bytes": size,
+        }
     return {
         "id": _ulid(),
         "ts": _now_iso(),
@@ -132,6 +155,12 @@ def apply_patch(tree, patch: dict, *, reverse: bool = False) -> None:
     elif ptype == "metadata_diff":
         # metadata is on the project, not the SVG tree — caller handles
         pass
+    elif ptype == "oversize":
+        raise ProjectError(
+            f"this history entry's change was too large to record "
+            f"({patch.get('xml_bytes', '?')} bytes of XML, limit {MAX_PATCH_XML_BYTES}); "
+            "undo/redo is unavailable for it. Use `session reset` to clear history."
+        )
     else:
         raise ProjectError(f"unknown patch type: {ptype}")
 
@@ -163,6 +192,22 @@ def _apply_subtree_replace(tree, patch: dict, *, reverse: bool) -> None:
     parent.replace(old, new)
 
 
+def _verify_indexed_node(parent, index: int, xml_str: str, action: str) -> None:
+    """Guard index-based deletes: the node at `index` must match the recorded XML.
+
+    Protects against deleting the wrong sibling when the tree was modified
+    outside the history chain (e.g. after an external edit forced through).
+    """
+    expected = etree.fromstring(xml_str)
+    node = parent[index]
+    expected_id = expected.get("id")
+    if node.tag != expected.tag or (expected_id and node.get("id") != expected_id):
+        raise ProjectError(
+            f"{action}: node at index {index} does not match the recorded patch "
+            "(SVG structure changed since this history entry was made)"
+        )
+
+
 def _apply_node_insert(tree, patch: dict, *, reverse: bool) -> None:
     matches = tree.getroot().xpath(patch["parent_xpath"])
     if not matches:
@@ -172,6 +217,7 @@ def _apply_node_insert(tree, patch: dict, *, reverse: bool) -> None:
         # undo of insert == delete the inserted node at index
         if patch["index"] >= len(parent):
             raise ProjectError("insert undo: index out of range")
+        _verify_indexed_node(parent, patch["index"], patch["after_xml"], "insert undo")
         del parent[patch["index"]]
     else:
         new = etree.fromstring(patch["after_xml"])
@@ -190,4 +236,5 @@ def _apply_node_delete(tree, patch: dict, *, reverse: bool) -> None:
     else:
         if patch["index"] >= len(parent):
             raise ProjectError("delete: index out of range")
+        _verify_indexed_node(parent, patch["index"], patch["before_xml"], "delete")
         del parent[patch["index"]]

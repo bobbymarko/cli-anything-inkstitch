@@ -194,3 +194,43 @@ def test_document_set_hoop_undo(runner, fixture_svg, project_path):
     jrun(runner, "session", "undo", "--project", project_path)
     info = jrun(runner, "document", "info", "--project", project_path)
     assert info["session"]["hoop"]["name"] == "100x100"
+
+
+def test_document_set_units_undo(runner, fixture_svg, project_path):
+    invoke(runner, "document", "open", "--project", project_path, "--svg", fixture_svg)
+    jrun(runner, "document", "set-units", "--project", project_path, "--units", "in")
+    info = jrun(runner, "document", "info", "--project", project_path)
+    assert info["session"]["units"] == "in"
+    jrun(runner, "session", "undo", "--project", project_path)
+    info = jrun(runner, "document", "info", "--project", project_path)
+    assert info["session"]["units"] == "mm"
+
+
+def test_document_set_palette_undo_resyncs_svg_metadata(runner, fixture_svg, project_path):
+    invoke(runner, "document", "open", "--project", project_path, "--svg", fixture_svg)
+    jrun(runner, "document", "set-palette", "--project", project_path,
+         "--palette", "Madeira Polyneon")
+    colors = jrun(runner, "document", "list-thread-colors", "--project", project_path)
+    assert colors["thread_palette"] == "Madeira Polyneon"
+
+    jrun(runner, "session", "undo", "--project", project_path)
+    info = jrun(runner, "document", "info", "--project", project_path)
+    assert info["session"].get("thread_palette") is None
+    colors = jrun(runner, "document", "list-thread-colors", "--project", project_path)
+    assert colors["thread_palette"] is None  # SVG metadata reverted too
+
+    jrun(runner, "session", "redo", "--project", project_path)
+    colors = jrun(runner, "document", "list-thread-colors", "--project", project_path)
+    assert colors["thread_palette"] == "Madeira Polyneon"
+
+
+def test_document_set_context_undo(runner, fixture_svg, project_path):
+    invoke(runner, "document", "open", "--project", project_path, "--svg", fixture_svg)
+    jrun(runner, "document", "set-context", "--project", project_path,
+         "--material", "denim", "--stretch", "low")
+    jrun(runner, "document", "set-context", "--project", project_path,
+         "--material", "knit cotton", "--stretch", "high")
+    jrun(runner, "session", "undo", "--project", project_path)
+    got = jrun(runner, "document", "get-context", "--project", project_path)
+    assert got["context"]["material"] == "denim"
+    assert got["context"]["stretch"] == "low"
