@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import click
 
+from cli_anything_inkstitch.binary import installed_version
 from cli_anything_inkstitch.errors import UserError
 from cli_anything_inkstitch.output import emit
-from cli_anything_inkstitch.schema.cache import load_schema
+from cli_anything_inkstitch.schema.cache import load_schema, schema_warning
+
+
+def _binary_version(ctx) -> str | None:
+    return installed_version(ctx.obj.get("binary_override") if ctx.obj else None)
 
 
 @click.group("schema")
@@ -18,7 +23,8 @@ def schema_group():
 @click.option("--refresh-schema", is_flag=True)
 @click.pass_context
 def list_stitch_types(ctx, refresh_schema):
-    schema = load_schema(refresh=refresh_schema)
+    bv = _binary_version(ctx)
+    schema = load_schema(refresh=refresh_schema, prefer_version=bv)
     types = []
     for name, st in schema["stitch_types"].items():
         types.append({
@@ -27,7 +33,10 @@ def list_stitch_types(ctx, refresh_schema):
             "geometry_requirements": st.get("geometry_requirements", []),
             "param_count": len(st.get("params", {})),
         })
-    emit(ctx, {"stitch_types": types})
+    payload = {"stitch_types": types}
+    if (w := schema_warning(schema, bv)):
+        payload["schema_warning"] = w
+    emit(ctx, payload)
 
 
 @schema_group.command("get-stitch-type")
@@ -35,11 +44,15 @@ def list_stitch_types(ctx, refresh_schema):
 @click.option("--refresh-schema", is_flag=True)
 @click.pass_context
 def get_stitch_type(ctx, stitch_type, refresh_schema):
-    schema = load_schema(refresh=refresh_schema)
+    bv = _binary_version(ctx)
+    schema = load_schema(refresh=refresh_schema, prefer_version=bv)
     st = schema["stitch_types"].get(stitch_type)
     if not st:
         raise UserError(f"unknown stitch type: {stitch_type}")
-    emit(ctx, {"stitch_type": stitch_type, **st})
+    payload = {"stitch_type": stitch_type, **st}
+    if (w := schema_warning(schema, bv)):
+        payload["schema_warning"] = w
+    emit(ctx, payload)
 
 
 @schema_group.command("get-extension")

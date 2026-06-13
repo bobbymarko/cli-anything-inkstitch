@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,10 +20,20 @@ from cli_anything_inkstitch.schema.bootstrap import VISUAL_COMMANDS
 
 # ---- inkstitch source resolution ------------------------------------------------
 
+# Every candidate is validated by the lib/elements/element.py existence check in
+# find_inkstitch_source(), so listing a path that doesn't apply is harmless.
 DEFAULT_SOURCE_CANDIDATES = [
     Path(__file__).resolve().parents[3] / "inkstitch",  # sibling clone in this repo
+    # macOS app bundle (both naming variants seen in the wild)
+    Path("/Applications/Ink Stitch.app/Contents/Resources/lib/python3.10/site-packages/inkstitch"),
     Path("/Applications/Inkstitch.app/Contents/Resources/lib/python3.10/site-packages/inkstitch"),
+    # Inkscape user-extension installs (where the Ink/Stitch extension actually lives)
+    Path.home() / "Library/Application Support/org.inkscape.Inkscape/config/inkscape/extensions/inkstitch",  # macOS
+    Path.home() / ".config/inkscape/extensions/inkstitch",  # Linux
+    Path.home() / "AppData/Roaming/inkscape/extensions/inkstitch",  # Windows
+    # System installs
     Path("/usr/share/inkstitch"),
+    Path(r"C:\Program Files\Ink Stitch"),
 ]
 
 ELEMENT_FILES = ["element.py", "fill_stitch.py", "satin_column.py", "stroke.py", "clone.py"]
@@ -162,6 +173,12 @@ def find_inkstitch_source(explicit: str | None = None) -> Path | None:
         if (p / "lib" / "elements" / "element.py").exists():
             return p
         return None
+    env = os.environ.get("INKSTITCH_SOURCE")
+    if env:
+        p = Path(env)
+        if (p / "lib" / "elements" / "element.py").exists():
+            return p
+        return None  # explicit env var that doesn't validate is an error, not a fallthrough
     for cand in DEFAULT_SOURCE_CANDIDATES:
         if (cand / "lib" / "elements" / "element.py").exists():
             return cand

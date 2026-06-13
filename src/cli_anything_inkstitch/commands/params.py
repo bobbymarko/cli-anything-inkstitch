@@ -17,7 +17,7 @@ from cli_anything_inkstitch.commands._helpers import (
 from cli_anything_inkstitch.errors import UserError
 from cli_anything_inkstitch.history import attr_diff
 from cli_anything_inkstitch.output import emit
-from cli_anything_inkstitch.schema.cache import load_schema
+from cli_anything_inkstitch.schema.cache import load_schema, schema_warning
 from cli_anything_inkstitch.schema.validate import validate_geometry, validate_param
 from cli_anything_inkstitch.svg.attrs import (
     INKSTITCH_PREFIX,
@@ -82,7 +82,9 @@ def _strip_competing_definers(elem, target: str, schema: dict) -> dict[str, str 
 @click.pass_context
 def set_cmd(ctx, project_path, svg_id, stitch_type, force, refresh_schema):
     """Set --stitch-type and any --<param>=<value> on an element."""
-    schema = load_schema(refresh=refresh_schema)
+    from cli_anything_inkstitch.binary import installed_version
+    binary_version = installed_version(ctx.obj.get("binary_override") if ctx.obj else None)
+    schema = load_schema(refresh=refresh_schema, prefer_version=binary_version)
     extra = _parse_extra_kv_args(ctx.args)
 
     if stitch_type is None and not extra:
@@ -141,11 +143,14 @@ def set_cmd(ctx, project_path, svg_id, stitch_type, force, refresh_schema):
         proj.elements[svg_id]["stitch_type"] = classify(elem)
         proj.elements[svg_id]["set_params"] = set_params_on(elem)
 
-        emit(ctx, {
+        payload = {
             "id": svg_id,
             "stitch_type": classify(elem),
             "changed": {k.replace(INKSTITCH_PREFIX, ""): v for k, v in after.items()},
-        })
+        }
+        if (w := schema_warning(schema, binary_version)):
+            payload["schema_warning"] = w
+        emit(ctx, payload)
 
 
 @params.command("unset")

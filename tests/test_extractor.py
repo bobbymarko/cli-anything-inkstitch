@@ -108,3 +108,72 @@ def test_load_schema_prefers_extracted_cache(source_root, tmp_path, monkeypatch)
     assert len(loaded["stitch_types"]["satin_column"]["params"]) > len(
         BOOTSTRAP_TYPES["satin_column"]["params"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Source resolution (env var) + bootstrap degradation visibility
+# ---------------------------------------------------------------------------
+
+def _fake_source_tree(base: Path) -> Path:
+    src = base / "fake-inkstitch"
+    (src / "lib" / "elements").mkdir(parents=True)
+    (src / "lib" / "elements" / "element.py").write_text("# stub")
+    return src
+
+
+def test_find_source_via_env_var(tmp_path, monkeypatch):
+    src = _fake_source_tree(tmp_path)
+    monkeypatch.setenv("INKSTITCH_SOURCE", str(src))
+    assert find_inkstitch_source() == src
+
+
+def test_invalid_env_var_does_not_fall_through(tmp_path, monkeypatch):
+    """A set-but-wrong INKSTITCH_SOURCE is an error, not silently ignored."""
+    monkeypatch.setenv("INKSTITCH_SOURCE", str(tmp_path / "nope"))
+    assert find_inkstitch_source() is None
+
+
+def test_explicit_arg_beats_env_var(tmp_path, monkeypatch):
+    src = _fake_source_tree(tmp_path)
+    monkeypatch.setenv("INKSTITCH_SOURCE", str(tmp_path / "nope"))
+    assert find_inkstitch_source(str(src)) == src
+
+
+def test_bootstrap_schema_is_marked_and_warns():
+    from cli_anything_inkstitch.schema.bootstrap import bootstrap_schema
+    from cli_anything_inkstitch.schema.cache import is_bootstrap, schema_warning
+
+    bs = bootstrap_schema()
+    assert bs["source"]["kind"] == "bootstrap"
+    assert is_bootstrap(bs)
+    assert "bootstrap" in schema_warning(bs)
+    assert schema_warning({"source": {"kind": "ast-extract"}}) is None
+    # legacy cache files without a source block count as degraded too
+    assert is_bootstrap({})
+
+
+def test_bootstrap_warning_surfaces_in_cli_json(tmp_path, monkeypatch):
+    """With no extracted cache available, --json output must flag the degraded schema."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    runner = CliRunner()
+    result = runner.invoke(
+        root, ["--json", "schema", "list-stitch-types"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "schema_warning" in data
+    assert "bootstrap" in data["schema_warning"]
+
+
+def test_extracted_schema_emits_no_warning_in_cli_json(source_root, tmp_path, monkeypatch):
+    from cli_anything_inkstitch.schema.extract import extract_schema, write_cache
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    write_cache(extract_schema(source_root))
+    runner = CliRunner()
+    result = runner.invoke(
+        root, ["--json", "schema", "list-stitch-types"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert "schema_warning" not in data

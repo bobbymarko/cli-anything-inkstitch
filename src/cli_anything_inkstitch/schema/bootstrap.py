@@ -252,4 +252,5 @@ def bootstrap_schema(version: str = "bootstrap") -> dict:
         "extensions": {},  # populated only by full extractor
         "commands": VISUAL_COMMANDS,
         "machine_formats": [],  # populated by export.formats at runtime
+        "source": {"kind": "bootstrap"},
     }

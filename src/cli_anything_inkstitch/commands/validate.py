@@ -9,7 +9,7 @@ from cli_anything_inkstitch.binary import discover, run_extension
 from cli_anything_inkstitch.commands._helpers import open_project
 from cli_anything_inkstitch.errors import UserError, ValidationError
 from cli_anything_inkstitch.output import emit
-from cli_anything_inkstitch.schema.cache import load_schema
+from cli_anything_inkstitch.schema.cache import load_schema, schema_warning
 from cli_anything_inkstitch.svg.attrs import INKSTITCH_PREFIX
 from cli_anything_inkstitch.svg.document import all_addressable_elements
 from cli_anything_inkstitch.svg.elements import classify, warnings_for_element
@@ -29,7 +29,9 @@ def validate():
               help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
 def static(ctx, project_path, strict, refresh_schema):
-    schema = load_schema(refresh=refresh_schema)
+    from cli_anything_inkstitch.binary import installed_version
+    binary_version = installed_version(ctx.obj.get("binary_override") if ctx.obj else None)
+    schema = load_schema(refresh=refresh_schema, prefer_version=binary_version)
     issues = []
     with open_project(ctx, project_path) as (proj, tree):
         if tree is None:
@@ -63,6 +65,8 @@ def static(ctx, project_path, strict, refresh_schema):
                                         "type": "unknown_param",
                                         "message": f"unknown param {local} for stitch type {st_name}"})
     payload = {"issues": issues, "ok": not any(i["severity"] == "error" for i in issues)}
+    if (w := schema_warning(schema, binary_version)):
+        payload["schema_warning"] = w
     emit(ctx, payload)
     if strict and issues:
         raise ValidationError(f"{len(issues)} issue(s) found")
