@@ -1,10 +1,17 @@
-"""`font` command group — create and edit Inkstitch embroidery fonts."""
+"""`font` command group — create and edit Inkstitch embroidery fonts.
+
+Design note: font commands operate on standalone font *directories* (→.svg +
+font.json + preview.png), not on project-attached SVGs, so they deliberately
+bypass the project/history system (no --project, no undo/redo, no project
+lock). Fonts are portable assets meant to be versioned with git or copied
+into Ink/Stitch's font folder; the project undo model doesn't apply to them.
+Writes are still atomic (tmp + rename) via svg.document.write_svg_atomic.
+"""
 
 from __future__ import annotations
 
 import copy
 import json
-import os
 import re
 import secrets
 from pathlib import Path
@@ -14,374 +21,63 @@ from lxml import etree
 
 from cli_anything_inkstitch.errors import UserError
 from cli_anything_inkstitch.output import emit
-from cli_anything_inkstitch.svg.attrs import (
-    INKSCAPE_NS, INKSTITCH_NS, SVG_NS, XLINK_NS,
+from cli_anything_inkstitch.svg.attrs import INKSCAPE_NS, SVG_NS
+
+# Pure-logic helpers were moved out of this module into the embroidery/ and
+# font_format/ packages.  Every moved name is re-imported here explicitly so
+# existing imports of `cli_anything_inkstitch.commands.font` keep working.
+from cli_anything_inkstitch.embroidery.analysis import (
+    _detect_exit_advance,
+    _emb_to_svg_paths,
+    _exit_advance_at_connection_y,
+    _last_stitch_svg_y,
+    _rotate_coords,  # noqa: F401  (re-exported for back-compat)
+    _visual_baseline_y,
 )
-
-SODIPODI_NS = "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
-
-FONT_NSMAP = {
-    None: SVG_NS,
-    "inkscape": INKSCAPE_NS,
-    "sodipodi": SODIPODI_NS,
-    "inkstitch": INKSTITCH_NS,
-    "xlink": XLINK_NS,
-    "svg": SVG_NS,
-}
-
-FONT_SVG_VERSION = 2  # inkstitch_svg_version matching bundled fonts
-
-# Fixed SVG document height used by all fonts we create.
-# Guide positions are expressed as Inkscape Y = doc_height - svg_y.
-_DOC_HEIGHT = 500.0
-_DOC_WIDTH = 500.0
-
-
-# ---------------------------------------------------------------------------
-# Path bbox helper — used to estimate horiz_adv_x
-# ---------------------------------------------------------------------------
-
-_TOKEN_RE = re.compile(
-    r'([MmLlHhVvCcSsQqTtAaZz])'
-    r'|([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)'
+from cli_anything_inkstitch.embroidery.bx import (
+    _BX_DESCENDER_MAX_BF,
+    _BX_DESCENDER_MIN_BF,
+    _extract_bx_connection_offsets,
+    _locate_bzip2_payload,  # noqa: F401  (re-exported for back-compat)
+    _parse_bx_glyphs,  # noqa: F401  (re-exported for back-compat)
 )
-
-
-def _tokenize_path(d: str):
-    """Yield (cmd_letter_or_None, number_or_None) pairs."""
-    for letter, num in _TOKEN_RE.findall(d):
-        if letter:
-            yield letter, None
-        else:
-            yield None, float(num)
-
-
-def _path_x_range(d: str) -> tuple[float, float]:
-    """Return (min_x, max_x) for endpoint x-coordinates of an SVG path.
-
-    Tracks absolute current position through all standard commands.
-    Returns (0.0, 0.0) if no coordinates are found.
-    """
-    # Build list of (command, [args])
-    segments: list[tuple[str, list[float]]] = []
-    cur_cmd = None
-    cur_args: list[float] = []
-    for letter, num in _tokenize_path(d):
-        if letter is not None:
-            if cur_cmd is not None:
-                segments.append((cur_cmd, cur_args))
-            cur_cmd = letter
-            cur_args = []
-        else:
-            cur_args.append(num)  # type: ignore[arg-type]
-    if cur_cmd is not None:
-        segments.append((cur_cmd, cur_args))
-
-    xs: list[float] = []
-    cx, cy = 0.0, 0.0
-    sx, sy = 0.0, 0.0  # subpath start
-
-    def consume_pairs(args, relative, n_skip=0):
-        nonlocal cx, cy
-        i = n_skip
-        while i + 1 < len(args):
-            dx, dy = args[i], args[i + 1]
-            if relative:
-                cx += dx
-                cy += dy
-            else:
-                cx, cy = dx, dy
-            xs.append(cx)
-            i += 2
-
-    for cmd, args in segments:
-        uc = cmd.upper()
-        rel = cmd.islower()
-        if not args and uc != 'Z':
-            continue
-
-        if uc == 'M':
-            # First coord is moveto; subsequent are implicit lineto
-            if rel:
-                cx += args[0]; cy += args[1]
-            else:
-                cx, cy = args[0], args[1]
-            xs.append(cx)
-            sx, sy = cx, cy
-            consume_pairs(args, rel, n_skip=2)
-
-        elif uc in ('L', 'T'):
-            consume_pairs(args, rel)
-
-        elif uc == 'H':
-            for x in args:
-                cx = cx + x if rel else x
-                xs.append(cx)
-
-        elif uc == 'V':
-            for y in args:
-                cy = cy + y if rel else y
-
-        elif uc == 'C':
-            i = 0
-            while i + 5 < len(args):
-                ex, ey = args[i + 4], args[i + 5]
-                if rel:
-                    cx += ex; cy += ey
-                else:
-                    cx, cy = ex, ey
-                xs.append(cx)
-                i += 6
-
-        elif uc in ('S', 'Q'):
-            i = 0
-            while i + 3 < len(args):
-                ex, ey = args[i + 2], args[i + 3]
-                if rel:
-                    cx += ex; cy += ey
-                else:
-                    cx, cy = ex, ey
-                xs.append(cx)
-                i += 4
-
-        elif uc == 'A':
-            i = 0
-            while i + 6 < len(args):
-                ex, ey = args[i + 5], args[i + 6]
-                if rel:
-                    cx += ex; cy += ey
-                else:
-                    cx, cy = ex, ey
-                xs.append(cx)
-                i += 7
-
-        elif uc == 'Z':
-            cx, cy = sx, sy
-
-    if not xs:
-        return 0.0, 0.0
-    return min(xs), max(xs)
-
-
-def _elem_x_range(elem) -> tuple[float, float]:
-    """Return (min_x, max_x) across all <path> descendants of elem (or elem itself)."""
-    all_xs: list[float] = []
-    # include elem itself if it's a path
-    targets = list(elem.iter())
-    for node in targets:
-        if not isinstance(node.tag, str):
-            continue
-        local = etree.QName(node.tag).localname
-        if local == 'path':
-            d = node.get('d', '')
-            if d:
-                lo, hi = _path_x_range(d)
-                all_xs.extend([lo, hi])
-    if not all_xs:
-        return 0.0, 0.0
-    return min(all_xs), max(all_xs)
-
-
-# ---------------------------------------------------------------------------
-# Font SVG building helpers
-# ---------------------------------------------------------------------------
-
-def _inkscape_y(svg_y: float, doc_height: float = _DOC_HEIGHT) -> float:
-    """Convert SVG Y (from top) to Inkscape Y (from bottom)."""
-    return doc_height - svg_y
-
-
-def _build_guide(label: str, svg_y: float, guide_id: str, doc_height: float = _DOC_HEIGHT) -> etree._Element:
-    ink_y = _inkscape_y(svg_y, doc_height)
-    g = etree.Element(f"{{{SODIPODI_NS}}}guide")
-    g.set("position", f"0,{ink_y:.4f}")
-    g.set("orientation", "0,1")
-    g.set(f"{{{INKSCAPE_NS}}}label", label)
-    g.set("id", guide_id)
-    g.set(f"{{{INKSCAPE_NS}}}locked", "false")
-    return g
-
-
-def _build_font_svg(
-    baseline_y: float,
-    ascender_y: float,
-    descender_y: float,
-    caps_y: float,
-    xheight_y: float,
-    doc_height: float = _DOC_HEIGHT,
-    doc_width: float = _DOC_WIDTH,
-) -> etree._ElementTree:
-    """Build a minimal Inkstitch font variant SVG with guides and no glyphs."""
-    root = etree.Element(
-        f"{{{SVG_NS}}}svg",
-        nsmap=FONT_NSMAP,
-    )
-    root.set("version", "1.1")
-    root.set("id", "svg_root")
-    root.set("width", f"{doc_width:.4f}")
-    root.set("height", f"{doc_height:.4f}")
-    root.set("viewBox", f"0 0 {doc_width:.4f} {doc_height:.4f}")
-    root.set(f"{{{INKSCAPE_NS}}}version", "1.3")
-
-    # namedview with guides
-    nv = etree.SubElement(root, f"{{{SODIPODI_NS}}}namedview")
-    nv.set("id", "namedview_font")
-    nv.set(f"{{{INKSCAPE_NS}}}document-units", "px")
-    nv.append(_build_guide("baseline", baseline_y, "guide_baseline", doc_height))
-    nv.append(_build_guide("ascender", ascender_y, "guide_ascender", doc_height))
-    nv.append(_build_guide("descender", descender_y, "guide_descender", doc_height))
-    nv.append(_build_guide("caps", caps_y, "guide_caps", doc_height))
-    nv.append(_build_guide("xheight", xheight_y, "guide_xheight", doc_height))
-
-    # metadata
-    md = etree.SubElement(root, f"{{{SVG_NS}}}metadata")
-    md.set("id", "metadata_font")
-    version_el = etree.SubElement(md, f"{{{INKSTITCH_NS}}}inkstitch_svg_version")
-    version_el.text = str(FONT_SVG_VERSION)
-
-    # defs (empty for now)
-    etree.SubElement(root, f"{{{SVG_NS}}}defs").set("id", "defs_font")
-
-    return etree.ElementTree(root)
-
-
-# ---------------------------------------------------------------------------
-# font.json helpers
-# ---------------------------------------------------------------------------
-
-def _default_font_json(name: str, units_per_em: float, size_mm: float,
-                        leading: float,
-                        description: str = "",
-                        keywords: list[str] | None = None) -> dict:
-    return {
-        "name": name,
-        "description": description,
-        "keywords": keywords or [],
-        "units_per_em": units_per_em,
-        "leading": leading,
-        "size": size_mm,
-        "min_scale": 0.5,
-        "max_scale": 3.0,
-        "auto_satin": False,
-        "reversible": False,
-        "sortable": False,
-        "letter_case": "",
-        "default_glyph": "?",
-        "kerning_pairs": {},
-        "horiz_adv_x_default": round(units_per_em * 0.6, 1),
-        "horiz_adv_x_space": round(units_per_em * 0.3, 1),
-        "horiz_adv_x": {},
-        "glyphs": [],
-        "default_variant": "→",
-        "text_direction": "ltr",
-        "baseline_y": 0,
-    }
-
-
-def _load_font_json(font_dir: Path) -> dict:
-    p = font_dir / "font.json"
-    if not p.exists():
-        raise UserError(f"font.json not found in {font_dir}")
-    with open(p, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save_font_json(font_dir: Path, data: dict) -> None:
-    p = font_dir / "font.json"
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
-
-def _load_font_svg(font_dir: Path) -> etree._ElementTree:
-    p = font_dir / "→.svg"
-    if not p.exists():
-        raise UserError(f"→.svg not found in {font_dir}")
-    parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
-    return etree.parse(str(p), parser)
-
-
-def _save_font_svg(tree: etree._ElementTree, font_dir: Path) -> None:
-    p = font_dir / "→.svg"
-    tmp = p.with_suffix(".svg.tmp")
-    tree.write(str(tmp), xml_declaration=True, encoding="UTF-8", pretty_print=True)
-    os.replace(tmp, p)
-
-
-def _get_font_baseline_y(tree: etree._ElementTree) -> float:
-    """Read baseline guide SVG_Y from font SVG."""
-    root = tree.getroot()
-    nv = root.find(f"{{{SODIPODI_NS}}}namedview")
-    if nv is None:
-        return _DOC_HEIGHT * 0.7  # fallback
-    for guide in nv.findall(f"{{{SODIPODI_NS}}}guide"):
-        label = guide.get(f"{{{INKSCAPE_NS}}}label", "")
-        if label == "baseline":
-            pos = guide.get("position", "0,0")
-            ink_y = float(pos.split(",")[1])
-            # Get doc height from root viewBox or height
-            vb = root.get("viewBox", "")
-            if vb:
-                parts = vb.split()
-                doc_h = float(parts[3]) if len(parts) == 4 else _DOC_HEIGHT
-            else:
-                doc_h = float(root.get("height", _DOC_HEIGHT))
-            return doc_h - ink_y  # SVG_Y = doc_height - inkscape_y
-    return _DOC_HEIGHT * 0.7
-
-
-# ---------------------------------------------------------------------------
-# Source SVG helpers
-# ---------------------------------------------------------------------------
-
-def _load_source_svg(path: str) -> etree._ElementTree:
-    p = Path(path)
-    if not p.exists():
-        raise UserError(f"source SVG not found: {path}")
-    parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
-    tree = etree.parse(str(p), parser)
-    root = tree.getroot()
-    if not root.tag.endswith("}svg") and root.tag != "svg":
-        raise UserError(f"not an SVG file: {path}")
-    return tree
-
-
-def _find_elem_by_id(tree: etree._ElementTree, elem_id: str):
-    matches = tree.getroot().xpath(f"//*[@id=$id]", id=elem_id)
-    return matches[0] if matches else None
-
-
-def _find_elems_by_label(tree: etree._ElementTree) -> list[tuple[str, object]]:
-    """Return [(char, elem)] for all elements with a single-char inkscape:label."""
-    results = []
-    for elem in tree.getroot().iter():
-        if not isinstance(elem.tag, str):
-            continue
-        label = elem.get(f"{{{INKSCAPE_NS}}}label", "")
-        # Single visible character (covers multi-byte Unicode)
-        if len(label) == 1:
-            results.append((label, elem))
-    return results
-
-
-def _find_source_baseline_y(tree: etree._ElementTree) -> float | None:
-    """Look for a 'baseline' guide in source SVG. Returns SVG_Y or None."""
-    root = tree.getroot()
-    nv = root.find(f"{{{SODIPODI_NS}}}namedview")
-    if nv is None:
-        return None
-    vb = root.get("viewBox", "")
-    if vb:
-        parts = vb.split()
-        doc_h = float(parts[3]) if len(parts) == 4 else _DOC_HEIGHT
-    else:
-        doc_h = float(root.get("height", _DOC_HEIGHT))
-    for guide in nv.findall(f"{{{SODIPODI_NS}}}guide"):
-        label = guide.get(f"{{{INKSCAPE_NS}}}label", "")
-        if label == "baseline":
-            pos = guide.get("position", "0,0")
-            ink_y = float(pos.split(",")[1])
-            return doc_h - ink_y
-    return None
+from cli_anything_inkstitch.embroidery.files import (
+    _DST_MM_PER_UNIT,  # noqa: F401  (re-exported for back-compat)
+    _DST_TO_SVG,
+    _EMB_EXTS,  # noqa: F401  (re-exported for back-compat)
+    _PUNCT_MAP,  # noqa: F401  (re-exported for back-compat)
+    _SVG_MM_PER_PX,
+    _find_embroidery_files,
+    _parse_char_from_stem,
+    _read_embroidery,
+)
+from cli_anything_inkstitch.font_format.metadata import (
+    _default_font_json,
+    _load_font_json,
+    _save_font_json,
+)
+from cli_anything_inkstitch.font_format.svg_build import (
+    FONT_NSMAP,  # noqa: F401  (re-exported for back-compat)
+    FONT_SVG_FILENAME,
+    FONT_SVG_VERSION,  # noqa: F401  (re-exported for back-compat)
+    SODIPODI_NS,  # noqa: F401  (re-exported for back-compat)
+    _DOC_HEIGHT,  # noqa: F401  (re-exported for back-compat)
+    _DOC_WIDTH,  # noqa: F401  (re-exported for back-compat)
+    _TOKEN_RE,  # noqa: F401  (re-exported for back-compat)
+    _build_font_svg,
+    _build_guide,  # noqa: F401  (re-exported for back-compat)
+    _elem_x_range,
+    _find_elem_by_id,
+    _find_elems_by_label,
+    _find_source_baseline_y,
+    _get_font_baseline_y,
+    _inkscape_y,  # noqa: F401  (re-exported for back-compat)
+    _load_font_svg,
+    _load_source_svg,
+    _path_x_range,  # noqa: F401  (re-exported for back-compat)
+    _save_font_svg,
+    _tokenize_path,  # noqa: F401  (re-exported for back-compat)
+)
 
 
 # ---------------------------------------------------------------------------
@@ -657,420 +353,15 @@ def remove_glyph(ctx, font_dir, char):
 
 
 # ---------------------------------------------------------------------------
-# DST/embroidery import helpers
+# Preview PNG generation (Pillow)
 # ---------------------------------------------------------------------------
 
-# 1 DST step = 0.1mm; 1 SVG px = 0.2646mm (= 25.4/96 mm)
-_DST_MM_PER_UNIT = 0.1
-_SVG_MM_PER_PX = 25.4 / 96  # ≈ 0.2646
-_DST_TO_SVG = _DST_MM_PER_UNIT / _SVG_MM_PER_PX  # ≈ 0.378
-
-# Embroidery file extensions pyembroidery can read
-_EMB_EXTS = {".dst", ".pes", ".vip", ".vp3", ".jef", ".hus", ".exp",
-             ".xxx", ".sew", ".shv", ".cnd", ".bx", ".pec"}
-
-_PUNCT_MAP = {
-    "period": ".", "comma": ",", "exclamation": "!", "question": "?",
-    "ampersand": "&", "apostrophe": "'", "quote": '"', "slash": "/",
-    "backslash": "\\", "dash": "-", "hyphen": "-", "underscore": "_",
-    "plus": "+", "minus": "-", "equals": "=", "equal": "=",
-    "at": "@", "pound": "#", "dollar": "$", "percent": "%",
-    "caret": "^", "asterisk": "*", "tilde": "~",
-    "parenopen": "(", "parenclose": ")", "parenthesisopen": "(",
-    "parenthesisclose": ")", "bracketopen": "[", "bracketclose": "]",
-    "braceopen": "{", "braceclose": "}",
-    "colon": ":", "semicolon": ";", "pipe": "|",
-    "lessthan": "<", "greaterthan": ">",
-}
-
-
-def _parse_char_from_stem(stem: str) -> str | None:
-    """Try to extract a single Unicode character from an embroidery filename stem.
-
-    Handles common naming conventions:
-      CapA / Cap_A → 'A'
-      LowA / Lowa / Low_a → 'a'
-      CapitalA → 'A'        (full-word "Capital" prefix)
-      Lowercaseb → 'b'      (full-word "Lowercase" prefix)
-      PunComma / Pun_Comma → ','
-      A_cap / a_low → 'A' / 'a'
-      Single letter or digit → that char
-      a-Star* → 'a'
-      'Floral Alphabet A15' → 'A'
-    """
-    # Strip common prefix patterns that encode size info
-    s = re.sub(r'\d+(\.\d+)?in', '', stem, flags=re.IGNORECASE)
-    # Strip leading brand prefixes (e.g. "TSS-Homerun", "StitchtopiaActuallyRomantic")
-    # by finding Cap/Low/Pun patterns or single-char patterns
-
-    # Pattern: Capital<Letter> / Lowercase<Letter> (full-word prefixes used by
-    # some packs, e.g. CapitalA.xxx, Lowercase_b.dst). Run BEFORE the shorter
-    # Cap/Low rules because otherwise "Low" matches the start of "Lowercaseb"
-    # and captures the wrong letter ('e'). Allow optional underscore/hyphen
-    # between the prefix and the letter.
-    m = re.search(r'Capital[_-]?([A-Za-z])', s, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-    m = re.search(r'Lowercase[_-]?([A-Za-z])', s, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).lower()
-
-    # Pattern: Cap<Letter>
-    m = re.search(r'Cap([A-Z])', s)
-    if m:
-        return m.group(1)
-
-    # Pattern: Low<Letter> (case-insensitive suffix, but letter is lowercase)
-    m = re.search(r'Low([A-Za-z])', s)
-    if m:
-        return m.group(1).lower()
-
-    # Pattern: Pun<Word>
-    m = re.search(r'Pun([A-Za-z]+)', s, flags=re.IGNORECASE)
-    if m:
-        word = m.group(1).lower()
-        if word in _PUNCT_MAP:
-            return _PUNCT_MAP[word]
-        return None
-
-    # Pattern: <prefix>_<letter>_(middle|side) — monogram-pack position convention.
-    # The letter's case is preserved (SSP_A_middle → 'A', SSP_a_side → 'a') so a
-    # downstream tool can case-encode middle vs. side into one font when the casing
-    # cleanly partitions, or split into two fonts otherwise.
-    m = re.search(r'_([A-Za-z])_(?:middle|side)\b', s, flags=re.IGNORECASE)
-    if m:
-        return m.group(1)
-
-    # Pattern: <UpperLetter>u — used by some monogram packs (Chain Monogram,
-    # Decorative Monogram) to mark the upper-case / center-of-monogram glyph;
-    # the matching lower-case / side glyph ships as a single letter (handled by
-    # the single-character fallback further down).
-    # Only matches uppercase to avoid swallowing words ending in "u".
-    m = re.match(r'^([A-Z])u$', s)
-    if m:
-        return m.group(1)
-
-    # Pattern: <Letter>_cap or <Letter>_Cap
-    m = re.match(r'^([A-Za-z])_cap', s, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-
-    # Pattern: <letter>_low
-    m = re.match(r'^([A-Za-z])_low', s, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).lower()
-
-    # Pattern: <char>-<anything> (e.g. "a-Star1inch")
-    m = re.match(r'^([A-Za-z0-9])-', s)
-    if m:
-        return m.group(1)
-
-    # Pattern: "Multi Word Prefix {char}..." e.g. "Floral Alphabet A15" → 'A',
-    # "Floral Alphabet 0 2 1" → '0', "Floral Alphabet 215 1" → '2'.
-    # Two or more title-case words precede the glyph character.
-    m = re.match(r'^(?:[A-Za-z][A-Za-z\-]*\s+){2,}([A-Za-z0-9])', s)
-    if m:
-        ch = m.group(1)
-        return ch if (ch.isupper() or ch.isdigit()) else ch.lower()
-
-    # Pattern: "Floral Alphabet A15" → look for '<Word> <SingleLetter><digits>'
-    m = re.search(r'\b([A-Za-z])\d', s)
-    if m:
-        return m.group(1)
-
-    # Pattern: stem ends with a single digit (e.g. "TSS-Homerun0" after size strip)
-    m = re.search(r'(\d)$', s)
-    if m:
-        return m.group(1)
-
-    # Pattern: stem ends with a single non-alphanumeric separator + char
-    m = re.search(r'[^A-Za-z0-9]([A-Za-z0-9])$', s)
-    if m:
-        c = m.group(1)
-        if c.isdigit() or c.isupper():
-            return c
-
-    # Strip all non-alphanumeric from start, take first char if single
-    clean = re.sub(r'^[^A-Za-z0-9]+', '', s)
-    if re.match(r'^[A-Za-z0-9]$', clean):
-        return clean
-    if re.match(r'^[A-Za-z0-9][^A-Za-z0-9]', clean):
-        return clean[0]
-
-    return None
-
-
-def _rotate_coords(
-    coords: list[tuple[float, float]], degrees: int
-) -> list[tuple[float, float]]:
-    """Rotate (x,y) pairs clockwise by 0/90/180/270 degrees (in SVG Y-down space)."""
-    if degrees == 0:
-        return coords
-    if degrees == 90:
-        return [(y, -x) for x, y in coords]
-    if degrees == 180:
-        return [(-x, -y) for x, y in coords]
-    if degrees == 270:
-        return [(-y, x) for x, y in coords]
-    return coords
-
-
-def _emb_to_svg_paths(
-    pattern,
-    stroke_color: str = "#231f20",
-    stitch_length_mm: float = 1.5,
-) -> list[etree._Element]:
-    """Convert a pyembroidery pattern to a list of lxml <path> elements.
-
-    Each contiguous run of STITCH commands between TRIM/COLOR_CHANGE/END
-    becomes one <path> element with running-stitch inkstitch attributes.
-    pyembroidery normalises all formats to SVG Y-down, so no Y-flip is applied.
-    """
-    import pyembroidery
-
-    STITCH = pyembroidery.STITCH
-    TRIM = pyembroidery.TRIM
-    END = pyembroidery.END
-    COLOR_CHANGE = pyembroidery.COLOR_CHANGE
-
-    elements = []
-    current: list[tuple[float, float]] = []
-    color_idx = 0
-    threads = pattern.threadlist if pattern.threadlist else []
-
-    def _flush(pts: list, cidx: int) -> None:
-        if len(pts) < 2:
-            return
-        coords = [(x * _DST_TO_SVG, y * _DST_TO_SVG) for x, y in pts]
-        d = "M " + " L ".join(f"{x:.2f},{y:.2f}" for x, y in coords)
-
-        # Resolve thread color
-        color = stroke_color
-        if threads and cidx < len(threads):
-            t = threads[cidx]
-            if hasattr(t, 'color') and t.color is not None:
-                color = "#{:06x}".format(t.color & 0xFFFFFF)
-
-        el = etree.Element(f"{{{SVG_NS}}}path")
-        el.set("d", d)
-        el.set("style", f"fill:none;stroke:{color};stroke-width:1")
-        el.set(f"{{{INKSTITCH_NS}}}color_sort_index", str(cidx))
-        el.set(f"{{{INKSTITCH_NS}}}running_stitch_length_mm", str(stitch_length_mm))
-        el.set(f"{{{INKSTITCH_NS}}}min_stitch_length_mm", "0.5")
-        el.set(f"{{{INKSTITCH_NS}}}min_jump_stitch_length_mm", "3.0")
-        el.set("id", f"path_{secrets.token_hex(4)}")
-        elements.append(el)
-
-    for x, y, cmd in pattern.stitches:
-        if cmd == STITCH:
-            current.append((x, y))
-        elif cmd in (TRIM, COLOR_CHANGE, END):
-            _flush(current, color_idx)
-            current = []
-            if cmd == COLOR_CHANGE:
-                color_idx += 1
-
-    _flush(current, color_idx)
-    return elements
-
-
-def _find_embroidery_files(source_dir: Path, pick_ext: str | None = None) -> list[Path]:
-    """Return all embroidery files in source_dir (non-recursive)."""
-    files = []
-    for p in source_dir.iterdir():
-        if not p.is_file():
-            continue
-        ext = p.suffix.lower()
-        if ext not in _EMB_EXTS:
-            continue
-        if pick_ext and ext != pick_ext:
-            continue
-        files.append(p)
-    return sorted(files)
-
-
-def _read_embroidery(path: Path):
-    """Read any supported embroidery file via pyembroidery."""
-    try:
-        import pyembroidery
-    except ImportError:
-        raise UserError("pyembroidery is required — install it with: pip install pyembroidery")
-
-    pattern = pyembroidery.read(str(path))
-    if pattern is None:
-        raise UserError(f"could not read embroidery file: {path}")
-    return pattern
-
-
-# ---------------------------------------------------------------------------
-# Swash / descender detection for automatic baseline placement
-# ---------------------------------------------------------------------------
-
-def _visual_baseline_y(pattern, expected_height_svg: float) -> float:
-    """Return the visual baseline Y (SVG px) for a single glyph.
-
-    Strategy: any height beyond expected_height_svg is assumed to be a
-    decorative swash (R, J) or intentional descender (g, j, y) that extends
-    below the natural sitting-position of the letter.  We subtract that
-    excess from the bounding-box bottom so the letter body lands on the
-    baseline while swashes/descenders hang below it.
-
-    For letters whose height ≈ expected_height (H, T, A, …) the excess is
-    near zero and the result equals the raw bounding-box bottom.
-    """
-    import pyembroidery
-    ys = [sy * _DST_TO_SVG for _, sy, cmd in pattern.stitches
-          if cmd == pyembroidery.STITCH]
-    if not ys:
-        return 0.0
-    bbox_bottom = max(ys)
-    bbox_height = bbox_bottom - min(ys)
-    excess = max(0.0, bbox_height - expected_height_svg)
-    return bbox_bottom - excess
-
-
-# ---------------------------------------------------------------------------
-# Exit-connector detection for script-font kerning
-# ---------------------------------------------------------------------------
-
-def _detect_exit_advance(pattern, step_threshold_pct: float = 0.30, bins: int = 20) -> float:
-    """Return the visual right edge (SVG px) where the letter body ends.
-
-    Script fonts have a thin exit connector that reaches into the next letter.
-    Using the full bbox right would leave gaps between letters.  We detect the
-    connector by scanning Y-span per X-bin in the rightmost 30% of the letter:
-    the first bin whose Y-span drops ≥ step_threshold_pct × max_span signals
-    the start of the connector, and we return the right edge of the bin before
-    it (the body right).
-
-    Returns full bbox right when no connector is detected (round letters, etc.).
-    """
-    import pyembroidery
-
-    pts = [(x * _DST_TO_SVG, y * _DST_TO_SVG)
-           for x, y, cmd in pattern.stitches
-           if cmd == pyembroidery.STITCH]
-    if not pts:
-        return 0.0
-
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    lo_x, hi_x = min(xs), max(xs)
-    span = hi_x - lo_x
-    if span < 1.0:
-        return hi_x
-
-    bin_w = span / bins
-    y_min_b = [float("inf")] * bins
-    y_max_b = [float("-inf")] * bins
-    for x, y in pts:
-        b = min(int((x - lo_x) / bin_w), bins - 1)
-        if y < y_min_b[b]:
-            y_min_b[b] = y
-        if y > y_max_b[b]:
-            y_max_b[b] = y
-
-    yspans = [
-        (y_max_b[b] - y_min_b[b]) if y_max_b[b] > y_min_b[b] else 0.0
-        for b in range(bins)
-    ]
-    max_yspan = max(yspans) if yspans else 0.0
-    if max_yspan < 1.0:
-        return hi_x
-
-    search_start = int(bins * 0.70)
-    vis_right_bin = bins - 1  # default: full bbox right
-    for i in range(search_start, bins - 1):
-        if yspans[i] < 1.0:
-            # Empty bin = end of body
-            vis_right_bin = max(search_start, i - 1)
-            break
-        drop = yspans[i] - yspans[i + 1]
-        if max_yspan > 0 and drop / max_yspan >= step_threshold_pct:
-            vis_right_bin = i
-            break
-
-    return lo_x + (vis_right_bin + 1) * bin_w
-
-
-def _exit_advance_at_connection_y(
-        pattern, connection_raw_y: float, tolerance: float = 5.0) -> float:
-    """Return the rightmost stitch X (SVG px) among stitches near connection_raw_y.
-
-    For a connecting script font whose letters are stored in BF coordinates
-    centred at (0, 0), the exit connector always passes through the connection
-    line (connection_raw_y in the raw stitch space).  The rightmost X among
-    those stitches is where the connector ends — and therefore the X position
-    at which the next letter's entry connector must begin.
-
-    Returns full-bbox right edge when no stitches are found in the band
-    (should not happen for well-formed BX fonts, but guards against edge cases).
-    """
-    import pyembroidery
-
-    pts = [(x * _DST_TO_SVG, y * _DST_TO_SVG)
-           for x, y, cmd in pattern.stitches
-           if cmd == pyembroidery.STITCH]
-    if not pts:
-        return 0.0
-
-    near = [x for x, y in pts if abs(y - connection_raw_y) <= tolerance]
-    if near:
-        return max(near)
-    return max(x for x, y in pts)   # fallback: full bbox right
-
-
-# ---------------------------------------------------------------------------
-# Preview PNG generation (pure Python, no PIL required)
-# ---------------------------------------------------------------------------
-
-def _write_png(dest: Path, rows: list[list[tuple[int, int, int]]], W: int, H: int) -> None:
-    """Write an RGB PNG using Python stdlib (struct + zlib) only."""
-    import struct, zlib
-
-    def _chunk(tag: bytes, data: bytes) -> bytes:
-        c = tag + data
-        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
-
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
-    raw = bytearray()
-    for row in rows:
-        raw += b"\x00"
-        for r, g, b in row:
-            raw += bytes([r & 0xFF, g & 0xFF, b & 0xFF])
-
-    dest.write_bytes(
-        b"\x89PNG\r\n\x1a\n"
-        + _chunk(b"IHDR", ihdr)
-        + _chunk(b"IDAT", zlib.compress(bytes(raw), 9))
-        + _chunk(b"IEND", b"")
-    )
-
-
-def _draw_line_img(
-    img: list,
-    x0: int, y0: int,
-    x1: int, y1: int,
-    W: int, H: int,
-    color: tuple[int, int, int],
-) -> None:
-    """Bresenham line into an H×W list-of-rows image."""
-    dx, dy = abs(x1 - x0), abs(y1 - y0)
-    sx = 1 if x0 < x1 else -1
-    sy = 1 if y0 < y1 else -1
-    err = dx - dy
-    while True:
-        if 0 <= x0 < W and 0 <= y0 < H:
-            img[y0][x0] = color
-        if x0 == x1 and y0 == y1:
-            break
-        e2 = err * 2
-        if e2 > -dy:
-            err -= dy
-            x0 += sx
-        if e2 < dx:
-            err += dx
-            y0 += sy
+def _new_canvas(W: int, H: int, color=(255, 255, 255)):
+    """White RGB canvas + draw handle. PIL clips out-of-bounds drawing safely."""
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (W, H), color)
+    return img, ImageDraw.Draw(img)
 
 
 def _parse_path_points_simple(d: str) -> list[tuple[float, float]]:
@@ -1117,10 +408,10 @@ def _generate_preview_png(
         if not sample:
             sample = sorted(glyphs_available)[:7]
 
-    img = [[(255, 255, 255)] * W for _ in range(H)]
+    img, draw = _new_canvas(W, H)
 
     if not sample:
-        _write_png(font_dir / "preview.png", img, W, H)
+        img.save(font_dir / "preview.png")
         return
 
     font_root = font_tree.getroot()
@@ -1167,7 +458,7 @@ def _generate_preview_png(
         x_cursor += float(horiz_adv.get(char, default_adv))
 
     if not segments:
-        _write_png(font_dir / "preview.png", img, W, H)
+        img.save(font_dir / "preview.png")
         return
 
     all_xs = [s[0] for s in segments] + [s[2] for s in segments]
@@ -1184,240 +475,9 @@ def _generate_preview_png(
         py0 = int((y0 - min_y) * scale) + margin_y
         px1 = int((x1 - min_x) * scale) + margin_x
         py1 = int((y1 - min_y) * scale) + margin_y
-        _draw_line_img(img, px0, py0, px1, py1, W, H, dark)
+        draw.line([(px0, py0), (px1, py1)], fill=dark)
 
-    _write_png(font_dir / "preview.png", img, W, H)
-
-
-# ---------------------------------------------------------------------------
-# BX font file — per-letter connection-offset extraction
-# ---------------------------------------------------------------------------
-
-def _locate_bzip2_payload(raw: bytes, bx_path: "Path") -> bytes:
-    """Locate and decompress the bzip2 payload embedded in a BX font file.
-
-    Handles two stream variants found in the wild:
-
-    * **Full bzip2 stream** – starts with ``BZh[1-9]`` (intact header, e.g.
-      SSP-style packs where the stream appears somewhere inside the binary).
-    * **Stripped-header stream** – the 4-byte ``BZh9`` header is omitted and
-      only the bzip2 block marker ``0x314159265359`` (leading digits of π) is
-      present in the raw bytes.  Embrilliance TSS-Homerun files use this
-      variant; the header is reconstructed by prepending ``BZh9`` before
-      decompressing.
-
-    Trailing bytes after the bzip2 end-of-stream marker (common when the
-    stream is embedded mid-file) are tolerated via :class:`bz2.BZ2Decompressor`.
-
-    Returns the raw decompressed bytes.  Raises :class:`UserError` if no
-    usable stream can be found.
-    """
-    import bz2
-
-    if not raw:
-        raise UserError(f"BX file is empty: {bx_path}")
-
-    def _try_decompress(data: bytes) -> bytes | None:
-        """Decompress *data*, tolerating trailing garbage after stream end."""
-        # First try the straightforward path (works when data is a complete file).
-        try:
-            result = bz2.decompress(data)
-            if len(result) > 30:   # must produce something non-trivial
-                return result
-        except OSError:
-            pass
-        # BZ2Decompressor stops cleanly at end-of-stream and ignores trailing bytes.
-        try:
-            dec = bz2.BZ2Decompressor()
-            result = dec.decompress(data)
-            if len(result) > 30:
-                return result
-        except OSError:
-            pass
-        return None
-
-    # ---- Strategy A: intact BZh stream header ----------------------------
-    # Scan for "BZh" followed by a valid block-size digit ('1'–'9').
-    _BZH = b"BZh"
-    pos = 0
-    while True:
-        idx = raw.find(_BZH, pos)
-        if idx == -1:
-            break
-        if idx + 3 < len(raw) and 0x31 <= raw[idx + 3] <= 0x39:
-            result = _try_decompress(raw[idx:])
-            if result is not None:
-                return result
-        pos = idx + 1
-
-    # ---- Strategy B: stripped-header — prepend BZh to block magic --------
-    # BZip2 block-header magic = 0x314159265359 (first 48 bits of π).
-    # Embrilliance omits the 4-byte stream header; reconstruct it before
-    # decompressing.  Try block-size digits 9, 1, 5 in that order.
-    _BLOCK_MAGIC = bytes([0x31, 0x41, 0x59, 0x26, 0x53, 0x59])
-    pos = 0
-    last_exc: Exception | None = None
-    while True:
-        idx = raw.find(_BLOCK_MAGIC, pos)
-        if idx == -1:
-            break
-        for hdr in (b"BZh9", b"BZh1", b"BZh5"):
-            try:
-                result = _try_decompress(hdr + raw[idx:])
-                if result is not None:
-                    return result
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-        pos = idx + 1
-
-    raise UserError(
-        f"No decompressible bzip2 stream found in BX file {bx_path}"
-        + (f": {last_exc}" if last_exc else "")
-    )
-
-
-def _parse_bx_glyphs(bf_data: bytes) -> dict[str, float]:
-    """Parse per-glyph y_min values from decompressed BX font data.
-
-    Every Embrilliance BX file (regardless of vendor) decompresses to a binary
-    stream containing two types of records per glyph:
-
-    **IDMDTL block** — geometry record::
-
-        b"IDMDTL"  {n_entries: u32}  [{pre: u32}  {tag: u16}  {vlen: u32}  {data: vlen}] ...
-
-        The entry with ``pre == 5`` and ``vlen == 24`` encodes the glyph's
-        axis-aligned bounding box as six LE float32 values::
-
-            [x_min, y_min, 0, x_max, y_max, 0]
-
-        ``y_min`` is the connection-line Y in BF units (1 BF = 0.1 mm),
-        centred at 0 (origin = glyph baseline entry/exit point).  Typical:
-        x-height letters ≈ −83, ascenders ≈ −117, descenders ≈ −130.
-
-        The *tag* number varies by vendor (0x000c, 0x0011, 0x0012, 0x0013, …);
-        we match on ``pre=5, vlen=24`` which is consistent across all tested
-        packs (TSS-Homerun, NitkaBonitka, LD Signature, Stitchtopia, Chinoiserie).
-
-    **Character record** — attribute record immediately following the filename::
-
-        {filename}  b"\\t\\x00"  {pre=8: u32}  {tag: u16}  {vlen=2|3: u32}  {char_bytes}
-
-        The first attribute always has ``pre == 8`` and ``vlen ∈ {2, 3}``.
-        ``char_bytes[0]`` is the ASCII codepoint of the glyph.  The tag number
-        varies by vendor; we match structurally.
-
-    **Matching strategy**: after building an ordered list of all IDMDTL bbox
-    positions, each character record is paired with the nearest preceding IDMDTL
-    bbox via binary search.  This is order-stable even when glyph records
-    contain multiple IDMDTL blocks (e.g. a ``treeitem``/``original`` metadata
-    block followed by the actual geometry block).
-    """
-    import bisect
-    import struct
-
-    # ---- Step 1: collect all IDMDTL bbox offsets in file order ----
-    # Each entry is (file_offset_of_IDMDTL_marker, y_min_float).
-    idmdtl_bboxes: list[tuple[int, float]] = []
-    pos = 0
-    while True:
-        idx = bf_data.find(b"IDMDTL", pos)
-        if idx == -1:
-            break
-        after = idx + 6
-        if after + 4 > len(bf_data):
-            pos = idx + 1
-            continue
-        n_entries = struct.unpack_from("<I", bf_data, after)[0]
-        if n_entries == 0 or n_entries > 200:   # sanity guard
-            pos = idx + 1
-            continue
-        after += 4
-        for _ in range(n_entries):
-            if after + 10 > len(bf_data):
-                break
-            pre, tag, vlen = struct.unpack_from("<IHI", bf_data, after)
-            if vlen > 100_000:
-                break
-            # Bbox attribute: pre=5, vlen=24 (six LE float32).
-            if pre == 5 and vlen == 24 and after + 34 <= len(bf_data):
-                floats = struct.unpack_from("<6f", bf_data, after + 10)
-                idmdtl_bboxes.append((idx, float(floats[1])))  # y_min
-            after += 10 + vlen
-        pos = idx + 1
-
-    if not idmdtl_bboxes:
-        return {}
-
-    bbox_offsets = [t[0] for t in idmdtl_bboxes]  # sorted ascending (file order)
-
-    # ---- Step 2: find character records and pair with preceding bbox ----
-    # Character record separator is b'\t\x00' (TAB + NUL) after the filename.
-    # The immediately following attribute has pre=8, vlen∈{2,3}, data[0]=ASCII char.
-    offsets: dict[str, float] = {}
-    sep = b"\t\x00"
-    pos = 0
-    while True:
-        idx = bf_data.find(sep, pos)
-        if idx == -1:
-            break
-        pos = idx + 2   # advance past separator for next iteration
-
-        attr_pos = idx + 2
-        if attr_pos + 10 > len(bf_data):
-            continue
-        pre, _tag, vlen = struct.unpack_from("<IHI", bf_data, attr_pos)
-        if pre != 8 or vlen not in (2, 3):
-            continue
-        ch_bytes = bf_data[attr_pos + 10: attr_pos + 10 + vlen]
-        if not ch_bytes or not (0x20 <= ch_bytes[0] <= 0x7E):
-            continue   # not a printable ASCII glyph
-
-        ch = chr(ch_bytes[0])
-
-        # Binary-search for the nearest IDMDTL block *before* this record.
-        ins = bisect.bisect_right(bbox_offsets, idx)
-        if ins == 0:
-            continue   # no IDMDTL block precedes this record
-        _, y_min = idmdtl_bboxes[ins - 1]
-
-        if ch not in offsets:   # first occurrence wins
-            offsets[ch] = y_min
-
-    return offsets
-
-
-def _extract_bx_connection_offsets(bx_path: str | Path) -> dict[str, float]:
-    """Return per-character y_min values (in BF units, 1 BF = 0.1 mm) from a BX font file.
-
-    Locates and decompresses the embedded bzip2 stream via
-    :func:`_locate_bzip2_payload`, then delegates to :func:`_parse_bx_glyphs`
-    for structure-based glyph extraction.
-
-    Tested against five real-world vendors (TSS-Homerun, NitkaBonitka Bubble,
-    LD Signature, Stitchtopia, Chinoiserie) with no vendor-specific code paths.
-
-    Returns a mapping ``{'a': -83.0, 'b': -117.0, ...}`` for every glyph
-    whose bbox could be found.  Missing glyphs are simply absent so callers
-    can fall back to the global ``--baseline-from-bottom-mm``.
-    """
-    bx_path = Path(bx_path)
-    raw = bx_path.read_bytes()
-    bf_data = _locate_bzip2_payload(raw, bx_path)
-    return _parse_bx_glyphs(bf_data)
-
-
-def _last_stitch_svg_y(pattern) -> float | None:
-    """Return the SVG-space Y coordinate of the last STITCH command in *pattern*.
-
-    Used by the ``last-stitch`` baseline method.  Returns ``None`` when the
-    pattern contains no STITCH commands (e.g. empty file or commands only).
-    """
-    import pyembroidery as _pe
-    for _x, y, cmd in reversed(pattern.stitches):
-        if cmd == _pe.STITCH:
-            return float(y) * _DST_TO_SVG
-    return None
+    img.save(font_dir / "preview.png")
 
 
 @font.command("import")
@@ -1629,13 +689,13 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
     # (before translation).  Every other glyph is shifted to the *same* raw
     # bottom level, so all glyphs land on a consistent baseline automatically.
     ref_svg_bottom: float | None = None
+    import_warnings: list[str] = []
     if baseline_method == "reference-letter":
         if not reference_letter:
-            click.echo(
-                "Warning: --baseline-method=reference-letter requires --reference-letter; "
-                "falling back to bbox-bottom.",
-                err=True,
-            )
+            msg = ("--baseline-method=reference-letter requires --reference-letter; "
+                   "falling back to bbox-bottom.")
+            import_warnings.append(msg)
+            click.echo(f"Warning: {msg}", err=True)
             baseline_method = "bbox-bottom"
         else:
             ref_letter = reference_letter[0]  # take only first char if user typed more
@@ -1651,11 +711,10 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
             if ref_pattern is not None:
                 ref_svg_bottom = _visual_baseline_y(ref_pattern, height_svg)
             else:
-                click.echo(
-                    f"Warning: reference letter '{ref_letter}' not found or unreadable; "
-                    "falling back to bbox-bottom.",
-                    err=True,
-                )
+                msg = (f"reference letter '{ref_letter}' not found or unreadable; "
+                       "falling back to bbox-bottom.")
+                import_warnings.append(msg)
+                click.echo(f"Warning: {msg}", err=True)
                 baseline_method = "bbox-bottom"
 
     # Initialize font
@@ -1672,8 +731,10 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
         _max_shifted_extra_bf = max(
             (abs(y_min_bf) - abs(bx_y_min_baseline))
             for y_min_bf in bx_offsets.values()
-            if 46 < (abs(y_min_bf) - abs(bx_y_min_baseline)) <= 70
-        ) if any(46 < (abs(v) - abs(bx_y_min_baseline)) <= 70
+            if _BX_DESCENDER_MIN_BF
+            < (abs(y_min_bf) - abs(bx_y_min_baseline)) <= _BX_DESCENDER_MAX_BF
+        ) if any(_BX_DESCENDER_MIN_BF
+                 < (abs(v) - abs(bx_y_min_baseline)) <= _BX_DESCENDER_MAX_BF
                  for v in bx_offsets.values()) else 0
         if _max_shifted_extra_bf > 0:
             desc_d = max(desc_d,
@@ -1750,7 +811,7 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
             if bx_offsets and char in bx_offsets:
                 y_min_bf = bx_offsets[char]
                 extra_bf = abs(y_min_bf) - abs(bx_y_min_baseline)
-                if extra_bf > 46:
+                if extra_bf > _BX_DESCENDER_MIN_BF:
                     # Determine sub-type by checking where the exit connector ends.
                     # In the EXP files the last stitch is the exit connector tip.
                     # If abs(last_y_dst) > abs(bx_y_min_baseline) + 20, the exit
@@ -1763,7 +824,8 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
                     exit_near_top = (
                         last_y_dst is not None
                         and abs(last_y_dst) > abs(bx_y_min_baseline) + 20
-                        and extra_bf <= 70   # j (extra≈78) has legitimate top feature
+                        # j (extra≈78) is above MAX: its top feature is legitimate
+                        and extra_bf <= _BX_DESCENDER_MAX_BF
                     )
                     if exit_near_top:
                         # Sub-type (A): shift letter down so top aligns with x-height.
@@ -1810,17 +872,11 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
             # we can also detect them via the y_min threshold rather than the
             # heuristic height check.
             if bx_offsets and char in bx_offsets:
-                # "True descender" = glyph extends BELOW the connection line.
-                # In Homerun BF data (baseline ref = −82):
-                #   x-height (a,c,e…)   extra_bf =  0–2
-                #   ascenders (b,h,l…)  extra_bf = 31–36
-                #   f / A–Z caps        extra_bf = 46   ← boundary, NOT a descender
-                #   p, q                extra_bf = 47
-                #   g, y                extra_bf = 48
-                #   j                   extra_bf = 78
-                # Threshold > 46 catches only the letters whose body hangs below
-                # the connection line, excluding regular caps and 'f'.
-                has_descender = (abs(bx_offsets[char]) - abs(bx_y_min_baseline)) > 46
+                # "True descender" = glyph extends BELOW the connection line —
+                # see the extra_bf cluster table at _BX_DESCENDER_MIN_BF.
+                has_descender = (
+                    abs(bx_offsets[char]) - abs(bx_y_min_baseline)
+                ) > _BX_DESCENDER_MIN_BF
             else:
                 has_descender = glyph_height_svg > height_svg * 1.15
 
@@ -1911,6 +967,8 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
         result["baseline_method"] = baseline_method
         if baseline_method == "reference-letter" and reference_letter:
             result["reference_letter"] = reference_letter[0]
+    if import_warnings:
+        result["warnings"] = import_warnings
     emit(ctx, result)
 
 
@@ -2099,10 +1157,10 @@ def font_render_test(ctx, font_dir, phrase, output, img_width, img_height, show_
         x_cursor += float(horiz_adv.get(char, default_adv))
         advance_xs.append(x_cursor)
 
-    img = [[(255, 255, 255)] * W for _ in range(H)]
+    img, draw = _new_canvas(W, H)
 
     if not segments:
-        _write_png(dest, img, W, H)
+        img.save(dest)
         emit(ctx, {"render_test": str(dest)})
         return
 
@@ -2126,8 +1184,7 @@ def font_render_test(ctx, font_dir, phrase, output, img_width, img_height, show_
         for ax in advance_xs:
             gx = int((ax - min_x) * scale) + margin_x
             if 0 <= gx < W:
-                for gy in range(H):
-                    img[gy][gx] = guide_color
+                draw.line([(gx, 0), (gx, H - 1)], fill=guide_color)
 
     # Draw baseline and x-height lines (behind glyph strokes)
     _baseline_y_val = font_data.get("baseline_y", 0)
@@ -2136,23 +1193,21 @@ def font_render_test(ctx, font_dir, phrase, output, img_width, img_height, show_
         if show_baseline:
             _, bl_py = to_px(min_x, _baseline_y_val)
             if 0 <= bl_py < H:
-                for bx_px in range(W):
-                    img[bl_py][bx_px] = (220, 60, 60)
+                draw.line([(0, bl_py), (W - 1, bl_py)], fill=(220, 60, 60))
         if show_xheight:
             xh_y = _baseline_y_val - units_per_em_val * 0.52
             _, xh_py = to_px(min_x, xh_y)
             if 0 <= xh_py < H:
-                for bx_px in range(W):
-                    img[xh_py][bx_px] = (60, 180, 60)
+                draw.line([(0, xh_py), (W - 1, xh_py)], fill=(60, 180, 60))
 
     # Draw strokes
     ink = (30, 30, 30)
     for x0, y0, x1, y1 in segments:
         px0, py0 = to_px(x0, y0)
         px1, py1 = to_px(x1, y1)
-        _draw_line_img(img, px0, py0, px1, py1, W, H, ink)
+        draw.line([(px0, py0), (px1, py1)], fill=ink)
 
-    _write_png(dest, img, W, H)
+    img.save(dest)
     emit(ctx, {"render_test": str(dest)})
 
 
@@ -2176,7 +1231,7 @@ def _validate_font(font_dir: Path) -> dict:
     warnings = []
     fdir = font_dir
 
-    svg_path = fdir / "→.svg"
+    svg_path = fdir / FONT_SVG_FILENAME
     json_path = fdir / "font.json"
     preview_path = fdir / "preview.png"
     license_path = fdir / "LICENSE"

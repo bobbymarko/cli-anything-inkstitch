@@ -15,7 +15,13 @@ from cli_anything_inkstitch.svg.attrs import SVG_NS, ensure_inkstitch_namespace
 INKSTITCH_SVG_VERSION = 3  # matches lib/update.py INKSTITCH_SVG_VERSION
 
 
-def load_svg(path: str | Path):
+def parse_svg(path: str | Path):
+    """Parse an SVG file and verify the root element, with no normalization.
+
+    Shared primitive: project SVGs go through load_svg (which also stamps the
+    inkstitch namespace + version marker); font SVGs use this directly because
+    they manage their own version marker and formatting.
+    """
     p = Path(path)
     if not p.exists():
         raise ProjectError(f"SVG not found: {path}")
@@ -27,6 +33,11 @@ def load_svg(path: str | Path):
     root = tree.getroot()
     if not root.tag.endswith("}svg") and root.tag != "svg":
         raise ProjectError(f"file is not an SVG document: {path}")
+    return tree
+
+
+def load_svg(path: str | Path):
+    tree = parse_svg(path)
     # Pass the tree (not just root) so _setroot can replace the root with
     # one that has xmlns:inkstitch. Otherwise inkstitch:* attrs added later
     # serialize with per-element nsN: prefixes instead of `inkstitch:`.
@@ -60,14 +71,19 @@ def _ensure_inkstitch_version(root) -> None:
         el.text = str(INKSTITCH_SVG_VERSION)
 
 
-def save_svg(tree, path: str | Path) -> str:
-    """Write tree to path atomically. Returns the new sha256 of the saved file."""
+def write_svg_atomic(tree, path: str | Path, *, pretty: bool = False) -> str:
+    """Write tree to path atomically (.tmp + rename). Returns the file's sha256."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tree.write(str(tmp), xml_declaration=True, encoding="utf-8", pretty_print=False)
+    tree.write(str(tmp), xml_declaration=True, encoding="utf-8", pretty_print=pretty)
     os.replace(tmp, p)
     return sha256_of(p)
+
+
+def save_svg(tree, path: str | Path) -> str:
+    """Write tree to path atomically. Returns the new sha256 of the saved file."""
+    return write_svg_atomic(tree, path, pretty=False)
 
 
 def sha256_of(path: str | Path) -> str:

@@ -341,6 +341,39 @@ class TestFontRenderTest:
         assert out.exists()
         assert out.stat().st_size > 100
 
+    def test_render_test_png_decodes_with_requested_size_and_ink(
+            self, runner, minimal_font_dir, tmp_path):
+        from PIL import Image
+        out = tmp_path / "out_pixels.png"
+        jrun(runner, "font", "render-test",
+             "--font-dir", str(minimal_font_dir),
+             "--phrase", "ab",
+             "--output", str(out),
+             "--width", "400", "--height", "120",
+             "--no-guides", "--no-baseline", "--no-xheight")
+        with Image.open(out) as img:
+            assert img.size == (400, 120)
+            assert img.mode == "RGB"
+            colors = {c for _, c in img.getcolors(maxcolors=400 * 120)}
+        assert (255, 255, 255) in colors   # background
+        assert (30, 30, 30) in colors      # glyph strokes actually drawn
+
+    def test_render_test_baseline_draws_red_line(self, runner, minimal_font_dir, tmp_path):
+        from PIL import Image
+        # baseline must fall inside the glyph y-range (0-10) to land on-canvas
+        fd = json.loads((minimal_font_dir / "font.json").read_text())
+        fd["baseline_y"] = 5.0
+        (minimal_font_dir / "font.json").write_text(json.dumps(fd), encoding="utf-8")
+        out = tmp_path / "out_red.png"
+        jrun(runner, "font", "render-test",
+             "--font-dir", str(minimal_font_dir),
+             "--phrase", "ab",
+             "--output", str(out),
+             "--no-guides", "--no-xheight")
+        with Image.open(out) as img:
+            colors = {c for _, c in img.getcolors(maxcolors=img.width * img.height)}
+        assert (220, 60, 60) in colors     # baseline line rendered
+
 
 # ---------------------------------------------------------------------------
 # font set-field tests
@@ -443,6 +476,74 @@ class TestFontImportBxPack:
                     "--dry-run")
         assert data["dry_run"] is True
         assert len(data["matched"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# font import — warnings must surface in the --json payload (not just stderr)
+# ---------------------------------------------------------------------------
+
+def _write_dst_glyph(path: Path) -> None:
+    """Write a small real DST file (a 100x100 stitched square)."""
+    import pyembroidery
+    p = pyembroidery.EmbPattern()
+    for x, y in [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]:
+        p.add_stitch_absolute(pyembroidery.STITCH, x, y)
+    p.add_stitch_absolute(pyembroidery.END, 0, 0)
+    pyembroidery.write_dst(p, str(path))
+
+
+def _jrun_tail_json(runner, *args):
+    """Like jrun, but tolerates stderr lines that CliRunner merges before the
+    JSON body (real terminals keep the streams separate)."""
+    result = invoke(runner, "--json", *args)
+    assert result.exit_code == 0, f"exit {result.exit_code}: {result.output!r}"
+    return json.loads(result.output[result.output.index("{"):])
+
+
+class TestFontImportWarnings:
+    def test_reference_letter_fallback_warning_in_json(self, runner, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        _write_dst_glyph(src / "CapA.dst")
+        _write_dst_glyph(src / "CapB.dst")
+        out = tmp_path / "out"
+
+        data = _jrun_tail_json(runner, "font", "import",
+                               "--name", "Warnfont",
+                               "--source-dir", str(src),
+                               "--output-dir", str(out),
+                               "--baseline-method", "reference-letter")  # no --reference-letter
+        assert data["baseline_method"] == "bbox-bottom"  # fell back
+        assert "warnings" in data
+        assert any("reference-letter" in w for w in data["warnings"])
+
+    def test_missing_reference_letter_warning_in_json(self, runner, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        _write_dst_glyph(src / "CapA.dst")
+        _write_dst_glyph(src / "CapB.dst")
+        out = tmp_path / "out"
+
+        data = _jrun_tail_json(runner, "font", "import",
+                               "--name", "Warnfont",
+                               "--source-dir", str(src),
+                               "--output-dir", str(out),
+                               "--baseline-method", "reference-letter",
+                               "--reference-letter", "x")  # not among the glyphs
+        assert data["baseline_method"] == "bbox-bottom"
+        assert any("'x' not found" in w for w in data.get("warnings", []))
+
+    def test_clean_import_has_no_warnings_key(self, runner, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        _write_dst_glyph(src / "CapA.dst")
+        out = tmp_path / "out"
+
+        data = jrun(runner, "font", "import",
+                    "--name", "Warnfont",
+                    "--source-dir", str(src),
+                    "--output-dir", str(out))
+        assert "warnings" not in data
 
 
 # ---------------------------------------------------------------------------
