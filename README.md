@@ -67,7 +67,7 @@ cli-anything-inkstitch export file --project $PROJ --format dst --out /tmp/logo.
 
 ## Status
 
-v0.1 — core surface complete. ~290 tests (289 passing, 2 xfailed) cover both pure-Python paths and binary-mocked integrations; the binary-backed commands are also live-verified against Ink/Stitch v3.2.2 on macOS.
+v0.1 — core surface complete. ~340 tests (338 passing, 2 xfailed) cover both pure-Python paths and binary-mocked integrations; the binary-backed commands are also live-verified against Ink/Stitch v3.2.2 on macOS.
 
 Out of scope (per [SPEC.md §4.12](SPEC.md)): GUI, Inkscape extension wrapping, lettering UI, real-time machine control.
 

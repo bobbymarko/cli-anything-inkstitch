@@ -22,6 +22,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: inkstitch/inkstitch
+          # Pin to the latest release so CI validates against what users run,
+          # not against main (a moving target). Bump when a new release ships.
+          ref: v3.2.2
           path: inkstitch
           fetch-depth: 1
 
@@ -29,6 +32,38 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest -v
+
+  test-windows:
+    # Exercises Windows path handling (binary discovery, the "→.svg" font
+    # filename, schema source candidates) that the Linux matrix can't.
+    name: pytest (windows, py3.12)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout inkstitch source for schema extractor
+        uses: actions/checkout@v4
+        with:
+          repository: inkstitch/inkstitch
+          ref: v3.2.2
+          path: inkstitch
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
 

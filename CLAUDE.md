@@ -25,12 +25,24 @@ src/cli_anything_inkstitch/
         export.py
         schema_group.py
         session.py
-        font.py             # Font command group — 2500+ lines; the most complex module
-    svg/                    # lxml helpers (namespace registration, attr get/set, element dispatch)
+        font.py             # Font command group (Click orchestration; pure logic lives in
+                            # embroidery/ and font_format/, re-exported here for back-compat)
+    embroidery/             # Pure logic: embroidery file I/O + analysis (no Click)
+        files.py            # file discovery, filename→character parsing, DST/SVG unit constants
+        analysis.py         # baseline detection, exit-advance detection, stitch→SVG paths
+        bx.py               # Embrilliance BX binary parsing + descender thresholds
+    font_format/            # Pure logic: Ink/Stitch font directory format (no Click)
+        svg_build.py        # →.svg building/loading/saving, guides, path x-range helpers
+        metadata.py         # font.json load/save/defaults
+    svg/                    # lxml helpers (namespace registration, attr get/set, element dispatch,
+                            # geometry incl. SVG transform support)
         satin.py            # WIP: geometric fill-to-satin conversion (parked on feat/fill-to-satin)
-    schema/                 # INX/param schema extraction and cache
+    schema/                 # INX/param schema extraction and cache. Degraded states surface as
+                            # a schema_warning payload field: bootstrap fallback, or extracted
+                            # schema version != installed binary version (read from the VERSION
+                            # file shipped with the binary). INKSTITCH_SOURCE env var sets source.
     project.py              # ProjectFile dataclass, load/save, filelock
-    history.py              # Patch types, apply/reverse, ring buffer
+    history.py              # Patch types, apply/reverse, ring buffer, oversize-patch guard
     binary.py               # Ink/Stitch binary discovery and invocation
     repl.py                 # Interactive REPL loop
 ```
