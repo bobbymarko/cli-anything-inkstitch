@@ -10,16 +10,23 @@ from pathlib import Path
 
 from cli_anything_inkstitch.errors import BinaryError
 
+# The Inkscape user-extensions dir is where current Ink/Stitch releases
+# actually install (the macOS pkg postinstaller moves the bundle there).
+_INKSCAPE_EXT = "Library/Application Support/org.inkscape.Inkscape/config/inkscape/extensions"
+
 SEARCH_PATHS = {
     "darwin": [
+        str(Path.home() / _INKSCAPE_EXT / "inkstitch/inkstitch.app/Contents/MacOS/inkstitch"),
         "/Applications/Ink Stitch.app/Contents/MacOS/inkstitch",
         str(Path.home() / "Applications/Ink Stitch.app/Contents/MacOS/inkstitch"),
     ],
     "linux": [
+        str(Path.home() / ".config/inkscape/extensions/inkstitch/bin/inkstitch"),
         "/opt/inkstitch/bin/inkstitch",
         "/usr/local/bin/inkstitch",
     ],
     "win32": [
+        str(Path.home() / "AppData/Roaming/inkscape/extensions/inkstitch/bin/inkstitch.exe"),
         r"C:\Program Files\Ink Stitch\inkstitch.exe",
         r"C:\Program Files (x86)\Ink Stitch\inkstitch.exe",
     ],
@@ -71,7 +78,9 @@ def detect_binary_version(binary: str | None) -> str | None:
                 continue
             first_line = c.read_text(encoding="utf-8", errors="replace").strip().splitlines()
             if first_line and first_line[0].strip():
-                return first_line[0].strip().lstrip("v")
+                # Real VERSION files look like "v3.2.2 (osx-arm64) 2025-06-15 10:46" —
+                # keep only the version token.
+                return first_line[0].split()[0].lstrip("v")
         except OSError:
             continue
     return None

@@ -25,6 +25,14 @@ def test_detect_version_macos_bundle_layout(tmp_path):
     assert detect_binary_version(str(binary)) == "3.2.2"
 
 
+def test_detect_version_strips_build_suffix(tmp_path):
+    """Real VERSION files: 'v3.2.2 (osx-arm64) 2025-06-15 10:46'."""
+    binary = tmp_path / "inkstitch"
+    binary.write_text("")
+    (tmp_path / "VERSION").write_text("v3.2.2 (osx-arm64) 2025-06-15 10:46\n")
+    assert detect_binary_version(str(binary)) == "3.2.2"
+
+
 def test_detect_version_next_to_binary(tmp_path):
     binary = tmp_path / "inkstitch.exe"
     binary.write_text("")
