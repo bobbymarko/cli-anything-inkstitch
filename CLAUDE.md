@@ -27,6 +27,13 @@ src/cli_anything_inkstitch/
         session.py
         font.py             # Font command group (Click orchestration; pure logic lives in
                             # embroidery/ and font_format/, re-exported here for back-compat)
+        artifact.py         # Artifact command group: open/poll/reply/gate/end/stop
+    artifact/               # Digitizing-artifact correction loop (docs/digitizing-artifact-spec.md)
+        sessions.py         # session store: project-path identity, queued feedback, end semantics
+        server.py           # stdlib HTTP server: long-poll, SSE, presence, live reload
+        design_model.py     # design→editor JSON; edit ops routed through the project layer
+        gate.py             # stitchability audit (rung pairing, widths, self-crossing, handles)
+        editor/editor.html  # self-contained browser editor (canvas, Tier-1/2 preview, chat)
     embroidery/             # Pure logic: embroidery file I/O + analysis (no Click)
         files.py            # file discovery, filename→character parsing, DST/SVG unit constants
         analysis.py         # baseline detection, exit-advance detection, stitch→SVG paths

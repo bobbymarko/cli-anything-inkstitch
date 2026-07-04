@@ -225,6 +225,21 @@ Create, import, calibrate, and validate Inkstitch-compatible embroidery font pac
 | `adjust-advances` | Bulk-adjust advance widths (`--add`, `--subtract`, `--min`, `--max`) |
 | `import-bx-pack` | Batch-import a whole Embrilliance BX pack + matching EXP/DST directories |
 
+### Artifact
+
+The digitizing-artifact correction loop (see `docs/digitizing-artifact-spec.md`): opens a browser editor on the project's design where a human corrects the digitization by direct manipulation (drag satin rail nodes, rungs, fill start/end handles) and chat, while the agent long-polls for feedback and edits the same design through the CLI. All editor manipulations write through the project layer, so history/undo and SHA coherence keep working.
+
+| Command | Description |
+|---------|-------------|
+| `open` | Open (or resume) the editor session; spawns a detached local server and opens the browser. `--no-browser` to just print the URL; `--reopen` only if the user ended the session from the browser and asked for further review. |
+| `poll` | Long-poll for the next human feedback batch (`{objects, manipulation, text}` items). `--agent-reply "msg"` sends a chat reply first. Re-run after each result; queued feedback is never lost. |
+| `reply` | Send a chat reply into the editor without polling |
+| `gate` | Stitchability audit: desynced satin rungs, width limits, self-crossing rails, misplaced fill handles. Fix `errors` before handback; `warnings` are advisory. |
+| `end` | End the session (agent-initiated; a plain `open` can revive it) |
+| `stop` | Shut down the background artifact server |
+
+Loop shape: `open` → repeat (`poll` → apply requested edits via `element`/`params`/`commands` or the server edit API → `poll --agent-reply "what changed"`) → `gate` → `end`. The editor live-reloads whenever the design changes on disk, and its "Stitch plan" toggle overlays the binary's authoritative render (~1.5s after each edit).
+
 
 ## Examples
 
