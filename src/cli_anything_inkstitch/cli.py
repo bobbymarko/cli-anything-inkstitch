@@ -63,6 +63,7 @@ from cli_anything_inkstitch.commands import (  # noqa: E402
     schema_group as _schema_group,
     session as _session,
     font as _font,
+    artifact as _artifact,
 )
 
 root.add_command(_document.document, "document")
@@ -76,3 +77,4 @@ root.add_command(_export.export, "export")
 root.add_command(_schema_group.schema_group, "schema")
 root.add_command(_session.session, "session")
 root.add_command(_font.font, "font")
+root.add_command(_artifact.artifact, "artifact")
