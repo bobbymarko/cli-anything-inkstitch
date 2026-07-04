@@ -192,6 +192,16 @@ def end_cmd(ctx, project_path):
     emit(ctx, _request(f"{base}/api/end", payload={"project": project}))
 
 
+@artifact.command("gate")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.pass_context
+def gate_cmd(ctx, project_path):
+    """Run the stitchability gate. Errors should be fixed before handback."""
+    from cli_anything_inkstitch.artifact.gate import run_gate
+    project = get_project_path(ctx, project_path)
+    emit(ctx, run_gate(project))
+
+
 @artifact.command("stop")
 @click.pass_context
 def stop_cmd(ctx):
