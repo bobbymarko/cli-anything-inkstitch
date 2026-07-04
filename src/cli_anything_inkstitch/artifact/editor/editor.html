@@ -1,0 +1,624 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Digitizing Artifact</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2a2e38; --text: #e6e8ee;
+    --muted: #9aa1b0; --accent: #6ea8fe; --start: #37c46f; --end: #e5534b;
+    --rail: #ffb347; --rung: #9d7bff; --zig: #ffd9a0;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; background: var(--bg); color: var(--text);
+         font: 13px/1.45 -apple-system, "Segoe UI", sans-serif; }
+
+  #bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+         background: var(--panel); border-bottom: 1px solid var(--line); }
+  #bar .brand { font-weight: 700; }
+  #bar .brand span { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  #selInfo { color: var(--muted); flex: 1; white-space: nowrap; overflow: hidden;
+             text-overflow: ellipsis; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+          border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+          background: transparent; font: inherit; cursor: pointer; }
+  .chip.on { color: var(--accent); border-color: var(--accent); }
+  #presence { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+  #presence.listening .dot { background: var(--start); }
+  #presence.working .dot { background: var(--rail); }
+  #endBtn { color: var(--end); border-color: rgba(229,83,75,.4); }
+
+  #main { display: flex; flex: 1; min-height: 0; }
+  #canvasWrap { position: relative; flex: 1; min-width: 0; overflow: hidden;
+                background: #0e1013; }
+  #canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #canvasWrap.showPlan .artwork { opacity: .12; } /* plan is the truth while shown */
+  .planLayer { pointer-events: none; }
+  #tier2Status { position: absolute; left: 10px; bottom: 10px; color: var(--muted);
+                 background: rgba(20,22,26,.85); padding: 3px 10px; border-radius: 6px;
+                 border: 1px solid var(--line); }
+  #hint { position: absolute; right: 10px; bottom: 10px; color: var(--muted);
+          background: rgba(20,22,26,.85); padding: 3px 10px; border-radius: 6px;
+          border: 1px solid var(--line); max-width: 46ch; }
+
+  #panel { width: 320px; display: flex; flex-direction: column; background: var(--panel);
+           border-left: 1px solid var(--line); }
+  #panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+              color: var(--muted); padding: 12px 14px 6px; }
+  #chat { flex: 1; overflow-y: auto; padding: 4px 14px; display: flex;
+          flex-direction: column; gap: 8px; }
+  .msg { padding: 7px 10px; border-radius: 10px; max-width: 92%; white-space: pre-wrap; }
+  .msg.human { align-self: flex-end; background: #2b3547; }
+  .msg.agent { align-self: flex-start; background: #23262e; border: 1px solid var(--line); }
+  .msg .objs { display: block; color: var(--accent); font-size: 11px; margin-top: 3px; }
+  #composer { padding: 10px 14px 14px; border-top: 1px solid var(--line); }
+  #pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  #pills .pill { display: inline-flex; gap: 6px; align-items: center; font-size: 11px;
+                 color: var(--accent); border: 1px solid rgba(110,168,254,.4);
+                 border-radius: 999px; padding: 2px 8px; }
+  #pills .pill button { all: unset; cursor: pointer; color: var(--muted); }
+  #input { width: 100%; min-height: 60px; resize: vertical; background: #14161a;
+           color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+           padding: 8px; font: inherit; }
+  #sendRow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  #send { background: var(--accent); color: #0c1523; border: 0; border-radius: 8px;
+          padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  #send:disabled { opacity: .45; cursor: default; }
+  #presenceBanner { display: none; margin-top: 8px; color: var(--rail); font-size: 12px; }
+  #presenceBanner.show { display: block; }
+
+  #endedOverlay { position: fixed; inset: 0; display: none; align-items: center;
+                  justify-content: center; background: rgba(10,12,15,.88); z-index: 10; }
+  #endedOverlay.show { display: flex; }
+  #endedOverlay .card { background: var(--panel); border: 1px solid var(--line);
+                        border-radius: 14px; padding: 28px 34px; text-align: center; }
+  #endedOverlay h1 { font-size: 18px; margin-bottom: 8px; }
+  #endedOverlay p { color: var(--muted); }
+
+  /* canvas object styling */
+  .artwork path { opacity: .28; }
+  /* fill is set per-element as an attribute (interior clickable for fills,
+     edge-only for strokes) — no fill rule here or it overrides the attribute */
+  .obj-hit { stroke: transparent; stroke-width: 6; cursor: pointer; }
+  .fillBoundary { fill: none; stroke: var(--accent); stroke-dasharray: 4 3;
+                  vector-effect: non-scaling-stroke; }
+  .rail { fill: none; stroke: var(--rail); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
+  .rung { stroke: var(--rung); stroke-width: 1.2; vector-effect: non-scaling-stroke; cursor: pointer; }
+  .zig { fill: none; stroke: var(--zig); stroke-width: .6; opacity: .75;
+         vector-effect: non-scaling-stroke; pointer-events: none; }
+  .node { fill: var(--rail); stroke: #14161a; stroke-width: 1.5;
+          vector-effect: non-scaling-stroke; cursor: grab; }
+  .rungNode { fill: var(--rung); stroke: #14161a; stroke-width: 1.5;
+              vector-effect: non-scaling-stroke; cursor: grab; }
+  .handle { stroke: #14161a; stroke-width: 1.5; vector-effect: non-scaling-stroke;
+            cursor: grab; }
+  .handle.start { fill: var(--start); }
+  .handle.end { fill: var(--end); }
+  .angleArrow { stroke: var(--accent); opacity: .8; vector-effect: non-scaling-stroke;
+                pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <div class="brand">Digitizing Artifact<span>editor</span></div>
+  <div id="selInfo">no selection</div>
+  <button class="chip" id="planToggle" type="button">Stitch plan</button>
+  <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
+  <button class="chip" id="endBtn" type="button">End session</button>
+</div>
+<div id="main">
+  <div id="canvasWrap">
+    <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="tier2Status">stitch plan: —</div>
+    <div id="hint">click: select · drag nodes/handles: edit · wheel: zoom · drag bg: pan ·
+      dbl-click satin: add rung · shift-click rung: delete</div>
+  </div>
+  <aside id="panel">
+    <h2>Conversation</h2>
+    <div id="chat"></div>
+    <div id="composer">
+      <div id="pills"></div>
+      <textarea id="input" placeholder="Tell the agent what to change…"></textarea>
+      <div id="sendRow">
+        <button id="send" type="button">Send to Agent</button>
+      </div>
+      <div id="presenceBanner">Agent is not listening — ask it to run
+        <code>artifact poll</code>.</div>
+    </div>
+  </aside>
+</div>
+<div id="endedOverlay"><div class="card">
+  <h1>Session ended</h1><p>Return to your agent to continue.</p>
+</div></div>
+
+<script>
+"use strict";
+const KEY = "__SESSION_KEY__";
+const api = (p) => `/api/${KEY}${p}`;
+
+/* ---------- state ---------- */
+let design = null;              // /design payload
+let selected = null;            // selected object id
+let pills = [];                 // annotation object ids queued for the next send
+let vb = null;                  // current viewBox {x,y,w,h}
+let baseVb = null;
+let dragging = null;            // active drag descriptor
+let tier2Gen = 0;
+let planOn = false;
+
+const $ = (id) => document.getElementById(id);
+const canvas = $("canvas");
+const SVGNS = "http://www.w3.org/2000/svg";
+
+/* ---------- path parsing (M/L/C/Z subset, absolute output) ---------- */
+function tokenizePath(d) {
+  const tokens = d.match(/[MmLlCcZzHhVvSsQqTtAa]|-?[\d.]+(?:e-?\d+)?/g) || [];
+  const segs = [];
+  let i = 0, cx = 0, cy = 0, sx = 0, sy = 0, cmd = null;
+  const num = () => parseFloat(tokens[i++]);
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (/[A-Za-z]/.test(t)) { cmd = t; i++; }
+    const rel = cmd === cmd.toLowerCase();
+    const C = cmd.toUpperCase();
+    if (C === "M") {
+      const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
+      segs.push({ c: "M", p: [x, y] }); cx = sx = x; cy = sy = y;
+      cmd = rel ? "l" : "L";           // subsequent pairs are implicit linetos
+    } else if (C === "L") {
+      const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
+      segs.push({ c: "L", p: [x, y] }); cx = x; cy = y;
+    } else if (C === "H") {
+      const x = num() + (rel ? cx : 0);
+      segs.push({ c: "L", p: [x, cy] }); cx = x;
+    } else if (C === "V") {
+      const y = num() + (rel ? cy : 0);
+      segs.push({ c: "L", p: [cx, y] }); cy = y;
+    } else if (C === "C") {
+      const x1 = num() + (rel ? cx : 0), y1 = num() + (rel ? cy : 0);
+      const x2 = num() + (rel ? cx : 0), y2 = num() + (rel ? cy : 0);
+      const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
+      segs.push({ c: "C", p: [x1, y1, x2, y2, x, y] }); cx = x; cy = y;
+    } else if (C === "S" || C === "Q" || C === "T" || C === "A") {
+      // rare in this domain — flatten conservatively to a lineto at the endpoint
+      const n = { S: 4, Q: 4, T: 2, A: 7 }[C];
+      const vals = [];
+      for (let k = 0; k < n; k++) vals.push(num());
+      const x = vals[n - 2] + (rel ? cx : 0), y = vals[n - 1] + (rel ? cy : 0);
+      segs.push({ c: "L", p: [x, y] }); cx = x; cy = y;
+    } else if (C === "Z") {
+      segs.push({ c: "Z", p: [] }); cx = sx; cy = sy;
+    } else { i++; }
+  }
+  return segs;
+}
+const fmt = (n) => (Math.round(n * 1000) / 1000).toString();
+function serializePath(segs) {
+  return segs.map(s => s.c + s.p.map(fmt).join(",")).join(" ")
+             .replace(/([MLC])/g, "$1").replace(/ Z/g, "Z");
+}
+/* anchor nodes of a parsed subpath: endpoint of every M/L/C segment */
+function anchors(segs) {
+  const out = [];
+  segs.forEach((s, si) => {
+    if (s.c === "M" || s.c === "L") out.push({ si, x: s.p[0], y: s.p[1] });
+    else if (s.c === "C") out.push({ si, x: s.p[4], y: s.p[5] });
+  });
+  return out;
+}
+/* move anchor `ai` by (dx,dy), dragging adjacent bezier control points along */
+function moveAnchor(segs, ai, dx, dy) {
+  const as = anchors(segs);
+  const a = as[ai];
+  const s = segs[a.si];
+  if (s.c === "C") { s.p[2] += dx; s.p[3] += dy; s.p[4] += dx; s.p[5] += dy; }
+  else { s.p[0] += dx; s.p[1] += dy; }
+  const next = segs[a.si + 1];
+  if (next && next.c === "C") { next.p[0] += dx; next.p[1] += dy; }
+}
+/* flatten a subpath to a polyline for tier-1 + rung snapping */
+function flatten(segs, per = 12) {
+  const pts = [];
+  let cx = 0, cy = 0;
+  for (const s of segs) {
+    if (s.c === "M") { cx = s.p[0]; cy = s.p[1]; pts.push([cx, cy]); }
+    else if (s.c === "L") { cx = s.p[0]; cy = s.p[1]; pts.push([cx, cy]); }
+    else if (s.c === "C") {
+      const [x1, y1, x2, y2, x, y] = s.p;
+      for (let k = 1; k <= per; k++) {
+        const t = k / per, u = 1 - t;
+        pts.push([
+          u*u*u*cx + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x,
+          u*u*u*cy + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y,
+        ]);
+      }
+      cx = x; cy = y;
+    }
+  }
+  return pts;
+}
+function polyLength(pts) {
+  let L = 0;
+  for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+  return L;
+}
+function samplePoly(pts, n) {
+  const total = polyLength(pts);
+  if (!total || pts.length < 2) return pts.slice();
+  const out = [pts[0]]; let want = total / (n - 1), acc = 0, next = want;
+  for (let i = 1; i < pts.length; i++) {
+    let [px, py] = pts[i-1]; const [qx, qy] = pts[i];
+    let seg = Math.hypot(qx-px, qy-py);
+    while (acc + seg >= next - 1e-9 && out.length < n - 1) {
+      const t = (next - acc) / seg;
+      out.push([px + (qx-px)*t, py + (qy-py)*t]);
+      next += want;
+    }
+    acc += seg;
+  }
+  out.push(pts[pts.length-1]);
+  return out;
+}
+function nearestOnPoly(pts, x, y) {
+  let best = null, bd = Infinity;
+  for (let i = 1; i < pts.length; i++) {
+    const [ax, ay] = pts[i-1], [bx, by] = pts[i];
+    const vx = bx-ax, vy = by-ay, L2 = vx*vx + vy*vy || 1e-12;
+    let t = ((x-ax)*vx + (y-ay)*vy) / L2; t = Math.max(0, Math.min(1, t));
+    const px = ax + vx*t, py = ay + vy*t, d = Math.hypot(x-px, y-py);
+    if (d < bd) { bd = d; best = [px, py]; }
+  }
+  return best;
+}
+
+/* ---------- api ---------- */
+async function getDesign() {
+  const r = await fetch(api("/design"));
+  if (!r.ok) throw new Error((await r.json()).error || r.status);
+  return r.json();
+}
+async function postEdit(ops) {
+  const r = await fetch(api("/edit"), { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ops }) });
+  if (!r.ok) {
+    const err = (await r.json()).error || r.status;
+    $("tier2Status").textContent = "edit failed: " + err;
+    throw new Error(err);
+  }
+  scheduleTier2();
+  return r.json();
+}
+async function postFeedback(payload) {
+  await fetch(api("/feedback"), { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+}
+
+/* ---------- tier-2 overlay (debounced, coalescing) ---------- */
+let tier2Timer = null;
+function scheduleTier2() {
+  if (!planOn) return;
+  clearTimeout(tier2Timer);
+  tier2Timer = setTimeout(fetchTier2, 600);
+}
+let planDataUrl = null;
+async function fetchTier2() {
+  const gen = ++tier2Gen;
+  $("tier2Status").textContent = "stitch plan: rendering…";
+  try {
+    const r = await fetch(api("/preview"));
+    const text = await r.text();
+    if (gen !== tier2Gen) return;            // superseded by a newer edit
+    if (!r.ok) { $("tier2Status").textContent = "stitch plan: error"; return; }
+    planDataUrl = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text);
+    renderPlanLayer();
+    $("tier2Status").textContent = "stitch plan: live";
+  } catch (e) {
+    if (gen === tier2Gen) $("tier2Status").textContent = "stitch plan: unreachable";
+  }
+}
+/* the plan renders as an <image> inside the canvas at the document's viewBox,
+   so it pans/zooms in lockstep with the artwork and edit layers */
+function renderPlanLayer() {
+  if (!planLayer) return;
+  planLayer.textContent = "";
+  if (!planOn || !planDataUrl) return;
+  el("image", { href: planDataUrl, x: baseVb.x, y: baseVb.y,
+                width: baseVb.w, height: baseVb.h,
+                preserveAspectRatio: "xMidYMid meet" }, planLayer);
+}
+
+/* ---------- viewport (pan/zoom) ---------- */
+function setViewBox() {
+  canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  renderEditLayer();                          // keep marker sizes screen-constant
+}
+function clientToSvg(ev) {
+  const pt = new DOMPoint(ev.clientX, ev.clientY);
+  return pt.matrixTransform(canvas.getScreenCTM().inverse());
+}
+function px(units) {                          // screen px → svg units at current zoom
+  const rect = canvas.getBoundingClientRect();
+  return units * vb.w / rect.width;
+}
+canvas.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const p = clientToSvg(ev);
+  const f = ev.deltaY > 0 ? 1.12 : 1 / 1.12;
+  vb = { x: p.x - (p.x - vb.x) * f, y: p.y - (p.y - vb.y) * f, w: vb.w * f, h: vb.h * f };
+  setViewBox();
+}, { passive: false });
+
+/* ---------- rendering ---------- */
+function parseViewBox() {
+  const [x, y, w, h] = (design.viewBox || "0 0 100 100").split(/[\s,]+/).map(Number);
+  baseVb = { x, y, w, h };
+  if (!vb) vb = { ...baseVb };
+}
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+let artworkLayer, planLayer, editLayer;
+function renderAll() {
+  canvas.textContent = "";
+  parseViewBox();
+  canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  // background pan target
+  const bg = el("rect", { x: baseVb.x - baseVb.w, y: baseVb.y - baseVb.h,
+    width: baseVb.w * 3, height: baseVb.h * 3, fill: "transparent" }, canvas);
+  bg.addEventListener("pointerdown", startPan);
+  artworkLayer = el("g", { class: "artwork" }, canvas);
+  planLayer = el("g", { class: "planLayer" }, canvas);
+  editLayer = el("g", {}, canvas);
+  renderPlanLayer();
+  for (const o of design.objects) {
+    if (!o.d) continue;
+    el("path", { d: o.d, fill: o.fill || "none",
+      stroke: o.stroke || "none", "stroke-width": .4 }, artworkLayer);
+    const hit = el("path", { d: o.d, class: "obj-hit",
+      fill: o.fill ? "rgba(0,0,0,0)" : "none" }, artworkLayer);
+    hit.addEventListener("pointerdown", (ev) => { ev.stopPropagation(); select(o.id); });
+    hit.addEventListener("dblclick", (ev) => { ev.stopPropagation(); addRung(o, ev); });
+  }
+  renderEditLayer();
+  renderPills();
+}
+function renderEditLayer() {
+  if (!editLayer) return;
+  editLayer.textContent = "";
+  const o = design.objects.find(x => x.id === selected);
+  $("selInfo").textContent = o
+    ? `${o.id} · ${o.stitch_type}` +
+      (Object.keys(o.params).length ? " · " + Object.entries(o.params)
+        .map(([k, v]) => `${k}=${v}`).join(" ") : "")
+    : "no selection";
+  if (!o) return;
+  if (o.kind === "satin") renderSatin(o);
+  else if (o.kind === "fill") renderFill(o);
+  else el("path", { d: o.d, class: "fillBoundary" }, editLayer);
+}
+function renderSatin(o) {
+  const railSegs = o.rails.map(tokenizePath);
+  const flats = railSegs.map(s => flatten(s));
+  // tier-1 zigzag approximation — satins only (fills never get fake rows)
+  if (flats[0]?.length > 1 && flats[1]?.length > 1) {
+    const L = Math.max(polyLength(flats[0]), polyLength(flats[1]));
+    const n = Math.max(8, Math.min(400, Math.round(L / 0.8) * 2));
+    const a = samplePoly(flats[0], n), b = samplePoly(flats[1], n);
+    let dz = "";
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+      const p = i % 2 ? a[i] : b[i], q = i % 2 ? b[i] : a[i];
+      dz += (i ? "L" : "M") + fmt(p[0]) + "," + fmt(p[1]) + "L" + fmt(q[0]) + "," + fmt(q[1]);
+    }
+    el("path", { d: dz, class: "zig" }, editLayer);
+  }
+  // rails + draggable anchor nodes
+  o.rails.forEach((d, ri) => {
+    el("path", { d, class: "rail" }, editLayer);
+    anchors(railSegs[ri]).forEach((a, ai) => {
+      const c = el("circle", { cx: a.x, cy: a.y, r: px(4.5), class: "node" }, editLayer);
+      c.addEventListener("pointerdown", (ev) =>
+        startDrag(ev, { type: "rail-node", obj: o, rail: ri, anchor: ai, segs: railSegs }));
+    });
+  });
+  // rungs + endpoints
+  o.rungs.forEach((d, ri) => {
+    const segs = tokenizePath(d);
+    const p = el("path", { d, class: "rung" }, editLayer);
+    p.addEventListener("click", (ev) => { if (ev.shiftKey) deleteRung(o, ri); });
+    anchors(segs).forEach((a, ai) => {
+      const c = el("circle", { cx: a.x, cy: a.y, r: px(3.5), class: "rungNode" }, editLayer);
+      c.addEventListener("pointerdown", (ev) =>
+        startDrag(ev, { type: "rung-node", obj: o, rung: ri, anchor: ai, segs: [segs] }));
+    });
+  });
+}
+function renderFill(o) {
+  el("path", { d: o.d, class: "fillBoundary" }, editLayer);
+  // angle indicator through bbox centre
+  const flatsAll = flatten(tokenizePath(o.d));
+  if (flatsAll.length) {
+    const xs = flatsAll.map(p => p[0]), ys = flatsAll.map(p => p[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const ang = -parseFloat(o.params.angle || "0") * Math.PI / 180;
+    const r = (Math.max(...xs) - Math.min(...xs)) / 3;
+    el("line", { x1: cx - r * Math.cos(ang), y1: cy - r * Math.sin(ang),
+                 x2: cx + r * Math.cos(ang), y2: cy + r * Math.sin(ang),
+                 class: "angleArrow" }, editLayer);
+  }
+  for (const role of ["start", "end"]) {
+    const h = o[role];
+    if (!h) continue;
+    const c = el("circle", { cx: h.x, cy: h.y, r: px(5.5),
+                             class: "handle " + role }, editLayer);
+    c.addEventListener("pointerdown", (ev) =>
+      startDrag(ev, { type: "handle", obj: o, role, use_id: h.use_id }));
+  }
+}
+
+/* ---------- interactions ---------- */
+function select(id) {
+  selected = id;
+  if (id && !pills.includes(id)) { pills.push(id); renderPills(); }
+  renderEditLayer();
+}
+function startPan(ev) {
+  const from = { x: ev.clientX, y: ev.clientY, vb: { ...vb } };
+  const rect = canvas.getBoundingClientRect();
+  const move = (e) => {
+    vb.x = from.vb.x - (e.clientX - from.x) * vb.w / rect.width;
+    vb.y = from.vb.y - (e.clientY - from.y) * vb.h / rect.height;
+    canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  };
+  const up = () => { window.removeEventListener("pointermove", move);
+                     window.removeEventListener("pointerup", up); renderEditLayer(); };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+function startDrag(ev, desc) {
+  ev.stopPropagation();
+  ev.preventDefault();
+  let last = clientToSvg(ev);
+  dragging = desc;
+  const move = (e) => {
+    const p = clientToSvg(e);
+    const dx = p.x - last.x, dy = p.y - last.y;
+    last = p;
+    if (desc.type === "handle") {
+      const h = desc.obj[desc.role];
+      h.x += dx; h.y += dy;
+    } else if (desc.type === "rail-node") {
+      moveAnchor(desc.segs[desc.rail], desc.anchor, dx, dy);
+      desc.obj.rails[desc.rail] = serializePath(desc.segs[desc.rail]);
+    } else if (desc.type === "rung-node") {
+      moveAnchor(desc.segs[0], desc.anchor, dx, dy);
+      desc.obj.rungs[desc.rung] = serializePath(desc.segs[0]);
+    }
+    renderEditLayer();
+  };
+  const up = async () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    dragging = null;
+    try {
+      if (desc.type === "handle") {
+        const h = desc.obj[desc.role];
+        await postEdit([{ op: "move_command", use_id: desc.use_id,
+                          x: fmt(h.x), y: fmt(h.y) }]);
+      } else {
+        await postEdit([{ op: "set_path", id: desc.obj.id, d: satinD(desc.obj) }]);
+      }
+    } catch (e) { await refresh(); }
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+const satinD = (o) => [...o.rails, ...o.rungs].join(" ");
+async function addRung(o, ev) {
+  if (o.kind !== "satin") return;
+  const p = clientToSvg(ev);
+  const a = nearestOnPoly(flatten(tokenizePath(o.rails[0])), p.x, p.y);
+  const b = nearestOnPoly(flatten(tokenizePath(o.rails[1])), p.x, p.y);
+  if (!a || !b) return;
+  o.rungs.push(`M${fmt(a[0])},${fmt(a[1])} L${fmt(b[0])},${fmt(b[1])}`);
+  renderEditLayer();
+  await postEdit([{ op: "set_path", id: o.id, d: satinD(o) }]);
+}
+async function deleteRung(o, ri) {
+  o.rungs.splice(ri, 1);
+  renderEditLayer();
+  await postEdit([{ op: "set_path", id: o.id, d: satinD(o) }]);
+}
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { selected = null; renderEditLayer(); }
+});
+
+/* ---------- chat / feedback ---------- */
+function renderPills() {
+  const box = $("pills");
+  box.textContent = "";
+  pills.forEach((id, i) => {
+    const pill = document.createElement("span");
+    pill.className = "pill";
+    pill.textContent = id + " ";
+    const x = document.createElement("button");
+    x.textContent = "×";
+    x.onclick = () => { pills.splice(i, 1); renderPills(); };
+    pill.appendChild(x);
+    box.appendChild(pill);
+  });
+  $("send").disabled = !pills.length && !$("input").value.trim();
+}
+$("input").addEventListener("input", renderPills);
+function addMsg(role, text, objects) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = text || "(annotation)";
+  if (objects && objects.length) {
+    const o = document.createElement("span");
+    o.className = "objs";
+    o.textContent = "→ " + objects.join(", ");
+    div.appendChild(o);
+  }
+  $("chat").appendChild(div);
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+$("send").onclick = async () => {
+  const text = $("input").value.trim();
+  if (!text && !pills.length) return;
+  await postFeedback({ objects: pills, text });
+  addMsg("human", text, pills);
+  pills = []; $("input").value = ""; renderPills();
+};
+$("input").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) $("send").click();
+});
+$("endBtn").onclick = async () => {
+  await fetch(api("/end"), { method: "POST" });
+};
+$("planToggle").onclick = () => {
+  planOn = !planOn;
+  $("planToggle").classList.toggle("on", planOn);
+  $("canvasWrap").classList.toggle("showPlan", planOn);
+  renderPlanLayer();
+  if (planOn) fetchTier2();
+  else $("tier2Status").textContent = "stitch plan: —";
+};
+
+/* ---------- SSE ---------- */
+function connectSSE() {
+  const es = new EventSource(`/events/${KEY}`);
+  es.addEventListener("chat-sync", (ev) => {
+    $("chat").textContent = "";
+    for (const m of JSON.parse(ev.data).chat) addMsg(m.role, m.text, m.objects);
+  });
+  es.addEventListener("agent-reply", (ev) => addMsg("agent", JSON.parse(ev.data).text));
+  es.addEventListener("agent-presence", (ev) => {
+    const state = JSON.parse(ev.data).state;
+    $("presence").className = state;
+    $("presenceText").textContent = state;
+    $("presenceBanner").classList.toggle("show", state === "waiting");
+  });
+  es.addEventListener("reload", () => { if (!dragging) refresh(); });
+  es.addEventListener("ended", () => { $("endedOverlay").classList.add("show"); es.close(); });
+  es.onerror = () => { es.close(); setTimeout(connectSSE, 2000); };
+}
+
+/* ---------- boot ---------- */
+async function refresh() {
+  design = await getDesign();
+  renderAll();
+  scheduleTier2();
+}
+refresh().then(connectSSE).catch((e) => {
+  $("selInfo").textContent = "failed to load design: " + e.message;
+});
+</script>
+</body>
+</html>

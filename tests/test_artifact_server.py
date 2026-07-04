@@ -96,6 +96,9 @@ class TestLifecycle:
         opened = _open_session(server, project)
         status, body = _get(server, f"/session/{opened['key']}")
         assert status == 200
+        assert opened["key"] in body          # session key substituted
+        assert "__SESSION_KEY__" not in body  # placeholder gone
+        assert "EventSource" in body          # SSE wiring present
 
 
 class TestPollLoop:
