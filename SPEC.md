@@ -488,6 +488,34 @@ font import-bx-pack --bx-dir <abs>  --exp-dir <abs>  --output-dir <abs>
 
 **Does not require a `--project` file** — font commands operate directly on a font directory and are stateless (no undo history).
 
+### 2.15 `artifact` group
+
+The digitizing-artifact correction loop (full design doc: `docs/digitizing-artifact-spec.md`). Opens a browser editor on the project's design; a human corrects the digitization by direct manipulation (satin rail nodes, rungs, fill start/end handles) and chat while the agent long-polls for feedback and edits the same design. A detached stdlib-HTTP server (spawned on first `open`, state under `~/.cli-anything-inkstitch/artifact/`) serves the editor, long-poll, SSE, and edit endpoints. Sessions are keyed by project path.
+
+```
+artifact open   [--project <abs>]  [--no-browser]  [--reopen]
+artifact poll   [--project <abs>]  [--timeout-s <f>]  [--agent-reply <str>]
+artifact reply  [--project <abs>]  --text <str>
+artifact gate   [--project <abs>]
+artifact end    [--project <abs>]
+artifact stop
+```
+
+**Subcommands:**
+
+| Subcommand | Purpose |
+|---|---|
+| `open` | Open or resume the editor session (spawns the server if needed, opens the browser unless `--no-browser`). A session the user ended from the browser refuses a plain reopen; `--reopen` overrides. |
+| `poll` | Long-poll for the next feedback batch: `{objects, manipulation, text}` items. `--agent-reply` sends a chat reply before waiting. Queued feedback survives server restarts. |
+| `reply` | Send a chat message into the editor without polling |
+| `gate` | Stitchability audit (spec §8 of the design doc): error severity = desynced rung pairing, rail count/self-crossing, satin width outside 0.5–12 mm, twist risk; warning severity = narrow/wide-but-stitchable, satin >150 mm, fill handle >10 mm off its boundary. Errors should be fixed before handback. |
+| `end` | End the session as the agent (plain `open` can revive it) |
+| `stop` | Shut down the background server |
+
+**Editor semantics:** direct manipulations POST to the server's `/edit` endpoint and are applied through the project layer (filelock, SHA-256 update, one history patch per edit batch — undoable via `session undo`). Human chat + annotations queue locally and flush as one feedback send. The editor's End button re-runs the gate: errors show a persistent banner, notify the agent via the feedback path (`[gate] end blocked: …`), and require an explicit "stitch anyway" override to end.
+
+**Server endpoints (loopback only):** `POST /api/sessions`, `GET /api/poll?project=…&timeout_s=…`, `GET /session/<key>` (editor page), `GET /api/<key>/design`, `POST /api/<key>/edit`, `POST /api/<key>/feedback`, `POST /api/<key>/agent-reply`, `GET /api/<key>/preview` (Tier-2 stitch plan via the binary), `GET /api/<key>/gate`, `POST /api/<key>/end`, `GET /events/<key>` (SSE: chat-sync, agent-reply, agent-presence, reload, ended), `POST /shutdown`.
+
 ---
 
 ## 3. INX / Param Schema Strategy
@@ -603,7 +631,14 @@ cli-anything-inkstitch/
 │       │   ├── export.py
 │       │   ├── schema_group.py
 │       │   ├── session.py
-│       │   └── font.py              # font command group (2200+ lines)
+│       │   ├── font.py              # font command group (2200+ lines)
+│       │   └── artifact.py          # artifact command group (§2.15)
+│       ├── artifact/                # digitizing-artifact correction loop
+│       │   ├── sessions.py          # session store (project-path identity, feedback queue)
+│       │   ├── server.py            # stdlib HTTP server: long-poll, SSE, live reload
+│       │   ├── design_model.py      # design→editor JSON; edits via the project layer
+│       │   ├── gate.py              # stitchability audit
+│       │   └── editor/editor.html   # self-contained browser editor
 │       ├── binary.py                # inkstitch binary discovery + invocation
 │       └── repl.py                  # REPL loop
 ├── bin/
@@ -619,6 +654,10 @@ cli-anything-inkstitch/
     ├── test_params.py
     ├── test_schema_extraction.py
     ├── test_font.py                 # font group tests; BX tests skipif fixtures absent
+    ├── test_artifact_sessions.py    # session store: identity, queue, end semantics
+    ├── test_artifact_server.py      # HTTP server: lifecycle, long-poll, SSE, gate endpoint
+    ├── test_artifact_design_model.py # design JSON + edit ops
+    ├── test_artifact_gate.py        # stitchability gate geometry + CLI
     └── test_e2e_export.py           # requires inkstitch installed
 ```
 
