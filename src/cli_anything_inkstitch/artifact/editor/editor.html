@@ -43,6 +43,20 @@
   #hint { position: absolute; right: 10px; bottom: 10px; color: var(--muted);
           background: rgba(20,22,26,.85); padding: 3px 10px; border-radius: 6px;
           border: 1px solid var(--line); max-width: 46ch; }
+  #gateBanner { position: absolute; left: 10px; right: 10px; top: 10px; display: none;
+                background: rgba(46,22,24,.95); border: 1px solid rgba(229,83,75,.5);
+                border-radius: 8px; padding: 10px 12px; z-index: 2; }
+  #gateBanner.show { display: block; }
+  #gateBanner h3 { font-size: 12px; color: var(--end); margin-bottom: 6px; }
+  #gateBanner ul { margin: 0 0 8px 16px; }
+  #gateBanner li { margin-bottom: 3px; }
+  #gateBanner li a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+  #gateBanner .row { display: flex; gap: 8px; }
+  #gateBanner button { font: inherit; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  #gateEndAnyway { background: transparent; color: var(--end);
+                   border: 1px solid rgba(229,83,75,.5); }
+  #gateDismiss { background: transparent; color: var(--muted);
+                 border: 1px solid var(--line); }
 
   #panel { width: 320px; display: flex; flex-direction: column; background: var(--panel);
            border-left: 1px solid var(--line); }
@@ -115,6 +129,14 @@
     <div id="tier2Status">stitch plan: —</div>
     <div id="hint">click: select · drag nodes/handles: edit · wheel: zoom · drag bg: pan ·
       dbl-click satin: add rung · shift-click rung: delete</div>
+    <div id="gateBanner">
+      <h3>Stitchability check failed — this design may not stitch cleanly</h3>
+      <ul id="gateFindings"></ul>
+      <div class="row">
+        <button id="gateEndAnyway" type="button">Stitch anyway &amp; end session</button>
+        <button id="gateDismiss" type="button">Keep editing</button>
+      </div>
+    </div>
   </div>
   <aside id="panel">
     <h2>Conversation</h2>
@@ -579,9 +601,40 @@ $("send").onclick = async () => {
 $("input").addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) $("send").click();
 });
+/* Phase-3 handback: every End click re-runs the gate. Errors keep the
+   artifact open with a persistent banner + explicit "stitch anyway" override,
+   and notify the agent through the same feedback path so it can auto-fix
+   before the human is involved (spec §8). */
+const endSession = () => fetch(api("/end"), { method: "POST" });
+function showGateBanner(gate) {
+  const list = $("gateFindings");
+  list.textContent = "";
+  for (const f of gate.errors) {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.textContent = f.object;
+    a.onclick = () => select(f.object);
+    li.appendChild(a);
+    li.appendChild(document.createTextNode(" — " + f.message));
+    list.appendChild(li);
+  }
+  $("gateBanner").classList.add("show");
+}
 $("endBtn").onclick = async () => {
-  await fetch(api("/end"), { method: "POST" });
+  let gate = null;
+  try { gate = await (await fetch(api("/gate"))).json(); } catch (e) { /* gate unreachable — don't block */ }
+  if (gate && !gate.ok) {
+    showGateBanner(gate);
+    await postFeedback({
+      objects: [...new Set(gate.errors.map(f => f.object))],
+      text: "[gate] end blocked: " + gate.errors.map(f => f.message).join(" · "),
+    });
+    return;
+  }
+  await endSession();
 };
+$("gateEndAnyway").onclick = endSession;
+$("gateDismiss").onclick = () => $("gateBanner").classList.remove("show");
 $("planToggle").onclick = () => {
   planOn = !planOn;
   $("planToggle").classList.toggle("on", planOn);

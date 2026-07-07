@@ -160,6 +160,52 @@ class TestPollLoop:
         assert body["status"] == "sent"
 
 
+class TestGateEndpoint:
+    SVG = """<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:inkstitch="http://inkstitch.org/namespace"
+     width="60mm" height="40mm" viewBox="0 0 60 40">
+  <metadata><inkstitch_svg_version>3</inkstitch_svg_version></metadata>
+  <path id="s" fill="none" stroke="#000" inkstitch:satin_column="True" d="{d}"/>
+</svg>"""
+    GOOD_D = ("M10,12 C20,8 40,8 50,12 M10,18 C20,22 40,22 50,18 "
+              "M10,11 L10,19 M30,8 L30,22 M50,11 L50,19")
+    DESYNCED_D = ("M10,6.9 C20,0.9 40,6 50,12 M10,20 C20,26 40,26 50,20 "
+                  "M10,12 L10,20 M30,7.5 L30,24.5 M50,12 L50,20")
+
+    def _design_project(self, tmp_path, d):
+        from cli_anything_inkstitch.project import ProjectFile
+        from cli_anything_inkstitch.svg.document import sha256_of
+        svg = tmp_path / "design.svg"
+        svg.write_text(self.SVG.format(d=d))
+        proj_path = tmp_path / "design.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        return str(proj_path)
+
+    def test_gate_endpoint_ok(self, server, tmp_path):
+        project = self._design_project(tmp_path, self.GOOD_D)
+        opened = _open_session(server, project)
+        status, body = _get(server, f"/api/{opened['key']}/gate")
+        assert status == 200
+        assert json.loads(body)["ok"] is True
+
+    def test_gate_endpoint_reports_errors(self, server, tmp_path):
+        project = self._design_project(tmp_path, self.DESYNCED_D)
+        opened = _open_session(server, project)
+        status, body = _get(server, f"/api/{opened['key']}/gate")
+        result = json.loads(body)
+        assert result["ok"] is False
+        assert any(f["check"] == "rung_pairing" for f in result["errors"])
+
+    def test_editor_page_has_gate_handback(self, server, project):
+        opened = _open_session(server, project)
+        status, body = _get(server, f"/session/{opened['key']}")
+        assert "gateBanner" in body
+        assert "Stitch anyway" in body
+
+
 class TestSSE:
     def _read_sse_events(self, server, key, n_events, timeout=10):
         """Collect the first n SSE events (name, data) from /events/<key>."""
