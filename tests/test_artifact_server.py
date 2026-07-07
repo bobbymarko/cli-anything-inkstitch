@@ -205,6 +205,26 @@ class TestGateEndpoint:
         assert "gateBanner" in body
         assert "Stitch anyway" in body
 
+    def test_undo_redo_endpoints(self, server, tmp_path):
+        project = self._design_project(tmp_path, self.GOOD_D)
+        opened = _open_session(server, project)
+        new_d = "M10,10 L50,10 M10,16 L50,16 M10,10 L10,16 M50,10 L50,16"
+        _post(server, f"/api/{opened['key']}/edit",
+              {"ops": [{"op": "set_path", "id": "s", "d": new_d}]})
+        assert new_d in (tmp_path / "design.svg").read_text()
+        status, body = _post(server, f"/api/{opened['key']}/undo")
+        assert body["applied"]
+        # d reverted (file formatting may differ after lxml round-trip)
+        reverted = (tmp_path / "design.svg").read_text()
+        assert "M10,12 C20,8 40,8 50,12" in reverted
+        assert new_d not in reverted
+        status, body = _post(server, f"/api/{opened['key']}/redo")
+        assert body["applied"]
+        assert new_d in (tmp_path / "design.svg").read_text()
+        # nothing further to redo
+        status, body = _post(server, f"/api/{opened['key']}/redo")
+        assert body["applied"] is None
+
 
 class TestSSE:
     def _read_sse_events(self, server, key, n_events, timeout=10):

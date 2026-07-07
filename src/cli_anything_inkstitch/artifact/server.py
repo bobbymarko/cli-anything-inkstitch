@@ -252,6 +252,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                     self._handle_user_end(key)
                 elif action == "edit":
                     self._handle_edit(key, self._read_body())
+                elif action in ("undo", "redo"):
+                    self._handle_history_step(key, redo=action == "redo")
                 elif action == "reload":
                     self.state.hub.publish(key, {"event": "reload"})
                     self._json({"status": "sent"})
@@ -447,6 +449,17 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         from cli_anything_inkstitch.artifact.design_model import apply_edits
         result = apply_edits(session["file"], body.get("ops") or [])
         self.state.hub.publish(key, {"event": "reload"})
+        self._json(result)
+
+    def _handle_history_step(self, key: str, *, redo: bool) -> None:
+        session = self.state.store.find_by_key(key)
+        if not session:
+            self._json({"error": "session not found"}, 404)
+            return
+        from cli_anything_inkstitch.artifact.design_model import apply_history_step
+        result = apply_history_step(session["file"], redo=redo)
+        if result.get("applied"):
+            self.state.hub.publish(key, {"event": "reload"})
         self._json(result)
 
     def _handle_preview(self, key: str, params: dict) -> None:

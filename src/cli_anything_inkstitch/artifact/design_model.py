@@ -275,6 +275,30 @@ def apply_edits(project_file: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
             "svg_sha256": proj_after.svg_sha256}
 
 
+def apply_history_step(project_file: str, *, redo: bool = False) -> dict[str, Any]:
+    """Step the project history one entry back (or forward with redo=True).
+
+    Same machinery as `session undo`/`session redo`, so browser Cmd+Z and CLI
+    undo interleave on one history. Artifact edits only produce SVG patches;
+    a metadata entry (e.g. set-palette) is refused rather than half-applied.
+    """
+    from cli_anything_inkstitch.history import apply_patch, peek_redo, peek_undo
+    with _open_locked(project_file, mutate=True) as (proj, tree):
+        entry = (peek_redo if redo else peek_undo)(proj.history)
+        if entry is None:
+            return {"applied": None, "cursor": proj.history.get("cursor", -1)}
+        patch = entry["patch"]
+        if patch["type"] == "metadata_diff":
+            raise UserError(
+                "next history entry is a session-metadata change; "
+                "use `session undo` in the CLI for it"
+            )
+        apply_patch(tree, patch, reverse=not redo)
+        proj.history["cursor"] += 1 if redo else -1
+        return {"applied": entry["id"], "command": entry["command"],
+                "cursor": proj.history["cursor"]}
+
+
 # -- Tier-2: authoritative stitch plan ------------------------------------------
 
 def ensure_prepped(project_file: str) -> bool:

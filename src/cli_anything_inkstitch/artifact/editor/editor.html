@@ -120,6 +120,7 @@
                   vector-effect: non-scaling-stroke; }
   .rail { fill: none; stroke: var(--rail); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
   .rung { stroke: var(--rung); stroke-width: 1.2; vector-effect: non-scaling-stroke; cursor: pointer; }
+  .rung.active { stroke: var(--accent); stroke-width: 2.4; }
   .zig { fill: none; stroke: var(--zig); stroke-width: .6; opacity: .75;
          vector-effect: non-scaling-stroke; pointer-events: none; }
   .node { fill: var(--rail); stroke: #14161a; stroke-width: 1.5;
@@ -153,8 +154,7 @@
   <div id="canvasWrap">
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
     <div id="tier2Status">stitch plan: —</div>
-    <div id="hint">click: select · drag nodes/handles: edit · wheel: zoom · drag bg: pan ·
-      dbl-click satin: add rung · shift-click rung: delete</div>
+    <div id="hint"></div>
     <div id="gateBanner">
       <h3>Stitchability check failed — this design may not stitch cleanly</h3>
       <ul id="gateFindings"></ul>
@@ -191,13 +191,17 @@ const api = (p) => `/api/${KEY}${p}`;
 
 /* ---------- state ---------- */
 let design = null;              // /design payload
-let selected = null;            // selected object id
-let pills = [];                 // annotation object ids queued for the next send
+let selection = [];             // selected object ids (Illustrator model:
+                                // click replaces, shift-click adds/removes)
+let activeRung = null;          // {objId, index} — rung targeted for Delete
 let vb = null;                  // current viewBox {x,y,w,h}
 let baseVb = null;
 let dragging = null;            // active drag descriptor
+let spaceHeld = false;          // spacebar = hand tool (Illustrator)
 let tier2Gen = 0;
 let planOn = false;
+const IS_MAC = /Mac|iP/.test(navigator.platform);
+const MOD_LABEL = IS_MAC ? "⌘" : "Ctrl";
 
 const $ = (id) => document.getElementById(id);
 const canvas = $("canvas");
@@ -394,13 +398,45 @@ function px(units) {                          // screen px → svg units at curr
   const rect = canvas.getBoundingClientRect();
   return units * vb.w / rect.width;
 }
+/* Illustrator wheel semantics: plain scroll pans, shift+scroll pans
+   horizontally, option/alt+scroll zooms at the cursor. ctrl+wheel is kept as
+   zoom too so trackpad pinch (which browsers report as ctrl+wheel) works. */
 canvas.addEventListener("wheel", (ev) => {
   ev.preventDefault();
-  const p = clientToSvg(ev);
-  const f = ev.deltaY > 0 ? 1.12 : 1 / 1.12;
-  vb = { x: p.x - (p.x - vb.x) * f, y: p.y - (p.y - vb.y) * f, w: vb.w * f, h: vb.h * f };
+  const rect = canvas.getBoundingClientRect();
+  if (ev.altKey || ev.ctrlKey || ev.metaKey) {
+    const p = clientToSvg(ev);
+    const f = ev.deltaY > 0 ? 1.12 : 1 / 1.12;
+    vb = { x: p.x - (p.x - vb.x) * f, y: p.y - (p.y - vb.y) * f,
+           w: vb.w * f, h: vb.h * f };
+  } else if (ev.shiftKey) {
+    vb.x += (ev.deltaY + ev.deltaX) * vb.w / rect.width;
+  } else {
+    vb.x += ev.deltaX * vb.w / rect.width;
+    vb.y += ev.deltaY * vb.h / rect.height;
+  }
   setViewBox();
 }, { passive: false });
+function zoomBy(f) {                          // Cmd+= / Cmd+- zoom on centre
+  const cx = vb.x + vb.w / 2, cy = vb.y + vb.h / 2;
+  vb = { x: cx - vb.w * f / 2, y: cy - vb.h * f / 2, w: vb.w * f, h: vb.h * f };
+  setViewBox();
+}
+function actualSize() {                       // Cmd+1: 1 svg unit = 1 css px
+  const rect = canvas.getBoundingClientRect();
+  const cx = vb.x + vb.w / 2, cy = vb.y + vb.h / 2;
+  vb = { x: cx - rect.width / 2, y: cy - rect.height / 2,
+         w: rect.width, h: rect.height };
+  setViewBox();
+}
+/* spacebar = hand tool: while held, any drag on the canvas pans */
+canvas.addEventListener("pointerdown", (ev) => {
+  if (spaceHeld) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    startPan(ev);
+  }
+}, true);
 
 /* ---------- rendering ---------- */
 function parseViewBox() {
@@ -433,22 +469,49 @@ function renderAll() {
       stroke: o.stroke || "none", "stroke-width": .4 }, artworkLayer);
     const hit = el("path", { d: o.d, class: "obj-hit",
       fill: o.fill ? "rgba(0,0,0,0)" : "none" }, artworkLayer);
-    hit.addEventListener("pointerdown", (ev) => { ev.stopPropagation(); select(o.id); });
+    hit.addEventListener("pointerdown", (ev) => {
+      if (spaceHeld) return;                      // hand tool wins
+      ev.stopPropagation();
+      select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey);
+    });
     hit.addEventListener("dblclick", (ev) => { ev.stopPropagation(); addRung(o, ev); });
   }
   renderEditLayer();
   renderPills();
 }
-function renderInspect(o) {
+function renderInspect(objs) {
   const body = $("inspectBody");
   body.textContent = "";
-  if (!o) {
+  if (!objs.length) {
     const d = document.createElement("div");
     d.className = "noSel";
-    d.textContent = "Nothing selected — click an object on the canvas.";
+    d.textContent = `Nothing selected — click an object on the canvas. ` +
+      `Shift-click adds to the selection.`;
     body.appendChild(d);
     return;
   }
+  if (objs.length > 1) {
+    const title = document.createElement("div");
+    title.className = "objTitle";
+    title.textContent = `${objs.length} objects selected`;
+    body.appendChild(title);
+    for (const o of objs) {
+      const row = document.createElement("div");
+      row.className = "prow";
+      const a = document.createElement("a");
+      a.textContent = o.id;
+      a.style.cursor = "pointer";
+      a.style.color = "var(--accent)";
+      a.onclick = () => select(o.id);           // solo it
+      const kind = document.createElement("span");
+      kind.className = "pname";
+      kind.textContent = o.stitch_type;
+      row.append(a, kind);
+      body.appendChild(row);
+    }
+    return;
+  }
+  const o = objs[0];
   const title = document.createElement("div");
   title.className = "objTitle";
   title.textContent = o.id;
@@ -472,12 +535,13 @@ function renderInspect(o) {
 function renderEditLayer() {
   if (!editLayer) return;
   editLayer.textContent = "";
-  const o = design.objects.find(x => x.id === selected);
-  renderInspect(o);
-  if (!o) return;
-  if (o.kind === "satin") renderSatin(o);
-  else if (o.kind === "fill") renderFill(o);
-  else el("path", { d: o.d, class: "fillBoundary" }, editLayer);
+  const objs = selection.map(byId).filter(Boolean);
+  renderInspect(objs);
+  for (const o of objs) {
+    if (o.kind === "satin") renderSatin(o);
+    else if (o.kind === "fill") renderFill(o);
+    else el("path", { d: o.d, class: "fillBoundary" }, editLayer);
+  }
 }
 function renderSatin(o) {
   const railSegs = o.rails.map(tokenizePath);
@@ -506,8 +570,14 @@ function renderSatin(o) {
   // rungs + endpoints
   o.rungs.forEach((d, ri) => {
     const segs = tokenizePath(d);
-    const p = el("path", { d, class: "rung" }, editLayer);
-    p.addEventListener("click", (ev) => { if (ev.shiftKey) deleteRung(o, ri); });
+    const isActive = activeRung && activeRung.objId === o.id && activeRung.index === ri;
+    const p = el("path", { d, class: "rung" + (isActive ? " active" : "") }, editLayer);
+    // Illustrator direct-selection model: click targets the rung, Delete removes it
+    p.addEventListener("pointerdown", (ev) => {
+      ev.stopPropagation();
+      activeRung = isActive ? null : { objId: o.id, index: ri };
+      renderEditLayer();
+    });
     anchors(segs).forEach((a, ai) => {
       const c = el("circle", { cx: a.x, cy: a.y, r: px(3.5), class: "rungNode" }, editLayer);
       c.addEventListener("pointerdown", (ev) =>
@@ -540,21 +610,38 @@ function renderFill(o) {
 }
 
 /* ---------- interactions ---------- */
-function select(id) {
-  selected = id;
-  if (id && !pills.includes(id)) { pills.push(id); renderPills(); }
+const byId = (id) => design.objects.find(x => x.id === id);
+function setSelection(ids) {
+  selection = [...new Set(ids)].filter(id => byId(id));
+  activeRung = null;
+  renderPills();
   renderEditLayer();
+}
+/* Illustrator model: plain click replaces the selection, shift-click (or
+   cmd/ctrl-click) toggles membership */
+function select(id, additive = false) {
+  if (!additive) { setSelection([id]); return; }
+  setSelection(selection.includes(id)
+    ? selection.filter(x => x !== id)
+    : [...selection, id]);
 }
 function startPan(ev) {
   const from = { x: ev.clientX, y: ev.clientY, vb: { ...vb } };
   const rect = canvas.getBoundingClientRect();
+  let moved = false;
   const move = (e) => {
+    if (Math.hypot(e.clientX - from.x, e.clientY - from.y) > 3) moved = true;
     vb.x = from.vb.x - (e.clientX - from.x) * vb.w / rect.width;
     vb.y = from.vb.y - (e.clientY - from.y) * vb.h / rect.height;
     canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
   };
-  const up = () => { window.removeEventListener("pointermove", move);
-                     window.removeEventListener("pointerup", up); renderEditLayer(); };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    // Illustrator: a plain click on empty canvas deselects everything
+    if (!moved && !spaceHeld) { setSelection([]); return; }
+    renderEditLayer();
+  };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
 }
@@ -612,25 +699,79 @@ async function deleteRung(o, ri) {
   renderEditLayer();
   await postEdit([{ op: "set_path", id: o.id, d: satinD(o) }]);
 }
+/* ---------- keyboard: Adobe Illustrator defaults ----------
+   shift-click        add/remove from selection
+   click empty canvas deselect all          Cmd/Ctrl+Shift+A  deselect all
+   Cmd/Ctrl+A         select all            Cmd/Ctrl+Z        undo
+   Cmd/Ctrl+Shift+Z   redo                  Delete/Backspace  delete targeted rung
+   space (hold)       hand tool (drag pans) option/alt+wheel  zoom at cursor
+   Cmd/Ctrl+=  / -    zoom in / out         Cmd/Ctrl+0        fit in window
+   Cmd/Ctrl+1         actual size */
+async function historyStep(redo = false) {
+  try {
+    const r = await fetch(api(redo ? "/redo" : "/undo"), { method: "POST" });
+    const result = await r.json();
+    $("tier2Status").textContent = result.applied
+      ? (redo ? "redid: " : "undid: ") + result.command
+      : "nothing to " + (redo ? "redo" : "undo");
+  } catch (e) { /* server publishes reload on success; nothing else to do */ }
+}
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") { selected = null; renderEditLayer(); }
+  const inText = ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT";
+  if (ev.key === " " && !inText) {
+    ev.preventDefault();
+    if (!spaceHeld) { spaceHeld = true; canvas.style.cursor = "grab"; }
+    return;
+  }
+  if (inText) return;
+  const mod = IS_MAC ? ev.metaKey : ev.ctrlKey;
+  const k = ev.key.toLowerCase();
+  if (ev.key === "Escape") {
+    setSelection([]);
+  } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeRung) {
+    const o = byId(activeRung.objId);
+    const idx = activeRung.index;
+    activeRung = null;
+    if (o) deleteRung(o, idx);
+  } else if (mod && ev.shiftKey && k === "a") {
+    ev.preventDefault(); setSelection([]);
+  } else if (mod && k === "a") {
+    ev.preventDefault(); setSelection(design.objects.map(o => o.id));
+  } else if (mod && ev.shiftKey && k === "z") {
+    ev.preventDefault(); historyStep(true);
+  } else if (mod && k === "z") {
+    ev.preventDefault(); historyStep(false);
+  } else if (mod && (ev.key === "=" || ev.key === "+")) {
+    ev.preventDefault(); zoomBy(1 / 1.2);
+  } else if (mod && ev.key === "-") {
+    ev.preventDefault(); zoomBy(1.2);
+  } else if (mod && ev.key === "0") {
+    ev.preventDefault(); vb = { ...baseVb }; setViewBox();
+  } else if (mod && ev.key === "1") {
+    ev.preventDefault(); actualSize();
+  }
 });
+document.addEventListener("keyup", (ev) => {
+  if (ev.key === " ") { spaceHeld = false; canvas.style.cursor = ""; }
+});
+window.addEventListener("blur", () => { spaceHeld = false; canvas.style.cursor = ""; });
 
 /* ---------- chat / feedback ---------- */
+/* pills mirror the canvas selection — removing a pill deselects the object */
 function renderPills() {
   const box = $("pills");
   box.textContent = "";
-  pills.forEach((id, i) => {
+  for (const id of selection) {
     const pill = document.createElement("span");
     pill.className = "pill";
     pill.textContent = id + " ";
     const x = document.createElement("button");
     x.textContent = "×";
-    x.onclick = () => { pills.splice(i, 1); renderPills(); };
+    x.onclick = () => setSelection(selection.filter(s => s !== id));
     pill.appendChild(x);
     box.appendChild(pill);
-  });
-  $("send").disabled = !pills.length && !$("input").value.trim();
+  }
+  $("send").disabled = !selection.length && !$("input").value.trim();
 }
 $("input").addEventListener("input", renderPills);
 function addMsg(role, text, objects) {
@@ -648,10 +789,11 @@ function addMsg(role, text, objects) {
 }
 $("send").onclick = async () => {
   const text = $("input").value.trim();
-  if (!text && !pills.length) return;
-  await postFeedback({ objects: pills, text });
-  addMsg("human", text, pills);
-  pills = []; $("input").value = ""; renderPills();
+  if (!text && !selection.length) return;
+  await postFeedback({ objects: [...selection], text });
+  addMsg("human", text, [...selection]);
+  $("input").value = "";           // selection persists (Illustrator model)
+  renderPills();
 };
 $("input").addEventListener("keydown", (ev) => {
   if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) $("send").click();
@@ -745,6 +887,11 @@ function connectSSE() {
 }
 
 /* ---------- boot ---------- */
+$("hint").textContent =
+  `click: select · shift-click: multi-select · click empty: deselect · ` +
+  `space-drag: pan · ${IS_MAC ? "⌥" : "alt"}+wheel: zoom · ` +
+  `${MOD_LABEL}Z: undo · dbl-click satin: add rung · ` +
+  `click rung + ${IS_MAC ? "⌫" : "Del"}: delete rung`;
 async function refresh() {
   design = await getDesign();
   renderAll();
