@@ -24,6 +24,13 @@
           border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
           background: transparent; font: inherit; cursor: pointer; }
   .chip.on { color: var(--accent); border-color: var(--accent); }
+  #viewModes { display: inline-flex; border: 1px solid var(--line);
+               border-radius: 999px; overflow: hidden; }
+  #viewModes button { all: unset; padding: 3px 12px; color: var(--muted);
+                      cursor: pointer; font: inherit; }
+  #viewModes button + button { border-left: 1px solid var(--line); }
+  #viewModes button.on { color: var(--accent); background: rgba(110,168,254,.12); }
+  #viewModes button:hover:not(.on) { color: var(--text); }
   #presence { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
   #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
   #presence.listening .dot { background: var(--start); }
@@ -168,7 +175,11 @@
 <div id="bar">
   <div class="brand">Digitizing Artifact<span>editor</span></div>
   <div class="spacer"></div>
-  <button class="chip" id="planToggle" type="button">Stitch plan</button>
+  <div id="viewModes" role="group" aria-label="View mode">
+    <button data-mode="outline" class="on" type="button" title="Object outlines only">Outline</button>
+    <button data-mode="stitches" type="button" title="Thin strokes — read stitch directions">Stitches</button>
+    <button data-mode="realistic" type="button" title="Thread thickness with shading">Realistic</button>
+  </div>
   <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
   <button class="chip" id="endBtn" type="button">End session</button>
 </div>
@@ -237,6 +248,7 @@ let dragging = null;            // active drag descriptor
 let spaceHeld = false;          // spacebar = hand tool (Illustrator)
 let tier2Gen = 0;
 let planOn = false;
+let viewMode = "outline";       // outline | stitches | realistic
 const IS_MAC = /Mac|iP/.test(navigator.platform);
 const MOD_LABEL = IS_MAC ? "⌘" : "Ctrl";
 
@@ -391,7 +403,7 @@ async function postFeedback(payload) {
 /* ---------- tier-2 overlay (debounced, coalescing) ---------- */
 let tier2Timer = null;
 function scheduleTier2() {
-  if (!planOn) return;
+  if (!planOn) { stitchData = null; return; }   // stale after edits; refetch on mode switch
   clearTimeout(tier2Timer);
   tier2Timer = setTimeout(fetchTier2, 600);
 }
@@ -431,11 +443,29 @@ function threadWidth() {                      // ~0.4mm thread in user units
   const unitsPerMm = m ? baseVb.w / parseFloat(m[1]) : 96 / 25.4;
   return 0.4 * unitsPerMm;
 }
+function shade(hex, f) {                      // f<0 darken, f>0 lighten toward white
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const ch = (x) => Math.max(0, Math.min(255,
+    Math.round(f > 0 ? x + (255 - x) * f : x * (1 + f))));
+  return "#" + [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+    .map(x => ch(x).toString(16).padStart(2, "0")).join("");
+}
+/* Three view modes, like commercial digitizing software:
+   outline   — no plan layer, just the artwork + edit handles
+   stitches  — hairline strokes (constant 1.25px at any zoom) so stitch
+               directions stay readable instead of blobbing into fills
+   realistic — thread-width strokes with a shadow pass under and a sheen
+               highlight over, for a fast pseudo-3D thread look */
 function renderPlanLayer() {
   if (!planLayer) return;
   planLayer.textContent = "";
   if (!planOn || !stitchData) return;
   const w = threadWidth();
+  const line = (points, stroke, width, extra = {}) =>
+    el("polyline", { points, fill: "none", stroke, "stroke-width": width,
+      "stroke-linejoin": "round", "stroke-linecap": "round", ...extra }, planLayer);
   let remaining = timelinePos == null ? Infinity : timelinePos;
   for (const block of stitchData.blocks) {
     for (const pts of block.paths) {
@@ -443,11 +473,17 @@ function renderPlanLayer() {
       const take = Math.min(pts.length, remaining);
       remaining -= take;
       if (take < 2) continue;
-      el("polyline", {
-        points: pts.slice(0, take).map(p => p.join(",")).join(" "),
-        fill: "none", stroke: block.color, "stroke-width": w,
-        "stroke-linejoin": "round", "stroke-linecap": "round",
-      }, planLayer);
+      const points = pts.slice(0, take).map(p => p.join(",")).join(" ");
+      if (viewMode === "realistic") {
+        line(points, shade(block.color, -0.5), w * 1.25,
+             { transform: `translate(${fmt(w * 0.12)} ${fmt(w * 0.18)})`, opacity: .8 });
+        line(points, block.color, w);
+        line(points, shade(block.color, 0.5), w * 0.3,
+             { transform: `translate(${fmt(-w * 0.08)} ${fmt(-w * 0.12)})`, opacity: .7 });
+      } else {
+        line(points, block.color, 1.25,
+             { "vector-effect": "non-scaling-stroke", opacity: .9 });
+      }
     }
   }
 }
@@ -868,6 +904,10 @@ document.addEventListener("keydown", (ev) => {
     ev.preventDefault(); setSelection([]);
   } else if (mod && k === "a") {
     ev.preventDefault(); setSelection(design.objects.map(o => o.id));
+  } else if (mod && k === "y") {
+    // Illustrator View > Outline/Preview toggle
+    ev.preventDefault();
+    setViewMode(viewMode === "outline" ? "stitches" : "outline");
   } else if (mod && ev.shiftKey && k === "z") {
     ev.preventDefault(); historyStep(true);
   } else if (mod && k === "z") {
@@ -1010,16 +1050,22 @@ for (const id of ["inspect", "panel"]) {
   } catch (e) { /* private mode */ }
 }
 
-$("planToggle").onclick = () => {
-  planOn = !planOn;
-  $("planToggle").classList.toggle("on", planOn);
+function setViewMode(mode) {
+  viewMode = mode;
+  planOn = mode !== "outline";
+  for (const b of document.querySelectorAll("#viewModes button"))
+    b.classList.toggle("on", b.dataset.mode === mode);
   $("canvasWrap").classList.toggle("showPlan", planOn);
   $("timelineBar").classList.toggle("show", planOn && !!stitchData);
   stopTimelinePlay();
   renderPlanLayer();
-  if (planOn) fetchTier2();
-  else $("tier2Status").textContent = "stitch plan: —";
-};
+  if (planOn && !stitchData) fetchTier2();
+  $("tier2Status").textContent =
+    planOn ? (stitchData ? "stitch plan: live" : "stitch plan: computing…")
+           : "stitch plan: —";
+}
+for (const b of document.querySelectorAll("#viewModes button"))
+  b.addEventListener("click", () => setViewMode(b.dataset.mode));
 
 /* ---------- SSE ---------- */
 function connectSSE() {
@@ -1049,8 +1095,8 @@ function connectSSE() {
 $("hint").textContent =
   `click: select · shift-click: multi-select · click empty: deselect · ` +
   `space-drag: pan · ${IS_MAC ? "⌥" : "alt"}+wheel: zoom · ` +
-  `${MOD_LABEL}Z: undo · dbl-click satin: add rung · ` +
-  `click rung + ${IS_MAC ? "⌫" : "Del"}: delete rung`;
+  `${MOD_LABEL}Z: undo · ${MOD_LABEL}Y: outline/stitches · ` +
+  `dbl-click satin: add rung · click rung + ${IS_MAC ? "⌫" : "Del"}: delete rung`;
 async function refresh() {
   design = await getDesign();
   renderAll();
