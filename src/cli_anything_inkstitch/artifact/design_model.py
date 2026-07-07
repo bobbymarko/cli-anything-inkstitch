@@ -299,6 +299,67 @@ def apply_history_step(project_file: str, *, redo: bool = False) -> dict[str, An
                 "cursor": proj.history["cursor"]}
 
 
+# -- stitch sequence for the editor timeline -------------------------------------
+
+_SCALE_RE = re.compile(r"scale\(\s*(-?[\d.]+)(?:\s*,\s*(-?[\d.]+))?\s*\)")
+_STROKE_RE = re.compile(r"stroke:\s*([^;]+)")
+
+
+def extract_stitch_blocks(svg_bytes: bytes) -> dict[str, Any]:
+    """Parse Ink/Stitch's stitch-plan SVG into ordered stitch polylines.
+
+    The plan layer (`__inkstitch_stitch_plan__`) is rendered side-by-side with
+    the design via a translate() on the layer — we deliberately DROP that
+    translate so coordinates land back on the design, and apply each path's
+    scale() so they're in design user units. Structure: one group per color
+    block, one path per continuous stitch section; every path vertex is a
+    needle penetration, in stitch order.
+    """
+    from cli_anything_inkstitch.artifact.gate import flatten_path
+
+    svg_ns = "{http://www.w3.org/2000/svg}"
+    root = etree.fromstring(svg_bytes)
+    plan = None
+    for g in root.iter(svg_ns + "g"):
+        if g.get("id") == "__inkstitch_stitch_plan__":
+            plan = g
+            break
+    if plan is None:
+        raise UserError("no stitch plan layer in preview output")
+
+    blocks: list[dict[str, Any]] = []
+    total = 0
+    for block in plan:
+        if not isinstance(block.tag, str) or etree.QName(block.tag).localname != "g":
+            continue
+        color = None
+        paths: list[list[list[float]]] = []
+        for p in block.iter(svg_ns + "path"):
+            style = p.get("style") or ""
+            if color is None:
+                m = _STROKE_RE.search(style)
+                color = m.group(1).strip() if m else "#000000"
+            sx = sy = 1.0
+            m = _SCALE_RE.search(p.get("transform") or "")
+            if m:
+                sx = float(m.group(1))
+                sy = float(m.group(2)) if m.group(2) else sx
+            pts = [[round(x * sx, 3), round(y * sy, 3)]
+                   for x, y in flatten_path(p.get("d") or "")]
+            if len(pts) >= 2:
+                paths.append(pts)
+                total += len(pts)
+        if paths:
+            blocks.append({"color": color or "#000000", "paths": paths})
+    return {"blocks": blocks, "total_stitches": total}
+
+
+def stitch_sequence(project_file: str, *, binary_override: str | None = None) -> dict[str, Any]:
+    """Authoritative stitch order for the editor's plan display + timeline."""
+    return extract_stitch_blocks(
+        stitch_plan_svg(project_file, binary_override=binary_override))
+
+
 # -- Tier-2: authoritative stitch plan ------------------------------------------
 
 def ensure_prepped(project_file: str) -> bool:

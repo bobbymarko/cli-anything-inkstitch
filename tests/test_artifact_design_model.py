@@ -207,3 +207,52 @@ class TestStitchPlan:
     def test_stitch_plan_svg_renders(self, project):
         svg = stitch_plan_svg(project)
         assert b"<svg" in svg or b"<?xml" in svg
+
+
+class TestExtractStitchBlocks:
+    """Parser for the binary's stitch-plan SVG → ordered stitch polylines.
+
+    Structure mirrors real Ink/Stitch 3.2.2 output: the plan layer carries a
+    side-by-side translate() (which must be DROPPED so stitches land on the
+    design), and each path carries a scale() (which must be applied)."""
+
+    PLAN = b"""<svg xmlns="http://www.w3.org/2000/svg"
+        xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+        width="60mm" height="40mm" viewBox="0 0 60 40">
+      <path id="elem_1" d="M0,0 L10,10" fill="#f17095"/>
+      <g id="__inkstitch_stitch_plan__" inkscape:label="Stitch Plan"
+         inkscape:groupmode="layer" transform="translate(60, 0)">
+        <g id="__color_block_0__" inkscape:label="color block 1">
+          <path style="stroke: #F07094; stroke-width: 0.4; fill: none;"
+                d="M10 20 20 20 30 20" transform="scale(0.5, 0.5)"/>
+          <path style="stroke: #F07094; stroke-width: 0.4; fill: none;"
+                d="M40 20 50 20" transform="scale(0.5, 0.5)"/>
+        </g>
+        <g id="__color_block_1__" inkscape:label="color block 2">
+          <path style="stroke: #D8D8D8; stroke-width: 0.4; fill: none;"
+                d="M10 40 12 42 14 40" transform="scale(0.5, 0.5)"/>
+        </g>
+        <use id="use1" href="#inkstitch_ignore_layer" x="0" y="-10"/>
+      </g>
+    </svg>"""
+
+    def test_blocks_and_colors(self):
+        from cli_anything_inkstitch.artifact.design_model import extract_stitch_blocks
+        result = extract_stitch_blocks(self.PLAN)
+        assert len(result["blocks"]) == 2
+        assert result["blocks"][0]["color"] == "#F07094"
+        assert result["blocks"][1]["color"] == "#D8D8D8"
+        assert result["total_stitches"] == 8  # 3 + 2 + 3 vertices
+
+    def test_scale_applied_translate_dropped(self):
+        from cli_anything_inkstitch.artifact.design_model import extract_stitch_blocks
+        result = extract_stitch_blocks(self.PLAN)
+        first = result["blocks"][0]["paths"][0]
+        # scale(0.5) applied → 10,20 becomes 5,10; layer translate(60) NOT added
+        assert first == [[5.0, 10.0], [10.0, 10.0], [15.0, 10.0]]
+
+    def test_no_plan_layer_raises(self):
+        from cli_anything_inkstitch.artifact.design_model import extract_stitch_blocks
+        from cli_anything_inkstitch.errors import UserError
+        with pytest.raises(UserError):
+            extract_stitch_blocks(b'<svg xmlns="http://www.w3.org/2000/svg"/>')

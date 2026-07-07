@@ -51,6 +51,16 @@
   #gateBanner li { margin-bottom: 3px; }
   #gateBanner li a { color: var(--accent); cursor: pointer; text-decoration: underline; }
   #gateBanner .row { display: flex; gap: 8px; }
+  #timelineBar { position: absolute; left: 50%; transform: translateX(-50%);
+                 bottom: 44px; display: none; align-items: center; gap: 10px;
+                 background: rgba(20,22,26,.92); border: 1px solid var(--line);
+                 border-radius: 8px; padding: 6px 12px; min-width: 340px; z-index: 2; }
+  #timelineBar.show { display: flex; }
+  #tlPlay { all: unset; cursor: pointer; color: var(--accent); font-size: 13px;
+            width: 18px; text-align: center; }
+  #timeline { flex: 1; accent-color: var(--accent); }
+  #tlLabel { color: var(--muted); font-variant-numeric: tabular-nums;
+             white-space: nowrap; }
   #gateBanner button { font: inherit; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
   #gateEndAnyway { background: transparent; color: var(--end);
                    border: 1px solid rgba(229,83,75,.5); }
@@ -93,13 +103,17 @@
                  color: var(--accent); border: 1px solid rgba(110,168,254,.4);
                  border-radius: 999px; padding: 2px 8px; }
   #pills .pill button { all: unset; cursor: pointer; color: var(--muted); }
+  #inputWrap { position: relative; }
   #input { width: 100%; min-height: 60px; resize: vertical; background: #14161a;
-           color: var(--text); border: 1px solid var(--line); border-radius: 8px;
-           padding: 8px; font: inherit; }
-  #sendRow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-  #send { background: var(--accent); color: #0c1523; border: 0; border-radius: 8px;
-          padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer; }
-  #send:disabled { opacity: .45; cursor: default; }
+           color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+           padding: 8px 44px 8px 10px; font: inherit; }
+  #send { position: absolute; right: 8px; bottom: 10px; width: 28px; height: 28px;
+          border-radius: 50%; background: var(--accent); color: #0c1523; border: 0;
+          display: flex; align-items: center; justify-content: center;
+          cursor: pointer; padding: 0; }
+  #send:hover:not(:disabled) { filter: brightness(1.15); }
+  #send:disabled { opacity: .35; cursor: default; }
+  #send svg { display: block; }
   #presenceBanner { display: none; margin-top: 8px; color: var(--rail); font-size: 12px; }
   #presenceBanner.show { display: block; }
 
@@ -155,6 +169,11 @@
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
     <div id="tier2Status">stitch plan: —</div>
     <div id="hint"></div>
+    <div id="timelineBar">
+      <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
+      <input id="timeline" type="range" min="0" max="100" value="100">
+      <span id="tlLabel">0 / 0</span>
+    </div>
     <div id="gateBanner">
       <h3>Stitchability check failed — this design may not stitch cleanly</h3>
       <ul id="gateFindings"></ul>
@@ -171,9 +190,12 @@
     <div id="chat" class="sideBody"></div>
     <div id="composer">
       <div id="pills"></div>
-      <textarea id="input" placeholder="Tell the agent what to change…"></textarea>
-      <div id="sendRow">
-        <button id="send" type="button">Send to Agent</button>
+      <div id="inputWrap">
+        <textarea id="input" placeholder="Tell the agent what to change…"></textarea>
+        <button id="send" type="button" title="Send to agent" aria-label="Send to agent">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"
+               aria-hidden="true"><path d="M8 1.5 2.2 7.3l1.06 1.06L7 4.62V14.5h2V4.62l3.74 3.74 1.06-1.06L8 1.5z"/></svg>
+        </button>
       </div>
       <div id="presenceBanner">Agent is not listening — ask it to run
         <code>artifact poll</code>.</div>
@@ -358,32 +380,93 @@ function scheduleTier2() {
   clearTimeout(tier2Timer);
   tier2Timer = setTimeout(fetchTier2, 600);
 }
-let planDataUrl = null;
+/* The binary's stitch-plan SVG parses server-side into ordered per-color
+   polylines (every vertex = one needle penetration) in design coordinates.
+   Rendering them as native vectors keeps them crisp under zoom and lets the
+   timeline draw the first K stitches to scrub through the stitch-out. */
+let stitchData = null;          // {blocks: [{color, paths: [[[x,y],...]]}], total_stitches}
+let timelinePos = null;         // stitches currently shown; null = all
 async function fetchTier2() {
   const gen = ++tier2Gen;
-  $("tier2Status").textContent = "stitch plan: rendering…";
+  $("tier2Status").textContent = "stitch plan: computing…";
   try {
-    const r = await fetch(api("/preview"));
-    const text = await r.text();
+    const r = await fetch(api("/stitches"));
+    const data = await r.json();
     if (gen !== tier2Gen) return;            // superseded by a newer edit
-    if (!r.ok) { $("tier2Status").textContent = "stitch plan: error"; return; }
-    planDataUrl = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text);
+    if (!r.ok || data.error) {
+      $("tier2Status").textContent = "stitch plan: " + (data.error || "error");
+      return;
+    }
+    stitchData = data;
+    timelinePos = data.total_stitches;
+    const tl = $("timeline");
+    tl.max = data.total_stitches;
+    tl.value = data.total_stitches;
+    $("timelineBar").classList.toggle("show", planOn);
+    stopTimelinePlay();
+    updateTimelineLabel();
     renderPlanLayer();
     $("tier2Status").textContent = "stitch plan: live";
   } catch (e) {
     if (gen === tier2Gen) $("tier2Status").textContent = "stitch plan: unreachable";
   }
 }
-/* the plan renders as an <image> inside the canvas at the document's viewBox,
-   so it pans/zooms in lockstep with the artwork and edit layers */
+function threadWidth() {                      // ~0.4mm thread in user units
+  const m = /^([\d.]+)\s*mm$/.exec(design.width || "");
+  const unitsPerMm = m ? baseVb.w / parseFloat(m[1]) : 96 / 25.4;
+  return 0.4 * unitsPerMm;
+}
 function renderPlanLayer() {
   if (!planLayer) return;
   planLayer.textContent = "";
-  if (!planOn || !planDataUrl) return;
-  el("image", { href: planDataUrl, x: baseVb.x, y: baseVb.y,
-                width: baseVb.w, height: baseVb.h,
-                preserveAspectRatio: "xMidYMid meet" }, planLayer);
+  if (!planOn || !stitchData) return;
+  const w = threadWidth();
+  let remaining = timelinePos == null ? Infinity : timelinePos;
+  for (const block of stitchData.blocks) {
+    for (const pts of block.paths) {
+      if (remaining <= 0) return;
+      const take = Math.min(pts.length, remaining);
+      remaining -= take;
+      if (take < 2) continue;
+      el("polyline", {
+        points: pts.slice(0, take).map(p => p.join(",")).join(" "),
+        fill: "none", stroke: block.color, "stroke-width": w,
+        "stroke-linejoin": "round", "stroke-linecap": "round",
+      }, planLayer);
+    }
+  }
 }
+/* ---------- stitch-out timeline ---------- */
+let tlRaf = null, tlPlayTimer = null;
+function updateTimelineLabel() {
+  const total = stitchData ? stitchData.total_stitches : 0;
+  $("tlLabel").textContent =
+    `${(timelinePos ?? total).toLocaleString()} / ${total.toLocaleString()}`;
+}
+$("timeline").addEventListener("input", () => {
+  timelinePos = +$("timeline").value;
+  updateTimelineLabel();
+  if (!tlRaf) tlRaf = requestAnimationFrame(() => { tlRaf = null; renderPlanLayer(); });
+});
+function stopTimelinePlay() {
+  if (tlPlayTimer) { clearInterval(tlPlayTimer); tlPlayTimer = null; }
+  $("tlPlay").textContent = "▶";
+}
+$("tlPlay").onclick = () => {
+  if (tlPlayTimer) { stopTimelinePlay(); return; }
+  if (!stitchData) return;
+  const total = stitchData.total_stitches;
+  if (timelinePos >= total) timelinePos = 0;   // replay from the start
+  const step = Math.max(1, Math.round(total / 600));  // ~10s full run
+  $("tlPlay").textContent = "⏸";
+  tlPlayTimer = setInterval(() => {
+    timelinePos = Math.min(total, timelinePos + step);
+    $("timeline").value = timelinePos;
+    updateTimelineLabel();
+    renderPlanLayer();
+    if (timelinePos >= total) stopTimelinePlay();
+  }, 16);
+};
 
 /* ---------- viewport (pan/zoom) ---------- */
 function setViewBox() {
@@ -796,7 +879,11 @@ $("send").onclick = async () => {
   renderPills();
 };
 $("input").addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) $("send").click();
+  // modern chat composer: Enter sends, Shift+Enter inserts a newline
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    $("send").click();
+  }
 });
 /* Phase-3 handback: every End click re-runs the gate. Errors keep the
    artifact open with a persistent banner + explicit "stitch anyway" override,
@@ -862,6 +949,8 @@ $("planToggle").onclick = () => {
   planOn = !planOn;
   $("planToggle").classList.toggle("on", planOn);
   $("canvasWrap").classList.toggle("showPlan", planOn);
+  $("timelineBar").classList.toggle("show", planOn && !!stitchData);
+  stopTimelinePlay();
   renderPlanLayer();
   if (planOn) fetchTier2();
   else $("tier2Status").textContent = "stitch plan: —";

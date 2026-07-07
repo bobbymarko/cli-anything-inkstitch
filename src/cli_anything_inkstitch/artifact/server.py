@@ -218,6 +218,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                 self._handle_design(parts[1])
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "preview":
                 self._handle_preview(parts[1], parse_qs(parsed.query))
+            elif len(parts) == 3 and parts[0] == "api" and parts[2] == "stitches":
+                self._handle_stitches(parts[1])
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "gate":
                 self._handle_gate(parts[1])
             else:
@@ -474,6 +476,14 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(svg)))
         self.end_headers()
         self.wfile.write(svg)
+
+    def _handle_stitches(self, key: str) -> None:
+        session = self.state.store.find_by_key(key)
+        if not session:
+            self._json({"error": "session not found"}, 404)
+            return
+        from cli_anything_inkstitch.artifact.design_model import stitch_sequence
+        self._json(stitch_sequence(session["file"]))
 
     def _handle_gate(self, key: str) -> None:
         session = self.state.store.find_by_key(key)
