@@ -19,8 +19,7 @@
          background: var(--panel); border-bottom: 1px solid var(--line); }
   #bar .brand { font-weight: 700; }
   #bar .brand span { color: var(--muted); font-weight: 400; margin-left: 6px; }
-  #selInfo { color: var(--muted); flex: 1; white-space: nowrap; overflow: hidden;
-             text-overflow: ellipsis; }
+  #bar .spacer { flex: 1; }
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
           border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
           background: transparent; font: inherit; cursor: pointer; }
@@ -58,10 +57,30 @@
   #gateDismiss { background: transparent; color: var(--muted);
                  border: 1px solid var(--line); }
 
-  #panel { width: 320px; display: flex; flex-direction: column; background: var(--panel);
-           border-left: 1px solid var(--line); }
-  #panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
-              color: var(--muted); padding: 12px 14px 6px; }
+  .side { display: flex; flex-direction: column; background: var(--panel);
+          overflow: hidden; }
+  #inspect { width: 230px; border-right: 1px solid var(--line); }
+  #panel { width: 320px; border-left: 1px solid var(--line); }
+  .sideHead { display: flex; align-items: center; padding: 10px 10px 6px 14px; }
+  .sideHead h2 { flex: 1; font-size: 12px; text-transform: uppercase;
+                 letter-spacing: .08em; color: var(--muted); }
+  .collapseBtn { all: unset; cursor: pointer; color: var(--muted); padding: 0 4px;
+                 font-size: 14px; line-height: 1; }
+  .collapseBtn:hover { color: var(--text); }
+  /* id-qualified: must outrank the #inspect/#panel width rules above */
+  #inspect.collapsed, #panel.collapsed { width: 26px; cursor: pointer; }
+  .side.collapsed .sideHead { padding: 10px 0 0; justify-content: center; }
+  .side.collapsed h2, .side.collapsed .sideBody, .side.collapsed #composer,
+  .side.collapsed #inspectBody { display: none; }
+  #inspectBody { flex: 1; overflow-y: auto; padding: 4px 14px 14px; }
+  #inspectBody .noSel { color: var(--muted); }
+  #inspectBody .objTitle { font-weight: 700; margin-bottom: 2px; word-break: break-all; }
+  #inspectBody .objKind { color: var(--accent); font-size: 11px; text-transform: uppercase;
+                          letter-spacing: .06em; margin-bottom: 10px; }
+  #inspectBody .prow { display: flex; justify-content: space-between; gap: 8px;
+                       padding: 3px 0; border-bottom: 1px solid var(--line); }
+  #inspectBody .pname { color: var(--muted); word-break: break-all; }
+  #inspectBody .pval { text-align: right; word-break: break-all; }
   #chat { flex: 1; overflow-y: auto; padding: 4px 14px; display: flex;
           flex-direction: column; gap: 8px; }
   .msg { padding: 7px 10px; border-radius: 10px; max-width: 92%; white-space: pre-wrap; }
@@ -118,12 +137,19 @@
 <body>
 <div id="bar">
   <div class="brand">Digitizing Artifact<span>editor</span></div>
-  <div id="selInfo">no selection</div>
+  <div class="spacer"></div>
   <button class="chip" id="planToggle" type="button">Stitch plan</button>
   <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
   <button class="chip" id="endBtn" type="button">End session</button>
 </div>
 <div id="main">
+  <aside id="inspect" class="side">
+    <div class="sideHead"><h2>Inspect</h2>
+      <button class="collapseBtn" id="inspectToggle" type="button"
+              title="Collapse inspector">«</button></div>
+    <div id="inspectBody"><div class="noSel">Nothing selected — click an object
+      on the canvas.</div></div>
+  </aside>
   <div id="canvasWrap">
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
     <div id="tier2Status">stitch plan: —</div>
@@ -138,9 +164,11 @@
       </div>
     </div>
   </div>
-  <aside id="panel">
-    <h2>Conversation</h2>
-    <div id="chat"></div>
+  <aside id="panel" class="side">
+    <div class="sideHead"><h2>Conversation</h2>
+      <button class="collapseBtn" id="panelToggle" type="button"
+              title="Collapse conversation">»</button></div>
+    <div id="chat" class="sideBody"></div>
     <div id="composer">
       <div id="pills"></div>
       <textarea id="input" placeholder="Tell the agent what to change…"></textarea>
@@ -411,15 +439,41 @@ function renderAll() {
   renderEditLayer();
   renderPills();
 }
+function renderInspect(o) {
+  const body = $("inspectBody");
+  body.textContent = "";
+  if (!o) {
+    const d = document.createElement("div");
+    d.className = "noSel";
+    d.textContent = "Nothing selected — click an object on the canvas.";
+    body.appendChild(d);
+    return;
+  }
+  const title = document.createElement("div");
+  title.className = "objTitle";
+  title.textContent = o.id;
+  const kind = document.createElement("div");
+  kind.className = "objKind";
+  kind.textContent = `${o.kind} · ${o.stitch_type}`;
+  body.append(title, kind);
+  for (const [k, v] of Object.entries(o.params)) {
+    const row = document.createElement("div");
+    row.className = "prow";
+    const name = document.createElement("span");
+    name.className = "pname";
+    name.textContent = k;
+    const val = document.createElement("span");
+    val.className = "pval";
+    val.textContent = v;
+    row.append(name, val);
+    body.appendChild(row);
+  }
+}
 function renderEditLayer() {
   if (!editLayer) return;
   editLayer.textContent = "";
   const o = design.objects.find(x => x.id === selected);
-  $("selInfo").textContent = o
-    ? `${o.id} · ${o.stitch_type}` +
-      (Object.keys(o.params).length ? " · " + Object.entries(o.params)
-        .map(([k, v]) => `${k}=${v}`).join(" ") : "")
-    : "no selection";
+  renderInspect(o);
   if (!o) return;
   if (o.kind === "satin") renderSatin(o);
   else if (o.kind === "fill") renderFill(o);
@@ -636,6 +690,32 @@ $("endBtn").onclick = async () => {
 };
 $("gateEndAnyway").onclick = endSession;
 $("gateDismiss").onclick = () => $("gateBanner").classList.remove("show");
+/* ---------- collapsible sidebars ---------- */
+const CHEVRONS = { inspect: ["«", "»"], panel: ["»", "«"] };  // [expanded, collapsed]
+function setCollapsed(id, collapsed) {
+  const side = $(id);
+  side.classList.toggle("collapsed", collapsed);
+  const btn = $(id + "Toggle");
+  btn.textContent = CHEVRONS[id][collapsed ? 1 : 0];
+  btn.title = (collapsed ? "Expand " : "Collapse ") +
+              (id === "inspect" ? "inspector" : "conversation");
+  try { localStorage.setItem("artifact-collapse-" + id, collapsed ? "1" : ""); }
+  catch (e) { /* private mode */ }
+  renderEditLayer();  // marker sizes depend on canvas width
+}
+for (const id of ["inspect", "panel"]) {
+  $(id + "Toggle").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    setCollapsed(id, !$(id).classList.contains("collapsed"));
+  });
+  $(id).addEventListener("click", () => {   // collapsed rail is one big reopen target
+    if ($(id).classList.contains("collapsed")) setCollapsed(id, false);
+  });
+  try {
+    if (localStorage.getItem("artifact-collapse-" + id) === "1") setCollapsed(id, true);
+  } catch (e) { /* private mode */ }
+}
+
 $("planToggle").onclick = () => {
   planOn = !planOn;
   $("planToggle").classList.toggle("on", planOn);
@@ -671,7 +751,7 @@ async function refresh() {
   scheduleTier2();
 }
 refresh().then(connectSSE).catch((e) => {
-  $("selInfo").textContent = "failed to load design: " + e.message;
+  $("inspectBody").textContent = "failed to load design: " + e.message;
 });
 </script>
 </body>
