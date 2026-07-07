@@ -43,12 +43,13 @@
   #canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
   #canvasWrap.showPlan .artwork { opacity: .12; } /* plan is the truth while shown */
   .planLayer { pointer-events: none; }
-  #tier2Status { position: absolute; left: 10px; bottom: 10px; color: var(--muted);
-                 background: rgba(20,22,26,.85); padding: 3px 10px; border-radius: 6px;
-                 border: 1px solid var(--line); }
-  #hint { position: absolute; right: 10px; bottom: 10px; color: var(--muted);
-          background: rgba(20,22,26,.85); padding: 3px 10px; border-radius: 6px;
-          border: 1px solid var(--line); max-width: 46ch; }
+  #toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 60px;
+           background: rgba(20,22,26,.95); border: 1px solid var(--line);
+           border-radius: 8px; padding: 6px 14px; color: var(--text); display: none;
+           max-width: 60ch; z-index: 3; }
+  #toast.show { display: block; }
+  #toast.error { border-color: rgba(229,83,75,.5); color: var(--end); }
+  #viewModes.loading button.on { animation: pulse 1.2s infinite; }
   #gateBanner { position: absolute; left: 10px; right: 10px; top: 10px; display: none;
                 background: rgba(46,22,24,.95); border: 1px solid rgba(229,83,75,.5);
                 border-radius: 8px; padding: 10px 12px; z-index: 2; }
@@ -59,9 +60,29 @@
   #gateBanner li a { color: var(--accent); cursor: pointer; text-decoration: underline; }
   #gateBanner .row { display: flex; gap: 8px; }
   #timelineBar { position: absolute; left: 50%; transform: translateX(-50%);
-                 bottom: 44px; display: none; align-items: center; gap: 10px;
+                 bottom: 10px; display: none; align-items: center; gap: 10px;
                  background: rgba(20,22,26,.92); border: 1px solid var(--line);
                  border-radius: 8px; padding: 6px 12px; min-width: 340px; z-index: 2; }
+  #helpOverlay { position: fixed; inset: 0; display: none; align-items: center;
+                 justify-content: center; background: rgba(10,12,15,.7); z-index: 20; }
+  #helpOverlay.show { display: flex; }
+  #helpCard { background: var(--panel); border: 1px solid var(--line);
+              border-radius: 14px; padding: 22px 26px; width: min(560px, 92vw);
+              max-height: 84vh; overflow-y: auto; }
+  #helpCard h1 { font-size: 15px; margin-bottom: 4px; }
+  #helpCard .sub { color: var(--muted); margin-bottom: 14px; }
+  #helpCard h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+                 color: var(--accent); margin: 14px 0 6px; }
+  #helpCard table { width: 100%; border-collapse: collapse; }
+  #helpCard td { padding: 4px 0; border-bottom: 1px solid var(--line);
+                 vertical-align: top; }
+  #helpCard td:first-child { color: var(--muted); width: 46%; }
+  #helpCard kbd { background: #14161a; border: 1px solid var(--line);
+                  border-radius: 4px; padding: 1px 6px; font: 11px ui-monospace,
+                  monospace; white-space: nowrap; }
+  #helpClose { float: right; all: unset; cursor: pointer; color: var(--muted);
+               font-size: 16px; padding: 0 4px; }
+  #helpClose:hover { color: var(--text); }
   #timelineBar.show { display: flex; }
   #tlPlay { all: unset; cursor: pointer; color: var(--accent); font-size: 13px;
             width: 18px; text-align: center; }
@@ -181,6 +202,8 @@
     <button data-mode="realistic" type="button" title="Thread thickness with shading">Realistic</button>
   </div>
   <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
+  <button class="chip" id="helpBtn" type="button" title="How to use"
+          aria-label="How to use">?</button>
   <button class="chip" id="endBtn" type="button">End session</button>
 </div>
 <div id="main">
@@ -193,8 +216,7 @@
   </aside>
   <div id="canvasWrap">
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
-    <div id="tier2Status">stitch plan: —</div>
-    <div id="hint"></div>
+    <div id="toast"></div>
     <div id="timelineBar">
       <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
       <input id="timeline" type="range" min="0" max="100" value="100">
@@ -231,6 +253,15 @@
 <div id="endedOverlay"><div class="card">
   <h1>Session ended</h1><p>Return to your agent to continue.</p>
 </div></div>
+<div id="helpOverlay" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+  <div id="helpCard">
+    <button id="helpClose" type="button" aria-label="Close">×</button>
+    <h1 id="helpTitle">How to use</h1>
+    <div class="sub">Drag to correct the digitization directly, or select objects
+      and tell the agent what to change. Hotkeys match Adobe Illustrator.</div>
+    <div id="helpBody"></div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -389,7 +420,7 @@ async function postEdit(ops) {
     headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ops }) });
   if (!r.ok) {
     const err = (await r.json()).error || r.status;
-    $("tier2Status").textContent = "edit failed: " + err;
+    showToast("edit failed: " + err, true);
     throw new Error(err);
   }
   scheduleTier2();
@@ -415,13 +446,13 @@ let stitchData = null;          // {blocks: [{color, paths: [[[x,y],...]]}], tot
 let timelinePos = null;         // stitches currently shown; null = all
 async function fetchTier2() {
   const gen = ++tier2Gen;
-  $("tier2Status").textContent = "stitch plan: computing…";
+  $("viewModes").classList.add("loading");    // pulse on the active mode button
   try {
     const r = await fetch(api("/stitches"));
     const data = await r.json();
     if (gen !== tier2Gen) return;            // superseded by a newer edit
     if (!r.ok || data.error) {
-      $("tier2Status").textContent = "stitch plan: " + (data.error || "error");
+      showToast("stitch plan failed: " + (data.error || r.status), true);
       return;
     }
     stitchData = data;
@@ -433,9 +464,10 @@ async function fetchTier2() {
     stopTimelinePlay();
     updateTimelineLabel();
     renderPlanLayer();
-    $("tier2Status").textContent = "stitch plan: live";
   } catch (e) {
-    if (gen === tier2Gen) $("tier2Status").textContent = "stitch plan: unreachable";
+    if (gen === tier2Gen) showToast("stitch plan: server unreachable", true);
+  } finally {
+    if (gen === tier2Gen) $("viewModes").classList.remove("loading");
   }
 }
 function threadWidth() {                      // ~0.4mm thread in user units
@@ -878,9 +910,9 @@ async function historyStep(redo = false) {
   try {
     const r = await fetch(api(redo ? "/redo" : "/undo"), { method: "POST" });
     const result = await r.json();
-    $("tier2Status").textContent = result.applied
+    showToast(result.applied
       ? (redo ? "redid: " : "undid: ") + result.command
-      : "nothing to " + (redo ? "redo" : "undo");
+      : "nothing to " + (redo ? "redo" : "undo"));
   } catch (e) { /* server publishes reload on success; nothing else to do */ }
 }
 document.addEventListener("keydown", (ev) => {
@@ -894,6 +926,7 @@ document.addEventListener("keydown", (ev) => {
   const mod = IS_MAC ? ev.metaKey : ev.ctrlKey;
   const k = ev.key.toLowerCase();
   if (ev.key === "Escape") {
+    if ($("helpOverlay").classList.contains("show")) { helpClose(); return; }
     setSelection([]);
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeRung) {
     const o = byId(activeRung.objId);
@@ -1060,9 +1093,6 @@ function setViewMode(mode) {
   stopTimelinePlay();
   renderPlanLayer();
   if (planOn && !stitchData) fetchTier2();
-  $("tier2Status").textContent =
-    planOn ? (stitchData ? "stitch plan: live" : "stitch plan: computing…")
-           : "stitch plan: —";
 }
 for (const b of document.querySelectorAll("#viewModes button"))
   b.addEventListener("click", () => setViewMode(b.dataset.mode));
@@ -1091,12 +1121,82 @@ function connectSSE() {
   es.onerror = () => { es.close(); setTimeout(connectSSE, 2000); };
 }
 
+/* ---------- toast (transient status/errors) ---------- */
+let toastTimer = null;
+function showToast(text, isError = false) {
+  const t = $("toast");
+  t.textContent = text;
+  t.className = "show" + (isError ? " error" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, 4000);
+}
+
+/* ---------- help modal ---------- */
+const ALT = IS_MAC ? "⌥" : "Alt";
+const DEL = IS_MAC ? "⌫" : "Del";
+const HELP = [
+  ["View modes", [
+    ["Outline", "artwork and edit handles only"],
+    ["Stitches", "hairline strokes — read stitch directions at any zoom"],
+    ["Realistic", "thread thickness with shading"],
+    [`${MOD_LABEL}Y`, "toggle Outline ↔ Stitches"],
+    ["Timeline (in stitch views)", "scrub or play the stitch-out in needle order"],
+  ]],
+  ["Selection", [
+    ["Click", "select object (replaces selection)"],
+    ["Shift-click", "add / remove from selection"],
+    ["Click empty canvas or Esc", "deselect all"],
+    [`${MOD_LABEL}A / ${MOD_LABEL}⇧A`, "select all / deselect all"],
+  ]],
+  ["Navigation", [
+    ["Scroll / Shift-scroll", "pan vertically / horizontally"],
+    [`${ALT}+scroll or pinch`, "zoom at cursor"],
+    ["Hold Space + drag", "hand tool (pan)"],
+    [`${MOD_LABEL}= / ${MOD_LABEL}−`, "zoom in / out"],
+    [`${MOD_LABEL}0 / ${MOD_LABEL}1`, "fit in window / actual size"],
+  ]],
+  ["Editing", [
+    ["Drag nodes, rungs, handles", "reshape rails, move fill start/end"],
+    ["Double-click a satin", "add a rung at that spot"],
+    [`Click a rung, then ${DEL}`, "delete the rung"],
+    ["Inspector values", "click to edit; Enter commits, Esc reverts"],
+    [`${MOD_LABEL}Z / ${MOD_LABEL}⇧Z`, "undo / redo (shared with the agent's history)"],
+  ]],
+  ["Conversation", [
+    ["Enter / Shift+Enter", "send / new line"],
+    ["Selected objects", "attach to your message as annotations"],
+  ]],
+];
+{
+  const body = $("helpBody");
+  for (const [section, rows] of HELP) {
+    const h = document.createElement("h2");
+    h.textContent = section;
+    body.appendChild(h);
+    const table = document.createElement("table");
+    for (const [key, desc] of rows) {
+      const tr = document.createElement("tr");
+      const td1 = document.createElement("td");
+      const kbd = document.createElement("kbd");
+      kbd.textContent = key;
+      td1.appendChild(kbd);
+      const td2 = document.createElement("td");
+      td2.textContent = desc;
+      tr.append(td1, td2);
+      table.appendChild(tr);
+    }
+    body.appendChild(table);
+  }
+}
+const helpOpen = () => $("helpOverlay").classList.add("show");
+const helpClose = () => $("helpOverlay").classList.remove("show");
+$("helpBtn").onclick = helpOpen;
+$("helpClose").onclick = helpClose;
+$("helpOverlay").addEventListener("click", (ev) => {
+  if (ev.target === $("helpOverlay")) helpClose();
+});
+
 /* ---------- boot ---------- */
-$("hint").textContent =
-  `click: select · shift-click: multi-select · click empty: deselect · ` +
-  `space-drag: pan · ${IS_MAC ? "⌥" : "alt"}+wheel: zoom · ` +
-  `${MOD_LABEL}Z: undo · ${MOD_LABEL}Y: outline/stitches · ` +
-  `dbl-click satin: add rung · click rung + ${IS_MAC ? "⌫" : "Del"}: delete rung`;
 async function refresh() {
   design = await getDesign();
   renderAll();
