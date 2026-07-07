@@ -38,7 +38,9 @@ _PX_TO_MM = 25.4 / 96.0  # SVG default: 1 user unit = 1 CSS px
 
 # -- geometry primitives -------------------------------------------------------
 
-_TOKEN = re.compile(r"[MmLlCcZzHhVvSsQqTtAa]|-?[\d.]+(?:e-?\d+)?")
+# An SVG number has at most one decimal point — Illustrator compacts
+# "-3.3 0.5" to "-3.3.5", so a greedy [\d.]+ would glue them into one token.
+_TOKEN = re.compile(r"[MmLlCcZzHhVvSsQqTtAa]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
 
 
 def flatten_path(d: str, per_curve: int = 12) -> list[tuple[float, float]]:

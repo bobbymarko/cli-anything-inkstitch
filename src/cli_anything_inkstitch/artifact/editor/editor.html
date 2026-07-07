@@ -177,7 +177,8 @@ const SVGNS = "http://www.w3.org/2000/svg";
 
 /* ---------- path parsing (M/L/C/Z subset, absolute output) ---------- */
 function tokenizePath(d) {
-  const tokens = d.match(/[MmLlCcZzHhVvSsQqTtAa]|-?[\d.]+(?:e-?\d+)?/g) || [];
+  // one decimal point per number: Illustrator compacts "-3.3 0.5" to "-3.3.5"
+  const tokens = d.match(/[MmLlCcZzHhVvSsQqTtAa]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g) || [];
   const segs = [];
   let i = 0, cx = 0, cy = 0, sx = 0, sy = 0, cmd = null;
   const num = () => parseFloat(tokens[i++]);

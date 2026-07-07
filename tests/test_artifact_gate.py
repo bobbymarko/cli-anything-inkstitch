@@ -56,6 +56,10 @@ class TestGeometryPrimitives:
     def test_relative_commands(self):
         assert flatten_path("m5,5 l5,0")[-1] == (10.0, 5.0)
 
+    def test_illustrator_compact_decimals(self):
+        # "-3.3.5" is two numbers (-3.3 and .5); "M38.4.7" is (38.4, .7)
+        assert flatten_path("M38.4.7L-3.3.5") == [(38.4, 0.7), (-3.3, 0.5)]
+
     def test_segments_intersect(self):
         assert segments_intersect((0, 0), (10, 10), (0, 10), (10, 0))
         assert not segments_intersect((0, 0), (1, 1), (5, 5), (6, 6))
