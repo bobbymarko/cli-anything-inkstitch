@@ -97,8 +97,8 @@
 
   .side { display: flex; flex-direction: column; background: var(--panel);
           overflow: hidden; }
-  #inspect { width: 230px; border-right: 1px solid var(--line); }
-  #panel { width: 320px; border-left: 1px solid var(--line); }
+  #panel { width: 320px; border-right: 1px solid var(--line); }   /* left side */
+  #inspect { width: 230px; border-left: 1px solid var(--line); }  /* right side */
   .sideHead { display: flex; align-items: center; padding: 10px 10px 6px 14px; }
   .sideHead h2 { flex: 1; font-size: 12px; text-transform: uppercase;
                  letter-spacing: .08em; color: var(--muted); }
@@ -207,12 +207,23 @@
   <button class="chip" id="endBtn" type="button">End session</button>
 </div>
 <div id="main">
-  <aside id="inspect" class="side">
-    <div class="sideHead"><h2>Inspect</h2>
-      <button class="collapseBtn" id="inspectToggle" type="button"
-              title="Collapse inspector">«</button></div>
-    <div id="inspectBody"><div class="noSel">Nothing selected — click an object
-      on the canvas.</div></div>
+  <aside id="panel" class="side">
+    <div class="sideHead"><h2>Conversation</h2>
+      <button class="collapseBtn" id="panelToggle" type="button"
+              title="Collapse conversation">«</button></div>
+    <div id="chat" class="sideBody"></div>
+    <div id="composer">
+      <div id="pills"></div>
+      <div id="inputWrap">
+        <textarea id="input" placeholder="Tell the agent what to change…"></textarea>
+        <button id="send" type="button" title="Send to agent" aria-label="Send to agent">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"
+               aria-hidden="true"><path d="M8 1.5 2.2 7.3l1.06 1.06L7 4.62V14.5h2V4.62l3.74 3.74 1.06-1.06L8 1.5z"/></svg>
+        </button>
+      </div>
+      <div id="presenceBanner">Agent is not listening — ask it to run
+        <code>artifact poll</code>.</div>
+    </div>
   </aside>
   <div id="canvasWrap">
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -231,23 +242,12 @@
       </div>
     </div>
   </div>
-  <aside id="panel" class="side">
-    <div class="sideHead"><h2>Conversation</h2>
-      <button class="collapseBtn" id="panelToggle" type="button"
-              title="Collapse conversation">»</button></div>
-    <div id="chat" class="sideBody"></div>
-    <div id="composer">
-      <div id="pills"></div>
-      <div id="inputWrap">
-        <textarea id="input" placeholder="Tell the agent what to change…"></textarea>
-        <button id="send" type="button" title="Send to agent" aria-label="Send to agent">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"
-               aria-hidden="true"><path d="M8 1.5 2.2 7.3l1.06 1.06L7 4.62V14.5h2V4.62l3.74 3.74 1.06-1.06L8 1.5z"/></svg>
-        </button>
-      </div>
-      <div id="presenceBanner">Agent is not listening — ask it to run
-        <code>artifact poll</code>.</div>
-    </div>
+  <aside id="inspect" class="side">
+    <div class="sideHead"><h2>Inspect</h2>
+      <button class="collapseBtn" id="inspectToggle" type="button"
+              title="Collapse inspector">»</button></div>
+    <div id="inspectBody"><div class="noSel">Nothing selected — click an object
+      on the canvas.</div></div>
   </aside>
 </div>
 <div id="endedOverlay"><div class="card">
@@ -1058,7 +1058,7 @@ $("endBtn").onclick = async () => {
 $("gateEndAnyway").onclick = endSession;
 $("gateDismiss").onclick = () => $("gateBanner").classList.remove("show");
 /* ---------- collapsible sidebars ---------- */
-const CHEVRONS = { inspect: ["«", "»"], panel: ["»", "«"] };  // [expanded, collapsed]
+const CHEVRONS = { panel: ["«", "»"], inspect: ["»", "«"] };  // [expanded, collapsed]
 function setCollapsed(id, collapsed) {
   const side = $(id);
   side.classList.toggle("collapsed", collapsed);
