@@ -256,3 +256,53 @@ class TestExtractStitchBlocks:
         from cli_anything_inkstitch.errors import UserError
         with pytest.raises(UserError):
             extract_stitch_blocks(b'<svg xmlns="http://www.w3.org/2000/svg"/>')
+
+
+class TestParamMeta:
+    """Inspector controls are typed from the Ink/Stitch param schema."""
+
+    def test_meta_types_for_known_params(self, tmp_path):
+        from cli_anything_inkstitch.schema.cache import load_schema
+        schema_params = (load_schema().get("stitch_types", {})
+                         .get("auto_fill", {}).get("params", {}))
+        svg = tmp_path / "design.svg"
+        svg.write_text(SVG.replace(
+            'inkstitch:fill_method="auto_fill" inkstitch:angle="0"',
+            'inkstitch:fill_method="auto_fill" inkstitch:angle="0" '
+            'inkstitch:auto_fill="True" inkstitch:row_spacing_mm="0.25"'))
+        proj_path = tmp_path / "design.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        design = read_design(str(proj_path))
+        fill = next(o for o in design["objects"] if o["id"] == "elem_fill")
+        assert "param_meta" in fill
+        if "angle" in schema_params:      # schema present (extracted or bootstrap)
+            assert fill["param_meta"]["angle"]["type"] == "float"
+            assert fill["param_meta"]["auto_fill"]["type"] == "boolean"
+            rs = fill["param_meta"]["row_spacing_mm"]
+            assert rs["type"] == "float" and rs.get("min") is not None
+
+    def test_dropdown_options_tokenized(self, monkeypatch):
+        # canned schema — deterministic regardless of the machine's cache
+        from cli_anything_inkstitch.artifact import design_model
+        from cli_anything_inkstitch.schema import cache
+        canned = {"stitch_types": {"contour_fill": {"params": {
+            "contour_strategy": {"type": "dropdown",
+                                 "options": ["Inner to Outer", "Single spiral"],
+                                 "tooltip": "strategy"},
+            "row_spacing_mm": {"type": "float", "min": 0.05, "max": 5.0},
+        }}}}
+        monkeypatch.setattr(cache, "load_schema", lambda *a, **k: canned)
+        meta = design_model._param_meta_for(
+            "contour_fill", ["contour_strategy", "row_spacing_mm"])
+        assert {"value": "inner_to_outer", "label": "Inner to Outer"} \
+            in meta["contour_strategy"]["options"]
+        assert meta["row_spacing_mm"]["min"] == 0.05
+        assert meta["contour_strategy"]["tooltip"] == "strategy"
+
+    def test_unknown_params_get_no_meta(self, tmp_path):
+        from cli_anything_inkstitch.artifact.design_model import _param_meta_for
+        meta = _param_meta_for("auto_fill", ["not_a_real_param"])
+        assert "not_a_real_param" not in meta

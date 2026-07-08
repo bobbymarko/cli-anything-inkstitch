@@ -125,6 +125,9 @@
               border-radius: 4px; padding: 1px 5px; }
   .pvalEdit:hover { border-color: var(--line); }
   .pvalEdit:focus { border-color: var(--accent); outline: none; background: #14161a; }
+  .pvalSelect { width: auto; max-width: 120px; background: #14161a;
+                border-color: var(--line); cursor: pointer; }
+  .pvalEdit[type="number"] { appearance: textfield; }
   .pvalCheck { accent-color: var(--accent); }
   #chat { flex: 1; overflow-y: auto; padding: 4px 14px; display: flex;
           flex-direction: column; gap: 8px; }
@@ -655,8 +658,14 @@ async function commitParam(id, name, value) {
     await refresh();          // server rejected — resync to truth
   }
 }
+/* Controls are typed from the Ink/Stitch param schema (served per object as
+   param_meta): booleans → checkbox, dropdown/enum → select, int/float →
+   number input with the schema's min/max. Unknown params fall back to free
+   text — the server and the stitch engine remain the final validators. */
 function paramControl(o, k, v) {
-  if (v === "True" || v === "False") {
+  const meta = (o.param_meta || {})[k] || {};
+  const t = meta.type;
+  if (t === "boolean" || (!t && (v === "True" || v === "False"))) {
     const box = document.createElement("input");
     box.type = "checkbox";
     box.className = "pvalCheck";
@@ -665,8 +674,35 @@ function paramControl(o, k, v) {
       commitParam(o.id, k, box.checked ? "True" : "False"));
     return box;
   }
+  if (meta.options && meta.options.length) {
+    const sel = document.createElement("select");
+    sel.className = "pvalEdit pvalSelect";
+    const values = meta.options.map(opt => opt.value);
+    if (!values.includes(v)) {              // current value outside the schema
+      const cur = document.createElement("option");
+      cur.value = v;
+      cur.textContent = v;
+      sel.appendChild(cur);
+    }
+    for (const opt of meta.options) {
+      const el2 = document.createElement("option");
+      el2.value = opt.value;
+      el2.textContent = opt.label;
+      sel.appendChild(el2);
+    }
+    sel.value = v;
+    sel.addEventListener("change", () => commitParam(o.id, k, sel.value));
+    return sel;
+  }
   const input = document.createElement("input");
-  input.type = "text";
+  if (t === "int" || t === "float") {
+    input.type = "number";
+    if (meta.min !== undefined) input.min = meta.min;
+    if (meta.max !== undefined) input.max = meta.max;
+    input.step = t === "int" ? "1" : "any";
+  } else {
+    input.type = "text";
+  }
   input.className = "pvalEdit";
   input.value = v;
   input.addEventListener("keydown", (ev) => {
@@ -675,7 +711,18 @@ function paramControl(o, k, v) {
     if (ev.key === "Escape") { input.value = v; input.blur(); }
   });
   input.addEventListener("blur", () => {
-    if (input.value.trim() !== v) commitParam(o.id, k, input.value.trim());
+    let next = input.value.trim();
+    if (next === v || next === "") { input.value = v; return; }
+    if (input.type === "number") {           // clamp to the schema's range
+      let n = Number(next);
+      if (!Number.isFinite(n)) { input.value = v; return; }
+      if (meta.min !== undefined) n = Math.max(meta.min, n);
+      if (meta.max !== undefined) n = Math.min(meta.max, n);
+      if (t === "int") n = Math.round(n);
+      next = String(n);
+      input.value = next;
+    }
+    if (next !== v) commitParam(o.id, k, next);
   });
   return input;
 }
@@ -727,6 +774,9 @@ function renderInspect(objs) {
     const name = document.createElement("span");
     name.className = "pname";
     name.textContent = k;
+    const meta = (o.param_meta || {})[k];
+    if (meta && (meta.tooltip || meta.gui_text))
+      name.title = meta.tooltip || meta.gui_text;
     row.append(name, paramControl(o, k, v));
     body.appendChild(row);
   }

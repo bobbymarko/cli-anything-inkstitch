@@ -113,6 +113,55 @@ def _is_command_use(elem) -> bool:
     return "inkstitch_" in href
 
 
+def _stored_token(label: str) -> str:
+    """Ink/Stitch stores dropdown values as snake_case tokens of the label
+    ("Inner to Outer" → "inner_to_outer")."""
+    return label.strip().lower().replace(" ", "_")
+
+
+def _param_meta_for(stitch_type: str, param_names) -> dict[str, dict]:
+    """Typed control metadata for the editor inspector, from the param schema.
+
+    Only covers the params actually present on the element. Params the schema
+    doesn't know (or a missing schema entirely) simply get no meta — the
+    editor falls back to a free-text input, same as before.
+    """
+    try:
+        from cli_anything_inkstitch.schema.cache import load_schema
+        stitch_types = load_schema()["stitch_types"]
+        params = stitch_types.get(stitch_type, {}).get("params", {})
+    except Exception:  # noqa: BLE001 — schema cache problems must never break /design
+        return {}
+
+    def lookup(name: str):
+        spec = params.get(name)
+        if isinstance(spec, dict):
+            return spec
+        # Param not in this stitch type's schema (e.g. leftovers from a
+        # previous fill method) — param definitions are shared across
+        # inkstitch element types, so any type's spec is authoritative.
+        for other in stitch_types.values():
+            spec = (other.get("params") or {}).get(name)
+            if isinstance(spec, dict):
+                return spec
+        return None
+
+    meta: dict[str, dict] = {}
+    for name in param_names:
+        spec = lookup(name)
+        if not isinstance(spec, dict):
+            continue
+        m: dict[str, Any] = {"type": spec.get("type", "string")}
+        for k in ("min", "max", "default", "tooltip", "gui_text"):
+            if spec.get(k) is not None:
+                m[k] = spec[k]
+        options = spec.get("options") or spec.get("enum")
+        if options and m["type"] in ("dropdown", "string", "str"):
+            m["options"] = [{"value": _stored_token(o), "label": o} for o in options]
+        meta[name] = m
+    return meta
+
+
 def read_design(project_file: str) -> dict[str, Any]:
     """The design as editor JSON. Read-only (no lock held after return)."""
     with _open_locked(project_file) as (proj, tree):
@@ -140,6 +189,7 @@ def read_design(project_file: str) -> dict[str, Any]:
                 "params": dict(iter_inkstitch_attrs(elem)),
                 "commands": _command_uses(elem),
             }
+            obj["param_meta"] = _param_meta_for(stitch_type, obj["params"])
             if kind == "satin" and elem.get("d"):
                 subpaths = split_subpaths(elem.get("d"))
                 obj["rails"] = subpaths[:2]
