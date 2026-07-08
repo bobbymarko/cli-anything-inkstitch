@@ -40,7 +40,8 @@
   #main { display: flex; flex: 1; min-height: 0; }
   #canvasWrap { position: relative; flex: 1; min-width: 0; overflow: hidden;
                 background: #0e1013; }
-  #canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #canvas, #realCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #realCanvas { pointer-events: none; display: none; }  /* under #canvas in DOM order */
   #canvasWrap.showPlan .artwork { opacity: .12; } /* plan is the truth while shown */
   .planLayer { pointer-events: none; }
   #toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 60px;
@@ -192,7 +193,11 @@
   .handle.start { fill: var(--start); }
   .handle.end { fill: var(--end); }
   .angleArrow { stroke: var(--accent); opacity: .8; vector-effect: non-scaling-stroke;
-                pointer-events: none; }
+                pointer-events: none; stroke-dasharray: 5 4; }
+  .angleKnob { fill: var(--accent); stroke: #14161a; stroke-width: 1.5;
+               vector-effect: non-scaling-stroke; cursor: grab; }
+  .angleLabel { fill: var(--text); pointer-events: none;
+                font-family: ui-monospace, monospace; }
 </style>
 </head>
 <body>
@@ -229,6 +234,7 @@
     </div>
   </aside>
   <div id="canvasWrap">
+    <canvas id="realCanvas"></canvas>
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
     <div id="toast"></div>
     <div id="timelineBar">
@@ -489,18 +495,21 @@ function shade(hex, f) {                      // f<0 darken, f>0 lighten toward 
 }
 /* Three view modes, like commercial digitizing software:
    outline   — no plan layer, just the artwork + edit handles
-   stitches  — hairline strokes (constant 1.25px at any zoom) so stitch
+   stitches  — hairline SVG strokes (constant 1.25px at any zoom) so stitch
                directions stay readable instead of blobbing into fills
-   realistic — thread-width strokes with a shadow pass under and a sheen
-               highlight over, for a fast pseudo-3D thread look */
+   realistic — 2D-canvas render, one stroke set PER STITCH SEGMENT: shadow
+               pass, thread body, sheen highlight, with round caps at every
+               needle penetration and later stitches layering over earlier
+               ones. Per-stitch depth needs ~13k draw ops per frame — canvas
+               handles that; SVG would crawl. */
 function renderPlanLayer() {
   if (!planLayer) return;
   planLayer.textContent = "";
+  const realOn = planOn && viewMode === "realistic" && !!stitchData;
+  $("realCanvas").style.display = realOn ? "block" : "none";
+  if (realOn) { drawRealistic(); return; }
   if (!planOn || !stitchData) return;
-  const w = threadWidth();
-  const line = (points, stroke, width, extra = {}) =>
-    el("polyline", { points, fill: "none", stroke, "stroke-width": width,
-      "stroke-linejoin": "round", "stroke-linecap": "round", ...extra }, planLayer);
+  // stitches mode — hairline vectors
   let remaining = timelinePos == null ? Infinity : timelinePos;
   for (const block of stitchData.blocks) {
     for (const pts of block.paths) {
@@ -508,20 +517,67 @@ function renderPlanLayer() {
       const take = Math.min(pts.length, remaining);
       remaining -= take;
       if (take < 2) continue;
-      const points = pts.slice(0, take).map(p => p.join(",")).join(" ");
-      if (viewMode === "realistic") {
-        line(points, shade(block.color, -0.5), w * 1.25,
-             { transform: `translate(${fmt(w * 0.12)} ${fmt(w * 0.18)})`, opacity: .8 });
-        line(points, block.color, w);
-        line(points, shade(block.color, 0.5), w * 0.3,
-             { transform: `translate(${fmt(-w * 0.08)} ${fmt(-w * 0.12)})`, opacity: .7 });
-      } else {
-        line(points, block.color, 1.25,
-             { "vector-effect": "non-scaling-stroke", opacity: .9 });
+      el("polyline", {
+        points: pts.slice(0, take).map(p => p.join(",")).join(" "),
+        fill: "none", stroke: block.color, "stroke-width": 1.25,
+        "vector-effect": "non-scaling-stroke", opacity: .9,
+        "stroke-linejoin": "round", "stroke-linecap": "round",
+      }, planLayer);
+    }
+  }
+}
+function drawRealistic() {
+  const rc = $("realCanvas");
+  const rect = $("canvasWrap").getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const pw = Math.round(rect.width * dpr), ph = Math.round(rect.height * dpr);
+  if (rc.width !== pw) rc.width = pw;
+  if (rc.height !== ph) rc.height = ph;
+  const ctx = rc.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  if (!planOn || viewMode !== "realistic" || !stitchData) return;
+  // svg viewBox (preserveAspectRatio meet, centered) → screen px
+  const s = Math.min(rect.width / vb.w, rect.height / vb.h);
+  const ox = (rect.width - vb.w * s) / 2 - vb.x * s;
+  const oy = (rect.height - vb.h * s) / 2 - vb.y * s;
+  const tw = Math.max(1.2, threadWidth() * s);
+  ctx.lineCap = "round";
+  let remaining = timelinePos == null ? Infinity : timelinePos;
+  for (const block of stitchData.blocks) {
+    const shadow = shade(block.color, -0.55);
+    const sheen = shade(block.color, 0.55);
+    for (const pts of block.paths) {
+      if (remaining <= 0) return;
+      const take = Math.min(pts.length, remaining);
+      remaining -= take;
+      if (take < 2) continue;
+      for (let i = 1; i < take; i++) {
+        const x1 = pts[i - 1][0] * s + ox, y1 = pts[i - 1][1] * s + oy;
+        const x2 = pts[i][0] * s + ox, y2 = pts[i][1] * s + oy;
+        ctx.strokeStyle = shadow;
+        ctx.lineWidth = tw * 1.25;
+        ctx.beginPath();
+        ctx.moveTo(x1 + tw * 0.16, y1 + tw * 0.26);
+        ctx.lineTo(x2 + tw * 0.16, y2 + tw * 0.26);
+        ctx.stroke();
+        ctx.strokeStyle = block.color;
+        ctx.lineWidth = tw;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.strokeStyle = sheen;
+        ctx.lineWidth = Math.max(0.6, tw * 0.32);
+        ctx.beginPath();
+        ctx.moveTo(x1 - tw * 0.08, y1 - tw * 0.14);
+        ctx.lineTo(x2 - tw * 0.08, y2 - tw * 0.14);
+        ctx.stroke();
       }
     }
   }
 }
+window.addEventListener("resize", () => drawRealistic());
 /* ---------- stitch-out timeline ---------- */
 let tlRaf = null, tlPlayTimer = null;
 function updateTimelineLabel() {
@@ -558,6 +614,7 @@ $("tlPlay").onclick = () => {
 function setViewBox() {
   canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
   renderEditLayer();                          // keep marker sizes screen-constant
+  if (typeof drawRealistic === "function") drawRealistic();
 }
 function clientToSvg(ev) {
   const pt = new DOMPoint(ev.clientX, ev.clientY);
@@ -836,17 +893,30 @@ function renderSatin(o) {
 }
 function renderFill(o) {
   el("path", { d: o.d, class: "fillBoundary" }, editLayer);
-  // angle indicator through bbox centre
+  // fill-angle handle: dashed line through the bbox centre with a knob —
+  // drag the knob around the centre to rotate the fill angle
   const flatsAll = flatten(tokenizePath(o.d));
   if (flatsAll.length) {
     const xs = flatsAll.map(p => p[0]), ys = flatsAll.map(p => p[1]);
     const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
     const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-    const ang = -parseFloat(o.params.angle || "0") * Math.PI / 180;
-    const r = (Math.max(...xs) - Math.min(...xs)) / 3;
+    const deg = parseFloat(o.params.angle || "0");
+    const ang = -deg * Math.PI / 180;               // svg y-down; ccw param
+    const r = Math.max((Math.max(...xs) - Math.min(...xs)) / 3, px(30));
+    const hx = cx + r * Math.cos(ang), hy = cy + r * Math.sin(ang);
     el("line", { x1: cx - r * Math.cos(ang), y1: cy - r * Math.sin(ang),
-                 x2: cx + r * Math.cos(ang), y2: cy + r * Math.sin(ang),
-                 class: "angleArrow" }, editLayer);
+                 x2: hx, y2: hy, class: "angleArrow" }, editLayer);
+    el("circle", { cx, cy, r: px(2), class: "angleKnob",
+                   style: "cursor:default" }, editLayer);
+    const knob = el("circle", { cx: hx, cy: hy, r: px(5.5),
+                                class: "angleKnob" }, editLayer);
+    knob.addEventListener("pointerdown", (ev) =>
+      startDrag(ev, { type: "angle", obj: o, cx, cy }));
+    if (dragging && dragging.type === "angle" && dragging.obj.id === o.id) {
+      const label = el("text", { x: hx + px(10), y: hy - px(8),
+                                 "font-size": px(12), class: "angleLabel" }, editLayer);
+      label.textContent = `${deg}°`;
+    }
   }
   for (const role of ["start", "end"]) {
     const h = o[role];
@@ -883,6 +953,7 @@ function startPan(ev) {
     vb.x = from.vb.x - (e.clientX - from.x) * vb.w / rect.width;
     vb.y = from.vb.y - (e.clientY - from.y) * vb.h / rect.height;
     canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    drawRealistic();
   };
   const up = () => {
     window.removeEventListener("pointermove", move);
@@ -903,7 +974,12 @@ function startDrag(ev, desc) {
     const p = clientToSvg(e);
     const dx = p.x - last.x, dy = p.y - last.y;
     last = p;
-    if (desc.type === "handle") {
+    if (desc.type === "angle") {
+      // rotate around the fill's centre; param is ccw degrees, svg is y-down
+      let deg = Math.round(-Math.atan2(p.y - desc.cy, p.x - desc.cx) * 180 / Math.PI);
+      deg = ((deg + 90) % 180 + 180) % 180 - 90;   // normalize to (-90, 90]
+      desc.obj.params.angle = String(deg);
+    } else if (desc.type === "handle") {
       const h = desc.obj[desc.role];
       h.x += dx; h.y += dy;
     } else if (desc.type === "rail-node") {
@@ -920,7 +996,11 @@ function startDrag(ev, desc) {
     window.removeEventListener("pointerup", up);
     dragging = null;
     try {
-      if (desc.type === "handle") {
+      if (desc.type === "angle") {
+        renderEditLayer();                       // drop the live degree label
+        await postEdit([{ op: "set_attr", id: desc.obj.id,
+                          name: "angle", value: desc.obj.params.angle }]);
+      } else if (desc.type === "handle") {
         const h = desc.obj[desc.role];
         await postEdit([{ op: "move_command", use_id: desc.use_id,
                           x: fmt(h.x), y: fmt(h.y) }]);
