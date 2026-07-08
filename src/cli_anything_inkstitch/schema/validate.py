@@ -20,6 +20,43 @@ def validate_param(stitch_type_schema: dict, param_name: str, raw_value) -> str:
         )
     spec = params[param_name]
     ptype = spec.get("type")
+    kind = spec.get("value_kind")
+
+    # value_kind is the engine's READ contract (mined from get_*_param calls
+    # in the inkstitch source) and outranks the GUI-declared type when they
+    # disagree — e.g. pull_compensation_percent is declared float but the
+    # engine reads a space-separated per-side list; staggers is declared int
+    # but read as float. Dropdowns keep their index handling below (their
+    # get_int_param read is exactly the index contract).
+    if ptype != "dropdown":
+        if kind in ("multi_float", "multi_int"):
+            parts = str(raw_value).replace(",", " ").split()
+            if not parts:
+                raise UserError(f"{param_name}: expected one or more values")
+            out = []
+            for part in parts:
+                try:
+                    v = int(part) if kind == "multi_int" else float(part)
+                except ValueError as e:
+                    raise UserError(
+                        f"{param_name}: {part!r} is not "
+                        f"{'an int' if kind == 'multi_int' else 'a number'} "
+                        f"(space-separated list allowed)") from e
+                _check_range(param_name, v, spec)
+                out.append(str(v) if kind == "multi_int" else _fmt_float(v))
+            return " ".join(out)
+        if kind == "float" and ptype == "int":
+            ptype = "float"     # engine is more permissive than the GUI type
+        if kind == "string" and ptype in ("float", "int"):
+            # declared numeric but read as a raw string (e.g.
+            # fill_underlay_angle: space-separated multi-pass angles)
+            parts = str(raw_value).replace(",", " ").split()
+            try:
+                [float(p) for p in parts]
+            except ValueError as e:
+                raise UserError(
+                    f"{param_name}: expected number(s), got {raw_value!r}") from e
+            return " ".join(parts)
 
     if ptype == "boolean":
         if isinstance(raw_value, bool):

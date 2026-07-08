@@ -146,9 +146,19 @@ def _param_meta_for(stitch_type: str, param_names) -> dict[str, dict]:
         if not isinstance(spec, dict):
             continue
         m: dict[str, Any] = {"type": spec.get("type", "string")}
-        for k in ("min", "max", "default", "tooltip", "gui_text"):
+        for k in ("min", "max", "default", "tooltip", "gui_text", "value_kind"):
             if spec.get(k) is not None:
                 m[k] = spec[k]
+        # honor the engine's read contract when it disagrees with the GUI type:
+        # multi-value/list params must stay free-text (a number input would
+        # reject "10 20"); int-declared-float-read params widen to float
+        kind = m.get("value_kind")
+        if kind in ("multi_float", "multi_int", "json"):
+            m["type"] = "string"
+        elif kind == "string" and m["type"] in ("float", "int"):
+            m["type"] = "string"
+        elif kind == "float" and m["type"] == "int":
+            m["type"] = "float"
         options = spec.get("options") or spec.get("enum")
         if options:
             if m["type"] == "dropdown":

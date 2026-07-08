@@ -217,3 +217,93 @@ class TestValidateDropdownParams:
         from cli_anything_inkstitch.schema.validate import validate_param
         schema = {"params": {"x": {"type": "dropdown"}}}
         assert validate_param(schema, "x", "anything") == "anything"
+
+
+class TestEngineReadContract:
+    """Cross-check every extracted param against the getter the engine
+    actually reads it with (mined from the same inkstitch source). This is
+    the regression net for the join_style class of bug: a GUI-declared type
+    that disagrees with the engine's read side must be represented by
+    value_kind, or validation will either reject valid values or silently
+    write ignored ones."""
+
+    # (declared type, engine value_kind) pairs that are correct WITHOUT any
+    # special handling in validate_param
+    COMPATIBLE = {
+        ("string", "string"), ("str", "string"), ("combo", "string"),
+        ("random_seed", "string"), ("boolean", "boolean"),
+        ("float", "float"), ("int", "int"),
+        ("dropdown", "int"),          # dropdowns store option indexes
+    }
+    # kinds validate_param has dedicated handling for
+    HANDLED_KINDS = {"multi_float", "multi_int", "json"}
+
+    def test_no_unhandled_type_mismatches(self):
+        import pathlib
+        source = pathlib.Path(__file__).parent.parent / "inkstitch"
+        if not (source / "lib" / "elements").exists():
+            pytest.skip("inkstitch source checkout not present")
+        from cli_anything_inkstitch.schema.extract import extract_schema
+        schema = extract_schema(source)
+        problems = []
+        for stype, spec in schema["stitch_types"].items():
+            for name, p in (spec.get("params") or {}).items():
+                kind = p.get("value_kind")
+                if kind is None:
+                    continue          # getter not statically resolvable
+                ptype = p.get("type", "string")
+                if (ptype, kind) in self.COMPATIBLE:
+                    continue
+                if kind in self.HANDLED_KINDS:
+                    continue
+                if kind == "float" and ptype == "int":
+                    continue          # validator widens int→float
+                if kind == "string" and ptype in ("float", "int"):
+                    continue          # validator treats as numeric list
+                problems.append(f"{stype}.{name}: declared {ptype}, engine reads {kind}")
+        assert not problems, (
+            "params whose declared type disagrees with the engine's read "
+            "contract and have no validator handling:\n  " + "\n  ".join(problems))
+
+
+class TestValidateMultiValueParams:
+    """Engine-read-contract handling: multi-value params accept
+    space/comma-separated lists; numeric-declared-but-string-read params
+    (fill_underlay_angle) accept angle lists; int-declared float-read
+    params (staggers) accept floats."""
+
+    def _validate(self, spec, value):
+        from cli_anything_inkstitch.schema.validate import validate_param
+        return validate_param({"params": {"p": spec}}, "p", value)
+
+    def test_multi_float_list(self):
+        spec = {"type": "float", "value_kind": "multi_float"}
+        assert self._validate(spec, "10 20") == "10 20"
+        assert self._validate(spec, "10, 20") == "10 20"
+        assert self._validate(spec, "1.5") == "1.5"
+
+    def test_multi_float_rejects_garbage(self):
+        from cli_anything_inkstitch.errors import UserError
+        spec = {"type": "float", "value_kind": "multi_float"}
+        with pytest.raises(UserError):
+            self._validate(spec, "10 abc")
+
+    def test_multi_float_range_applies_per_element(self):
+        from cli_anything_inkstitch.errors import UserError
+        spec = {"type": "float", "value_kind": "multi_float", "min": 0.0}
+        with pytest.raises(UserError):
+            self._validate(spec, "1 -5")
+
+    def test_multi_int_list(self):
+        spec = {"type": "str", "value_kind": "multi_int"}
+        assert self._validate(spec, "0 1 2") == "0 1 2"
+
+    def test_numeric_declared_string_read(self):
+        # fill_underlay_angle: declared float, engine reads a string angle list
+        spec = {"type": "float", "value_kind": "string"}
+        assert self._validate(spec, "45 135") == "45 135"
+
+    def test_int_declared_float_read_widens(self):
+        # staggers: declared int, engine reads float
+        spec = {"type": "int", "value_kind": "float"}
+        assert self._validate(spec, "2.5") == "2.5"

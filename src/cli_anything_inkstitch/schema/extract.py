@@ -257,6 +257,32 @@ def _resolve_method_options(class_node: ast.ClassDef) -> dict[str, list[str]]:
     return out
 
 
+# How the engine READS each attr value — the write contract we must honor.
+# Mined from the get_*_param call inside the @param property's own body.
+_GETTER_KINDS = {
+    "get_param": "string",
+    "get_boolean_param": "boolean",
+    "get_float_param": "float",
+    "get_int_param": "int",
+    "get_split_float_param": "multi_float",       # "a b" (per-side values)
+    "get_split_mm_param_as_px": "multi_float",
+    "get_multiple_float_param": "multi_float",    # "a b c ..."
+    "get_multiple_int_param": "multi_int",
+    "get_json_param": "json",
+}
+
+
+def _value_kind(stmt: ast.FunctionDef, param_name: str) -> str | None:
+    """The engine-side read kind for this param, from its property body."""
+    for sub in ast.walk(stmt):
+        if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr in _GETTER_KINDS
+                and sub.args and isinstance(sub.args[0], ast.Constant)
+                and sub.args[0].value == param_name):
+            return _GETTER_KINDS[sub.func.attr]
+    return None
+
+
 def parse_element_file(path: Path) -> dict[str, dict]:
     """Return {class_name: {"params": [param_info, ...], "options": {assign_name: [...]}, "order": int}}."""
     tree = ast.parse(path.read_text(), filename=str(path))
@@ -275,6 +301,9 @@ def parse_element_file(path: Path) -> dict[str, dict]:
                 if isinstance(func, ast.Name) and func.id == "param":
                     info = _extract_param_call(dec)
                     if info:
+                        kind = _value_kind(stmt, info["name"])
+                        if kind:
+                            info["value_kind"] = kind
                         params.append(info)
         if params:
             classes[node.name] = {
@@ -311,7 +340,8 @@ def _normalize_param(raw: dict) -> dict:
     out["type"] = ptype
     if "gui_text" in raw and raw["gui_text"] is not None:
         out["gui_text"] = raw["gui_text"]
-    for key in ("unit", "tooltip", "group", "sort_index", "enables", "inverse"):
+    for key in ("unit", "tooltip", "group", "sort_index", "enables", "inverse",
+                "value_kind"):
         if raw.get(key) is not None:
             out[key] = raw[key]
     if "options" in raw and raw["options"] is not None:
