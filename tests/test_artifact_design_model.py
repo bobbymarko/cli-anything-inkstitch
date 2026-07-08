@@ -309,3 +309,51 @@ class TestParamMeta:
         from cli_anything_inkstitch.artifact.design_model import _param_meta_for
         meta = _param_meta_for("auto_fill", ["not_a_real_param"])
         assert "not_a_real_param" not in meta
+
+
+class TestSetAttrValidation:
+    """set_attr routes known params through validate_param — the artifact
+    edit path can no longer write values the engine would silently ignore."""
+
+    def _project_with_schema(self, tmp_path, monkeypatch):
+        from cli_anything_inkstitch.schema import cache
+        canned = {"stitch_types": {"auto_fill": {"params": {
+            "angle": {"type": "float"},
+            "row_spacing_mm": {"type": "float", "min": 0.05, "max": 5.0},
+            "join_style": {"type": "dropdown",
+                           "options": ["Round", "Mitered", "Beveled"]},
+        }}}}
+        monkeypatch.setattr(cache, "load_schema", lambda *a, **k: canned)
+        svg = tmp_path / "design.svg"
+        svg.write_text(SVG)
+        proj_path = tmp_path / "design.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        return str(proj_path)
+
+    def test_dropdown_label_normalized_to_index(self, tmp_path, monkeypatch):
+        project = self._project_with_schema(tmp_path, monkeypatch)
+        apply_edits(project, [{"op": "set_attr", "id": "elem_fill",
+                               "name": "join_style", "value": "Mitered"}])
+        svg = (tmp_path / "design.svg").read_text()
+        assert 'join_style="1"' in svg
+
+    def test_invalid_dropdown_value_rejected(self, tmp_path, monkeypatch):
+        project = self._project_with_schema(tmp_path, monkeypatch)
+        with pytest.raises(UserError):
+            apply_edits(project, [{"op": "set_attr", "id": "elem_fill",
+                                   "name": "join_style", "value": "miter"}])
+
+    def test_out_of_range_rejected(self, tmp_path, monkeypatch):
+        project = self._project_with_schema(tmp_path, monkeypatch)
+        with pytest.raises(UserError):
+            apply_edits(project, [{"op": "set_attr", "id": "elem_fill",
+                                   "name": "row_spacing_mm", "value": "99"}])
+
+    def test_unknown_attr_passes_through(self, tmp_path, monkeypatch):
+        project = self._project_with_schema(tmp_path, monkeypatch)
+        apply_edits(project, [{"op": "set_attr", "id": "elem_fill",
+                               "name": "custom_note", "value": "hello"}])
+        assert 'custom_note="hello"' in (tmp_path / "design.svg").read_text()

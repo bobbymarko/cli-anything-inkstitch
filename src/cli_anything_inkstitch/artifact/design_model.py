@@ -233,6 +233,36 @@ def _xpath(svg_id: str) -> str:
     return f"//*[@id='{svg_id}']"
 
 
+def _validated_param_value(elem, param: str, value: str) -> str:
+    """Normalize a param write through the same validator `params set` uses.
+
+    Known params get full validation against the engine's read contract
+    (ranges, dropdown indexes, multi-value lists). Params the schema doesn't
+    know pass through unchanged — set_attr must stay usable for attrs beyond
+    the param surface.
+    """
+    try:
+        from cli_anything_inkstitch.schema.cache import load_schema
+        from cli_anything_inkstitch.schema.validate import validate_param
+        stitch_types = load_schema()["stitch_types"]
+        summary = element_summary(elem)
+        spec = stitch_types.get(summary["stitch_type"], {})
+        if param not in spec.get("params", {}):
+            # cross-type lookup: shared definitions (e.g. leftovers from a
+            # previous fill method) still deserve validation
+            for other in stitch_types.values():
+                if param in (other.get("params") or {}):
+                    spec = other
+                    break
+            else:
+                return value
+        return validate_param(spec, param, value)
+    except UserError:
+        raise
+    except Exception:  # noqa: BLE001 — schema problems must never block edits
+        return value
+
+
 def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
     name = op.get("op")
     if name == "set_attr":
@@ -241,7 +271,7 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
             raise UserError(f"no element with id={op['id']!r}")
         key = qname(str(op["name"]))
         before = {key: elem.get(key)}
-        elem.set(key, str(op["value"]))
+        elem.set(key, _validated_param_value(elem, str(op["name"]), str(op["value"])))
         push(proj.history, make_entry(
             command=f"artifact edit set_attr --id {op['id']} {op['name']}={op['value']}",
             patch=attr_diff(_xpath(op["id"]), before, {key: elem.get(key)})))
