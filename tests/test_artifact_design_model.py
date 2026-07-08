@@ -357,3 +357,21 @@ class TestSetAttrValidation:
         apply_edits(project, [{"op": "set_attr", "id": "elem_fill",
                                "name": "custom_note", "value": "hello"}])
         assert 'custom_note="hello"' in (tmp_path / "design.svg").read_text()
+
+
+class TestSetSvgAttr:
+    def test_sets_presentation_attr(self, project):
+        apply_edits(project, [
+            {"op": "set_svg_attr", "id": "elem_fill", "name": "style",
+             "value": "fill:none;stroke:#f17095"},
+        ])
+        import pathlib
+        proj = ProjectFile.load(project)
+        assert 'style="fill:none;stroke:#f17095"' in pathlib.Path(proj.svg_path).read_text()
+
+    def test_non_whitelisted_attr_rejected(self, project):
+        with pytest.raises(UserError, match="not allowed"):
+            apply_edits(project, [
+                {"op": "set_svg_attr", "id": "elem_fill", "name": "onclick",
+                 "value": "alert(1)"},
+            ])

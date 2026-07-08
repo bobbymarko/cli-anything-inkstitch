@@ -252,10 +252,12 @@ def check_satin(obj: dict[str, Any], scale: float) -> list[dict]:
                 f"no rungs and rail node counts differ ({n_a} vs {n_b}) — "
                 "zigzag interpolation can twist; add rungs to pair the rails"))
 
-    # width envelope
+    # width envelope — nearest-rail distance per sample, NOT same-arc-fraction
+    # pairing: closed or reversed rails (e.g. a ring converted to satin) put
+    # equal fractions at unrelated positions, which reads as ring-diameter
+    # "width". Nearest-point matches how the zigzag actually spans the column.
     a = sample_poly(flat[0], _WIDTH_SAMPLES)
-    b = sample_poly(flat[1], _WIDTH_SAMPLES)
-    widths = [math.dist(p, q) * scale for p, q in zip(a, b)]
+    widths = [point_to_poly_dist(p, flat[1]) * scale for p in a]
     if widths:
         wmin, wmax = min(widths), max(widths)
         if wmin < SATIN_MIN_WIDTH_MM:

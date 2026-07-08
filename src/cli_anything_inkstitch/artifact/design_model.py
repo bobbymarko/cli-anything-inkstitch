@@ -277,6 +277,25 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
             patch=attr_diff(_xpath(op["id"]), before, {key: elem.get(key)})))
         return {"op": name, "id": op["id"], "name": op["name"]}
 
+    if name == "set_svg_attr":
+        # plain (non-inkstitch) presentation attrs — needed for conversions
+        # like fill→satin where the element must become a stroke element.
+        # Whitelisted: this op must not become a generic XML escape hatch.
+        allowed = {"fill", "stroke", "stroke-width", "style", "opacity"}
+        attr = str(op["name"])
+        if attr not in allowed:
+            raise UserError(
+                f"set_svg_attr: {attr!r} not allowed (one of {sorted(allowed)})")
+        elem = find_by_id(tree, op["id"])
+        if elem is None:
+            raise UserError(f"no element with id={op['id']!r}")
+        before = {attr: elem.get(attr)}
+        elem.set(attr, str(op["value"]))
+        push(proj.history, make_entry(
+            command=f"artifact edit set_svg_attr --id {op['id']} {attr}={op['value']}",
+            patch=attr_diff(_xpath(op["id"]), before, {attr: elem.get(attr)})))
+        return {"op": name, "id": op["id"], "name": attr}
+
     if name == "del_attr":
         elem = find_by_id(tree, op["id"])
         if elem is None:
