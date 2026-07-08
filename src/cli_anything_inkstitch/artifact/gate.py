@@ -226,6 +226,23 @@ def check_satin(obj: dict[str, Any], scale: float) -> list[dict]:
             out.append(_finding("error", obj["id"], "rail_self_cross",
                                 f"rail {'AB'[i]} crosses itself", rail="AB"[i]))
 
+    # closed-loop rails running in opposite directions: the engine pairs rail
+    # sections by order-from-start, so opposed directions make the zigzag
+    # sweep between unrelated sections (a web across the shape). Caught here
+    # because the stitch count still looks plausible when it happens.
+    closed = [math.dist(f[0], f[-1]) * scale < 0.5 for f in flat]
+    if all(closed):
+        def _signed_area(pts):
+            return sum(pts[i - 1][0] * pts[i][1] - pts[i][0] * pts[i - 1][1]
+                       for i in range(1, len(pts))) / 2
+        a0, a1 = _signed_area(flat[0]), _signed_area(flat[1])
+        if a0 * a1 < 0:
+            out.append(_finding(
+                "error", obj["id"], "rail_direction",
+                "closed rails run in opposite directions — the zigzag will "
+                "sweep across the shape; reverse one rail so both run the "
+                "same way"))
+
     # rung pairing — the primary check (spec §8): every rung must meet BOTH rails
     tol = RUNG_PAIR_TOL_MM / scale
     rungs = obj.get("rungs") or []

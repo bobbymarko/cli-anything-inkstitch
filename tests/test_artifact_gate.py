@@ -178,3 +178,27 @@ class TestGatePayload:
         result = run_gate(make_project(tmp_path, body))
         assert result["ok"] is False
         assert result["errors"] and result["warnings"]
+
+
+class TestClosedRailDirection:
+    """Opposite-direction closed rails make the engine's zigzag sweep across
+    the shape while the stitch count still looks plausible — found the hard
+    way converting a ring fill to satin."""
+
+    def _ring(self, inner_reversed):
+        # outer square loop CW; inner square loop CW or CCW
+        outer = "M10,10 L30,10 L30,30 L10,30 L10,10"
+        inner_cw = "M12,12 L28,12 L28,28 L12,28 L12,12"
+        inner_ccw = "M12,12 L12,28 L28,28 L28,12 L12,12"
+        rungs = "M9,11 L13,13 M31,11 L27,13"
+        inner = inner_ccw if inner_reversed else inner_cw
+        return (f'<path id="s" fill="none" stroke="#000" '
+                f'inkstitch:satin_column="True" d="{outer} {inner} {rungs}"/>')
+
+    def test_opposed_directions_error(self, tmp_path):
+        result = run_gate(make_project(tmp_path, self._ring(inner_reversed=True)))
+        assert any(f["check"] == "rail_direction" for f in result["errors"])
+
+    def test_same_direction_passes(self, tmp_path):
+        result = run_gate(make_project(tmp_path, self._ring(inner_reversed=False)))
+        assert not any(f["check"] == "rail_direction" for f in result["errors"])
