@@ -852,16 +852,25 @@ function renderEditLayer() {
 function renderSatin(o) {
   const railSegs = o.rails.map(tokenizePath);
   const flats = railSegs.map(s => flatten(s));
-  // tier-1 zigzag approximation — satins only (fills never get fake rows)
-  if (flats[0]?.length > 1 && flats[1]?.length > 1) {
-    const L = Math.max(polyLength(flats[0]), polyLength(flats[1]));
+  // Tier-1 zigzag: ONLY while this satin's nodes are being dragged — it's
+  // live feedback for the lag before the real plan refreshes, not a
+  // persistent overlay (the stitch views own the resting representation).
+  // Rails pair by nearest-point projection: index pairing misaligns on
+  // closed/reversed rails and draws sweeps across the shape.
+  const dragMine = dragging && dragging.obj && dragging.obj.id === o.id &&
+    (dragging.type === "rail-node" || dragging.type === "rung-node");
+  if (dragMine && flats[0]?.length > 1 && flats[1]?.length > 1) {
+    const L = polyLength(flats[0]);
     const n = Math.max(8, Math.min(400, Math.round(L / 0.8) * 2));
-    const a = samplePoly(flats[0], n), b = samplePoly(flats[1], n);
+    const a = samplePoly(flats[0], n);
     let dz = "";
-    for (let i = 0; i < Math.min(a.length, b.length); i++) {
-      const p = i % 2 ? a[i] : b[i], q = i % 2 ? b[i] : a[i];
-      dz += (i ? "L" : "M") + fmt(p[0]) + "," + fmt(p[1]) + "L" + fmt(q[0]) + "," + fmt(q[1]);
-    }
+    a.forEach((p, i) => {
+      const q = nearestOnPoly(flats[1], p[0], p[1]);
+      if (!q) return;
+      const s = i % 2 ? p : q, e2 = i % 2 ? q : p;
+      dz += (dz ? "L" : "M") + fmt(s[0]) + "," + fmt(s[1]) +
+            "L" + fmt(e2[0]) + "," + fmt(e2[1]);
+    });
     el("path", { d: dz, class: "zig" }, editLayer);
   }
   // rails + draggable anchor nodes
@@ -969,8 +978,10 @@ function startDrag(ev, desc) {
   ev.stopPropagation();
   ev.preventDefault();
   let last = clientToSvg(ev);
+  let movedAny = false;
   dragging = desc;
   const move = (e) => {
+    movedAny = true;
     const p = clientToSvg(e);
     const dx = p.x - last.x, dy = p.y - last.y;
     last = p;
@@ -995,6 +1006,7 @@ function startDrag(ev, desc) {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     dragging = null;
+    if (!movedAny) { renderEditLayer(); return; }   // click, not a drag — no edit
     try {
       if (desc.type === "angle") {
         renderEditLayer();                       // drop the live degree label
