@@ -297,8 +297,11 @@ class TestParamMeta:
         monkeypatch.setattr(cache, "load_schema", lambda *a, **k: canned)
         meta = design_model._param_meta_for(
             "contour_fill", ["contour_strategy", "row_spacing_mm"])
-        assert {"value": "inner_to_outer", "label": "Inner to Outer"} \
-            in meta["contour_strategy"]["options"]
+        # Ink/Stitch stores dropdown values as option indexes (get_int_param)
+        assert meta["contour_strategy"]["options"] == [
+            {"value": "0", "label": "Inner to Outer"},
+            {"value": "1", "label": "Single spiral"},
+        ]
         assert meta["row_spacing_mm"]["min"] == 0.05
         assert meta["contour_strategy"]["tooltip"] == "strategy"
 

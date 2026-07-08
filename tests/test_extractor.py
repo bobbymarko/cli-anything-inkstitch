@@ -177,3 +177,43 @@ def test_extracted_schema_emits_no_warning_in_cli_json(source_root, tmp_path, mo
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
     assert "schema_warning" not in data
+
+
+class TestValidateDropdownParams:
+    """Dropdowns store option INDEXES (Ink/Stitch reads them with
+    get_int_param); labels are GUI-only. The validator normalizes indexes,
+    exact labels, and snake_case label forms to the index string, and
+    rejects anything else instead of passing it through to be silently
+    ignored at stitch time."""
+
+    SCHEMA = {"params": {"join_style": {
+        "type": "dropdown", "options": ["Round", "Mitered", "Beveled"]}}}
+
+    def _validate(self, value):
+        from cli_anything_inkstitch.schema.validate import validate_param
+        return validate_param(self.SCHEMA, "join_style", value)
+
+    def test_index_accepted(self):
+        assert self._validate("1") == "1"
+
+    def test_exact_label_normalized_to_index(self):
+        assert self._validate("Mitered") == "1"
+
+    def test_snake_case_label_normalized(self):
+        assert self._validate("mitered") == "1"
+        assert self._validate("beveled") == "2"
+
+    def test_invalid_value_rejected(self):
+        from cli_anything_inkstitch.errors import UserError
+        with pytest.raises(UserError):
+            self._validate("miter")     # the historical silent-failure value
+
+    def test_out_of_range_index_rejected(self):
+        from cli_anything_inkstitch.errors import UserError
+        with pytest.raises(UserError):
+            self._validate("7")
+
+    def test_no_options_passthrough(self):
+        from cli_anything_inkstitch.schema.validate import validate_param
+        schema = {"params": {"x": {"type": "dropdown"}}}
+        assert validate_param(schema, "x", "anything") == "anything"

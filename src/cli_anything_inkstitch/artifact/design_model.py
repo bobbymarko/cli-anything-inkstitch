@@ -113,12 +113,6 @@ def _is_command_use(elem) -> bool:
     return "inkstitch_" in href
 
 
-def _stored_token(label: str) -> str:
-    """Ink/Stitch stores dropdown values as snake_case tokens of the label
-    ("Inner to Outer" → "inner_to_outer")."""
-    return label.strip().lower().replace(" ", "_")
-
-
 def _param_meta_for(stitch_type: str, param_names) -> dict[str, dict]:
     """Typed control metadata for the editor inspector, from the param schema.
 
@@ -156,8 +150,14 @@ def _param_meta_for(stitch_type: str, param_names) -> dict[str, dict]:
             if spec.get(k) is not None:
                 m[k] = spec[k]
         options = spec.get("options") or spec.get("enum")
-        if options and m["type"] in ("dropdown", "string", "str"):
-            m["options"] = [{"value": _stored_token(o), "label": o} for o in options]
+        if options:
+            if m["type"] == "dropdown":
+                # Ink/Stitch reads every dropdown param via get_int_param():
+                # the stored value is the option's INDEX, the label is GUI-only
+                m["options"] = [{"value": str(i), "label": str(o)}
+                                for i, o in enumerate(options)]
+            elif m["type"] in ("string", "str"):
+                m["options"] = [{"value": str(o), "label": str(o)} for o in options]
         meta[name] = m
     return meta
 

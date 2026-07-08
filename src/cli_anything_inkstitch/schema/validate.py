@@ -54,7 +54,28 @@ def validate_param(stitch_type_schema: dict, param_name: str, raw_value) -> str:
             )
         return s
 
-    # Unknown type — pass through as string
+    if ptype == "dropdown":
+        # Ink/Stitch reads dropdown params with get_int_param(): the stored
+        # value is the option INDEX; labels are GUI-only. Accept an index, an
+        # exact label, or a snake_case label form — normalize to the index
+        # string. (These used to pass through unvalidated, so values like
+        # "miter" got written and were silently ignored at stitch time.)
+        options = [str(o) for o in (spec.get("options") or spec.get("enum") or [])]
+        s = str(raw_value).strip()
+        if not options:
+            return s
+        if s.isdigit() and int(s) < len(options):
+            return s
+        token = s.lower().replace(" ", "_")
+        for i, o in enumerate(options):
+            if token == o.lower().replace(" ", "_"):
+                return str(i)
+        raise UserError(
+            f"{param_name}: must be an option index (0–{len(options) - 1}) "
+            f"or one of {options}, got {s!r}"
+        )
+
+    # Unknown type (e.g. combo, random_seed) — pass through as string
     return str(raw_value)
 
 
