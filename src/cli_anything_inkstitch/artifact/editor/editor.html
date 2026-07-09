@@ -87,7 +87,16 @@
   #timelineBar.show { display: flex; }
   #tlPlay { all: unset; cursor: pointer; color: var(--accent); font-size: 13px;
             width: 18px; text-align: center; }
-  #timeline { flex: 1; accent-color: var(--accent); }
+  /* the track is a color-block map: each thread color occupies its share of
+     the stitch count, so you can see what color stitches at any point */
+  #timeline { flex: 1; -webkit-appearance: none; appearance: none; height: 8px;
+              border-radius: 4px; background: var(--line); outline: none;
+              cursor: pointer; }
+  #timeline::-webkit-slider-thumb { -webkit-appearance: none; width: 14px;
+              height: 14px; border-radius: 50%; background: #fff;
+              border: 2px solid var(--accent); cursor: grab; }
+  #timeline::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%;
+              background: #fff; border: 2px solid var(--accent); cursor: grab; }
   #tlLabel { color: var(--muted); font-variant-numeric: tabular-nums;
              white-space: nowrap; }
   #gateBanner button { font: inherit; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
@@ -557,6 +566,7 @@ async function fetchTier2() {
     const tl = $("timeline");
     tl.max = data.total_stitches;
     tl.value = data.total_stitches;
+    tl.style.background = timelineGradient();
     $("timelineBar").classList.toggle("show", planOn);
     stopTimelinePlay();
     updateTimelineLabel();
@@ -667,6 +677,21 @@ function drawRealistic() {
 }
 window.addEventListener("resize", () => drawRealistic());
 /* ---------- stitch-out timeline ---------- */
+/* hard-stop gradient: each color block's share of total stitches */
+function timelineGradient() {
+  if (!stitchData || !stitchData.total_stitches) return "";
+  const total = stitchData.total_stitches;
+  const stops = [];
+  let acc = 0;
+  for (const b of stitchData.blocks) {
+    const n = b.paths.reduce((s, p) => s + p.length, 0);
+    const from = (acc / total * 100).toFixed(2);
+    acc += n;
+    const to = (acc / total * 100).toFixed(2);
+    stops.push(`${b.color} ${from}% ${to}%`);
+  }
+  return `linear-gradient(to right, ${stops.join(", ")})`;
+}
 let tlRaf = null, tlPlayTimer = null;
 function updateTimelineLabel() {
   const total = stitchData ? stitchData.total_stitches : 0;
