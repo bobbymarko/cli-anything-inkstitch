@@ -63,9 +63,21 @@ class ArtifactState:
         self.hub = EventHub()
         self._lock = threading.Lock()
         self._active_polls: dict[str, int] = {}
+        self._poll_generation: dict[str, int] = {}
         self._delivered: set[str] = set()
         self.sse_clients = 0
         self.last_activity = time.monotonic()
+
+    def next_poll_generation(self, key: str) -> int:
+        """One poll per session: each new poll gets the next generation and
+        older generations are told to stand down (they'd otherwise race for
+        the same feedback queue and split deliveries)."""
+        with self._lock:
+            gen = self._poll_generation.get(key, 0) + 1
+            self._poll_generation[key] = gen
+        if gen > 1:
+            self.hub.publish(key, {"event": "poll-superseded", "gen": gen})
+        return gen
 
     def touch(self) -> None:
         self.last_activity = time.monotonic()
@@ -250,6 +262,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                     self._handle_feedback(key, self._read_body())
                 elif action == "agent-reply":
                     self._handle_agent_reply(key, self._read_body())
+                elif action == "agent-status":
+                    self._handle_agent_status(key, self._read_body())
                 elif action == "end":
                     self._handle_user_end(key)
                 elif action == "edit":
@@ -339,6 +353,17 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         self.state.hub.publish(key, {"event": "agent-reply", "text": text})
         self._json({"status": "sent"})
 
+    def _handle_agent_status(self, key: str, body: dict) -> None:
+        """Transient progress line ("checking the engine source…") shown in
+        the editor's working bubble. Not stored in chat — it narrates the
+        agent's in-between work, replacing the static 'agent is working…'."""
+        if not self.state.store.find_by_key(key):
+            self._json({"error": "session not found"}, 404)
+            return
+        self.state.hub.publish(key, {"event": "agent-status",
+                                     "text": str(body.get("text") or "")})
+        self._json({"status": "sent"})
+
     def _handle_poll(self, params: dict) -> None:
         project = (params.get("project") or [""])[0]
         if not project:
@@ -354,6 +379,7 @@ class ArtifactHandler(BaseHTTPRequestHandler):
             return
         # Long-poll: stream whitespace heartbeats until feedback/ended/timeout.
         # JSON parsers skip leading whitespace, so the final payload stays valid.
+        my_gen = self.state.next_poll_generation(key)
         q = self.state.hub.subscribe(key)
         self.state.poll_started(key)
         self.send_response(200)
@@ -362,6 +388,7 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         try:
             deadline = time.monotonic() + timeout_s
             last_beat = time.monotonic()
+            superseded = False
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -374,11 +401,21 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b" ")
                     self.wfile.flush()
                     last_beat = time.monotonic()
+                if (event and event.get("event") == "poll-superseded"
+                        and event.get("gen", 0) > my_gen):
+                    # a newer poll owns this session now — stand down without
+                    # draining the queue so the new poll gets the feedback
+                    superseded = True
+                    break
                 if event and event.get("event") in ("feedback", "ended"):
                     break
-            result = self.state.store.take_feedback(key)
-            if result["status"] == "feedback":
-                self.state.feedback_delivered(key)
+            if superseded:
+                result: dict = {"status": "superseded",
+                                "hint": "a newer poll took over this session"}
+            else:
+                result = self.state.store.take_feedback(key)
+                if result["status"] == "feedback":
+                    self.state.feedback_delivered(key)
             self.wfile.write(json.dumps(result).encode("utf-8"))
             self.wfile.flush()
         except (BrokenPipeError, OSError):

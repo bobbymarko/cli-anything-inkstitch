@@ -233,13 +233,14 @@ The digitizing-artifact correction loop (see `docs/digitizing-artifact-spec.md`)
 | Command | Description |
 |---------|-------------|
 | `open` | Open (or resume) the editor session; spawns a detached local server and opens the browser. `--no-browser` to just print the URL; `--reopen` only if the user ended the session from the browser and asked for further review. |
-| `poll` | Long-poll for the next human feedback batch (`{objects, manipulation, text}` items). `--agent-reply "msg"` sends a chat reply first. Re-run after each result; queued feedback is never lost. |
+| `poll` | Long-poll for the next human feedback batch (`{objects, manipulation, text}` items). `--agent-reply "msg"` sends a chat reply first. Re-run after each result; queued feedback is never lost. Run exactly ONE poll at a time — the server supersedes older polls when a new one starts (`{"status": "superseded"}`), so never run concurrent polls expecting both to receive feedback. |
 | `reply` | Send a chat reply into the editor without polling |
+| `status` | Send a transient progress line to the editor's working indicator ("recomputing the stitch plan…"). Send one before each substantial step while handling feedback — the human sees live narration instead of a static spinner. Not stored in chat. |
 | `gate` | Stitchability audit: desynced satin rungs, width limits, self-crossing rails, misplaced fill handles. Fix `errors` before handback; `warnings` are advisory. |
 | `end` | End the session (agent-initiated; a plain `open` can revive it) |
 | `stop` | Shut down the background artifact server |
 
-Loop shape: `open` → repeat (`poll` → apply requested edits via `element`/`params`/`commands` or the server edit API → `poll --agent-reply "what changed"`) → `gate` → `end`. The editor live-reloads whenever the design changes on disk, and its "Stitch plan" toggle overlays the binary's authoritative render (~1.5s after each edit).
+Loop shape: `open` → repeat (`poll` → `status --text "working on it…"` → apply requested edits via `element`/`params`/`commands` or the server edit API, sending `status` updates per step → `poll --agent-reply "what changed"`) → `gate` → `end`. The editor live-reloads whenever the design changes on disk, and its "Stitch plan" toggle overlays the binary's authoritative render (~1.5s after each edit).
 
 
 ## Examples

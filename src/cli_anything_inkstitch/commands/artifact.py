@@ -179,6 +179,24 @@ def reply_cmd(ctx, project_path, text):
     emit(ctx, _request(f"{base}/api/{key}/agent-reply", payload={"text": text}))
 
 
+@artifact.command("status")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--text", required=True)
+@click.pass_context
+def status_cmd(ctx, project_path, text):
+    """Send a transient progress line to the editor's working indicator.
+
+    Narrates in-between work ("reading the engine source…", "recomputing
+    the stitch plan…") without polluting the chat history. Send one before
+    each substantial step while handling feedback.
+    """
+    from cli_anything_inkstitch.artifact.sessions import canonical_file, session_key
+    project = get_project_path(ctx, project_path)
+    base = _ensure_server(_state_dir())
+    key = session_key(canonical_file(project))
+    emit(ctx, _request(f"{base}/api/{key}/agent-status", payload={"text": text}))
+
+
 @artifact.command("end")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.pass_context

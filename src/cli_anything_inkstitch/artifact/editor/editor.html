@@ -1392,8 +1392,11 @@ function renderPills() {
   $("send").disabled = !selection.length && !$("input").value.trim();
 }
 $("input").addEventListener("input", renderPills);
-/* "agent is working…" bubble — presence, shown where the user is looking */
+/* "agent is working…" bubble — presence, shown where the user is looking.
+   agent-status events replace the static text with live progress lines
+   ("reading the engine source…") while the agent handles feedback. */
 let workingBubble = null;
+let workingText = null;
 function setWorking(on) {
   if (on && !workingBubble) {
     workingBubble = document.createElement("div");
@@ -1401,13 +1404,20 @@ function setWorking(on) {
     const dots = document.createElement("span");
     dots.className = "dots";
     for (let i = 0; i < 3; i++) dots.appendChild(document.createElement("i"));
-    workingBubble.append(dots, document.createTextNode(" agent is working…"));
+    workingText = document.createTextNode(" agent is working…");
+    workingBubble.append(dots, workingText);
     $("chat").appendChild(workingBubble);
     $("chat").scrollTop = $("chat").scrollHeight;
   } else if (!on && workingBubble) {
     workingBubble.remove();
     workingBubble = null;
+    workingText = null;
   }
+}
+function setWorkingStatus(text) {
+  setWorking(true);                  // a status implies the agent is working
+  if (workingText) workingText.textContent = " " + text;
+  $("chat").scrollTop = $("chat").scrollHeight;
 }
 function addMsg(role, text, objects) {
   const div = document.createElement("div");
@@ -1522,6 +1532,9 @@ function connectSSE() {
   es.addEventListener("agent-reply", (ev) => {
     setWorking(false);
     addMsg("agent", JSON.parse(ev.data).text);
+  });
+  es.addEventListener("agent-status", (ev) => {
+    setWorkingStatus(JSON.parse(ev.data).text);
   });
   es.addEventListener("agent-presence", (ev) => {
     const state = JSON.parse(ev.data).state;

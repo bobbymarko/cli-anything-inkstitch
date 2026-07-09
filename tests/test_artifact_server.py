@@ -270,3 +270,65 @@ class TestSSE:
         threading.Thread(target=poll, daemon=True).start()
         assert done.wait(10)
         assert ("agent-presence", {"state": "listening"}) in events
+
+
+class TestPollSupersede:
+    def test_new_poll_supersedes_old(self, server, project):
+        """One poll per session: a second poll takes over; the first stands
+        down WITHOUT draining the queue, so feedback goes to the newest."""
+        opened = _open_session(server, project)
+        results = {}
+
+        def poll_a():
+            _, body = _get(server, f"/api/poll?project={project}&timeout_s=20")
+            results["a"] = json.loads(body)
+
+        ta = threading.Thread(target=poll_a, daemon=True)
+        ta.start()
+        time.sleep(0.4)                      # let poll A register
+
+        def poll_b():
+            _, body = _get(server, f"/api/poll?project={project}&timeout_s=20")
+            results["b"] = json.loads(body)
+
+        tb = threading.Thread(target=poll_b, daemon=True)
+        tb.start()
+        time.sleep(0.4)                      # A should be superseded by now
+        _post(server, f"/api/{opened['key']}/feedback", {"text": "for the new poll"})
+        ta.join(timeout=10)
+        tb.join(timeout=10)
+        assert results["a"]["status"] == "superseded"
+        assert results["b"]["status"] == "feedback"
+        assert results["b"]["items"][0]["text"] == "for the new poll"
+
+
+class TestAgentStatus:
+    def test_status_reaches_sse(self, server, project):
+        opened = _open_session(server, project)
+        events = []
+        done = threading.Event()
+
+        def reader():
+            req = urllib.request.Request(_url(server, f"/events/{opened['key']}"))
+            with urllib.request.urlopen(req, timeout=10) as r:
+                name = None
+                while len(events) < 3:
+                    line = r.readline().decode("utf-8").rstrip("\n")
+                    if line.startswith("event: "):
+                        name = line[len("event: "):]
+                    elif line.startswith("data: ") and name:
+                        events.append((name, json.loads(line[len("data: "):])))
+                        name = None
+            done.set()
+
+        threading.Thread(target=reader, daemon=True).start()
+        time.sleep(0.3)
+        status, body = _post(server, f"/api/{opened['key']}/agent-status",
+                             {"text": "recomputing the stitch plan…"})
+        assert body["status"] == "sent"
+        assert done.wait(10)
+        assert ("agent-status", {"text": "recomputing the stitch plan…"}) in events
+
+    def test_status_unknown_session_404(self, server):
+        status, body = _post(server, "/api/nope/agent-status", {"text": "x"})
+        assert status == 404
