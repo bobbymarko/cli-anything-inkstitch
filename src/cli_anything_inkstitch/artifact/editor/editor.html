@@ -199,6 +199,9 @@
   .rung.active { stroke: var(--accent); stroke-width: 2.4; }
   .zig { fill: none; stroke: var(--zig); stroke-width: .6; opacity: .75;
          vector-effect: non-scaling-stroke; pointer-events: none; }
+  .jumpLine { stroke: #8a8f9c; stroke-width: 1; stroke-dasharray: 4 3;
+              opacity: .55; vector-effect: non-scaling-stroke;
+              pointer-events: none; }
   .node { fill: var(--rail); stroke: #14161a; stroke-width: 1.5;
           vector-effect: non-scaling-stroke; cursor: grab; }
   .node.nodeActive { fill: var(--accent); stroke: #fff; }
@@ -607,11 +610,18 @@ function renderPlanLayer() {
   $("realCanvas").style.display = realOn ? "block" : "none";
   if (realOn) { drawRealistic(); return; }
   if (!planOn || !stitchData) return;
-  // stitches mode — hairline vectors
+  // stitches mode — hairline vectors; jumps/trims (needle-up travel between
+  // stitch sections) render dashed and muted so they read as machine moves,
+  // not thread
   let remaining = timelinePos == null ? Infinity : timelinePos;
   for (const block of stitchData.blocks) {
-    for (const pts of block.paths) {
+    for (let pi = 0; pi < block.paths.length; pi++) {
       if (remaining <= 0) return;
+      if (pi > 0 && block.jumps && block.jumps[pi - 1]) {
+        const [x1, y1, x2, y2] = block.jumps[pi - 1];
+        el("line", { x1, y1, x2, y2, class: "jumpLine" }, planLayer);
+      }
+      const pts = block.paths[pi];
       const take = Math.min(pts.length, remaining);
       remaining -= take;
       if (take < 2) continue;
@@ -645,8 +655,23 @@ function drawRealistic() {
   for (const block of stitchData.blocks) {
     const shadow = shade(block.color, -0.55);
     const sheen = shade(block.color, 0.55);
-    for (const pts of block.paths) {
+    for (let pi = 0; pi < block.paths.length; pi++) {
       if (remaining <= 0) return;
+      if (pi > 0 && block.jumps && block.jumps[pi - 1]) {
+        // needle-up travel: thin dashed gray, no thread body
+        const [jx1, jy1, jx2, jy2] = block.jumps[pi - 1];
+        ctx.save();
+        ctx.strokeStyle = "#8a8f9c";
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(jx1 * s + ox, jy1 * s + oy);
+        ctx.lineTo(jx2 * s + ox, jy2 * s + oy);
+        ctx.stroke();
+        ctx.restore();
+      }
+      const pts = block.paths[pi];
       const take = Math.min(pts.length, remaining);
       remaining -= take;
       if (take < 2) continue;

@@ -45,11 +45,17 @@ from cli_anything_inkstitch.svg.document import (
 from cli_anything_inkstitch.svg.elements import classify, element_summary
 
 # stitch_plan_preview args mirroring `preview generate` defaults
+# render-jumps=false is load-bearing: the engine's renderer
+# (lib/svg/rendering.py color_block_to_point_lists) SPLICES jumps into the
+# same polyline as stitches when rendering them, making travel visually
+# indistinguishable from stitching. With false, paths split at every jump —
+# so the gaps BETWEEN consecutive paths are exactly the jump/trim moves,
+# which extract_stitch_blocks surfaces explicitly.
 _PREVIEW_ARGS = {
     "render-mode": "simple",
     "needle-points": "false",
     "visual-commands": "false",
-    "render-jumps": "true",
+    "render-jumps": "false",
     "insensitive": "false",
 }
 
@@ -494,7 +500,12 @@ def extract_stitch_blocks(svg_bytes: bytes) -> dict[str, Any]:
                 paths.append(pts)
                 total += len(pts)
         if paths:
-            blocks.append({"color": color or "#000000", "paths": paths})
+            # paths split at needle-up moves (render-jumps=false), so each
+            # inter-path gap is a jump/trim travel segment
+            jumps = [[*paths[i - 1][-1], *paths[i][0]]
+                     for i in range(1, len(paths))]
+            blocks.append({"color": color or "#000000", "paths": paths,
+                           "jumps": jumps})
     return {"blocks": blocks, "total_stitches": total}
 
 

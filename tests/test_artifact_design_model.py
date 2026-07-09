@@ -248,6 +248,14 @@ class TestExtractStitchBlocks:
         assert result["blocks"][1]["color"] == "#D8D8D8"
         assert result["total_stitches"] == 8  # 3 + 2 + 3 vertices
 
+    def test_jumps_derived_from_path_gaps(self):
+        # with render-jumps=false the engine splits paths at needle-up moves,
+        # so inter-path gaps are exactly the jump/trim travel segments
+        from cli_anything_inkstitch.artifact.design_model import extract_stitch_blocks
+        result = extract_stitch_blocks(self.PLAN)
+        assert result["blocks"][0]["jumps"] == [[15.0, 10.0, 20.0, 10.0]]
+        assert result["blocks"][1]["jumps"] == []
+
     def test_scale_applied_translate_dropped(self):
         from cli_anything_inkstitch.artifact.design_model import extract_stitch_blocks
         result = extract_stitch_blocks(self.PLAN)
