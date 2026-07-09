@@ -28,9 +28,15 @@ def _style_dict(elem) -> dict[str, str]:
     return out
 
 
+# NOTE on precedence: the inline style attribute OUTRANKS presentation
+# attributes in the SVG cascade — a conversion that sets style="fill:none"
+# on an element still carrying fill="#..." means NO fill. inkex (which the
+# engine uses) computes style the same way; reading attr-first here made a
+# converted satin report a fill it doesn't have.
+
 def has_fill(elem) -> bool:
     style = _style_dict(elem)
-    fill = elem.get("fill") or style.get("fill")
+    fill = style.get("fill") or elem.get("fill")
     fill_opacity = style.get("fill-opacity") or elem.get("fill-opacity")
     if fill in (None, "", "none"):
         return False
@@ -44,7 +50,7 @@ def has_fill(elem) -> bool:
 
 def has_stroke(elem) -> bool:
     style = _style_dict(elem)
-    stroke = elem.get("stroke") or style.get("stroke")
+    stroke = style.get("stroke") or elem.get("stroke")
     if stroke in (None, "", "none"):
         return False
     return True
@@ -216,8 +222,8 @@ def element_summary(elem) -> dict:
     from cli_anything_inkstitch.svg.document import get_label
 
     style = _style_dict(elem)
-    fill = elem.get("fill") or style.get("fill")
-    stroke = elem.get("stroke") or style.get("stroke")
+    fill = style.get("fill") or elem.get("fill")
+    stroke = style.get("stroke") or elem.get("stroke")
     out = {
         "id": elem.get("id"),
         "tag": etree.QName(elem.tag).localname,

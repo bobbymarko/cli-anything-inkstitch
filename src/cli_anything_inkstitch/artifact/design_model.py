@@ -119,6 +119,21 @@ def _is_command_use(elem) -> bool:
     return "inkstitch_" in href
 
 
+def _is_command_plumbing(elem) -> bool:
+    """Command connectors and anything inside a command group are marker
+    infrastructure (svg/commands.py structure), not design objects — they
+    must not render, list, or count as stitchable elements."""
+    from cli_anything_inkstitch.svg.commands import CONNECTION_END, CONNECTION_START
+    if elem.get(CONNECTION_START) or elem.get(CONNECTION_END):
+        return True
+    parent = elem.getparent()
+    while parent is not None:
+        if (parent.get("id") or "").startswith("command_group_"):
+            return True
+        parent = parent.getparent()
+    return False
+
+
 def _param_meta_for(stitch_type: str, param_names) -> dict[str, dict]:
     """Typed control metadata for the editor inspector, from the param schema.
 
@@ -189,7 +204,7 @@ def read_design(project_file: str) -> dict[str, Any]:
             local = etree.QName(elem.tag).localname
             if local not in ("path", "rect", "circle", "ellipse", "line", "polygon", "polyline"):
                 continue
-            if _is_command_use(elem) or not elem.get("id"):
+            if _is_command_use(elem) or _is_command_plumbing(elem) or not elem.get("id"):
                 continue
             summary = element_summary(elem)
             stitch_type = summary["stitch_type"]

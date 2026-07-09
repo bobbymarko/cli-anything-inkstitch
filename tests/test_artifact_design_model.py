@@ -432,3 +432,30 @@ class TestElementLabel:
         design = read_design(project)
         fill = next(o for o in design["objects"] if o["id"] == "elem_fill")
         assert fill["label"] is None
+
+
+class TestCommandPlumbingFiltered:
+    def test_connectors_not_design_objects(self, project):
+        apply_edits(project, [{"op": "attach_command", "id": "elem_run",
+                               "command": "trim", "x": 28, "y": 20}])
+        design = read_design(project)
+        ids = [o["id"] for o in design["objects"]]
+        assert not any(i.startswith("command_connector_") for i in ids)
+        assert not any(i.startswith("command_use_") for i in ids)
+
+    def test_inline_style_beats_presentation_attr(self, tmp_path):
+        # a converted satin: style="fill:none" must beat leftover fill="#..."
+        svg = tmp_path / "design.svg"
+        svg.write_text(SVG.replace(
+            '<path id="elem_run" d="M2,20 L28,20" fill="none" stroke="#000000"/>',
+            '<path id="elem_run" d="M2,20 L28,20" fill="#ff0000" '
+            'style="fill:none;stroke:#000000"/>'))
+        proj_path = tmp_path / "design.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        design = read_design(str(proj_path))
+        run = next(o for o in design["objects"] if o["id"] == "elem_run")
+        assert run["fill"] is None
+        assert run["stroke"] == "#000000"
