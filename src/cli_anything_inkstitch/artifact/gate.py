@@ -336,6 +336,14 @@ def run_gate(project_file: str) -> dict[str, Any]:
             findings.extend(check_satin(obj, scale))
         elif obj["kind"] == "fill":
             findings.extend(check_fill(obj, scale))
+        for cmd in obj.get("commands", []):
+            if cmd.get("legacy"):
+                findings.append(_finding(
+                    "error", obj["id"], "inert_command",
+                    f"command marker '{cmd['command']}' is not connected to the "
+                    "element — Ink/Stitch silently ignores it (drag the handle "
+                    "in the editor or run `commands migrate` to fix)",
+                    command=cmd["command"], use_id=cmd.get("use_id")))
     errors = [f for f in findings if f["severity"] == "error"]
     warnings = [f for f in findings if f["severity"] == "warning"]
     return {"ok": not errors, "errors": errors, "warnings": warnings,

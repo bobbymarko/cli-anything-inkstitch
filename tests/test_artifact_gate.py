@@ -129,24 +129,36 @@ class TestSatinChecks:
 
 
 class TestFillChecks:
+    FILL = ('<path id="f" fill="#f17095" inkstitch:fill_method="auto_fill" '
+            'd="M30,15 L55,15 L55,35 L30,35 Z"/>')
+
+    def _with_start(self, tmp_path, x, y):
+        from cli_anything_inkstitch.artifact.design_model import apply_edits
+        project = make_project(tmp_path, self.FILL)
+        apply_edits(project, [{"op": "attach_command", "id": "f",
+                               "command": "starting_point", "x": x, "y": y}])
+        return project
+
     def test_far_start_handle_is_warning(self, tmp_path):
         # the sparkle-squad scenario: marker at document top-left, shape center-right
-        body = ('<path id="f" fill="#f17095" inkstitch:fill_method="auto_fill" '
-                'd="M30,15 L55,15 L55,35 L30,35 Z">'
-                '<use id="u1" xlink:href="#inkstitch_fill_start" x="2" y="2"/>'
-                '</path>')
-        result = run_gate(make_project(tmp_path, body))
+        result = run_gate(self._with_start(tmp_path, 2, 2))
         assert result["ok"] is True  # warning, not error
         w = [f for f in result["warnings"] if f["check"] == "start_handle_far"]
         assert w and w[0]["distance_mm"] > 10
 
     def test_on_shape_handle_passes(self, tmp_path):
+        result = run_gate(self._with_start(tmp_path, 31, 16))
+        assert result["warnings"] == []
+
+    def test_legacy_child_marker_is_inert_error(self, tmp_path):
         body = ('<path id="f" fill="#f17095" inkstitch:fill_method="auto_fill" '
                 'd="M30,15 L55,15 L55,35 L30,35 Z">'
                 '<use id="u1" xlink:href="#inkstitch_fill_start" x="31" y="16"/>'
                 '</path>')
         result = run_gate(make_project(tmp_path, body))
-        assert result["warnings"] == []
+        assert result["ok"] is False
+        e = [f for f in result["errors"] if f["check"] == "inert_command"]
+        assert e and e[0]["use_id"] == "u1"
 
 
 class TestGateCLI:

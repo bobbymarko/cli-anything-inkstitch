@@ -123,7 +123,8 @@ Attach and detach Ink/Stitch visual commands (stops, trims, ignores, fill start/
 | Command | Description |
 |---------|-------------|
 | `list` | Show all visual commands in the document, optionally filtered by `--id` |
-| `attach` | Attach a visual command to an element (`--command stop|trim|ignore|fill_start|fill_end|pause|satin_start|satin_end`) |
+| `attach` | Attach a visual command (`--command starting_point|ending_point|target_point|stop|trim|ignore_object|satin_cut_point|...` — engine names from `list-types`; legacy `fill_start`/`fill_end` map automatically). Writes the full engine structure: defs symbol + marker + connector. |
+| `migrate` | Upgrade legacy bare-`<use>` markers (which the engine silently ignores) to the connector structure it honors |
 | `detach` | Detach all matching visual commands from an element |
 | `list-types` | List all visual command types this Ink/Stitch install supports |
 
@@ -457,7 +458,7 @@ When using this CLI programmatically:
 18. **Illustrator SVGs often have no physical size.** A bare `viewBox` with no `width`/`height` is interpreted by inkstitch as pixels at 96 dpi — a 300×300 viewBox unit design will digitize as ~79mm, not 300mm. Always check `document info` → `root_attrib` for explicit `width`/`height`. If absent, add them (e.g. `width="304.8mm"`) before assigning any params, or the output size will be wrong.
 19. **SVG element order is stitch order. Scattered elements cause long jumps.** Decorative elements (sparkles, dots, scattered accents) that appear in arbitrary document order will be stitched in that order, zigzagging across the design and producing long jump stitches. Reorder them geographically — a clockwise sweep, or left-to-right — so each sequential jump is short. Visible in `stitch-sim` output as long dashed lines crossing the design.
 20. **Compound paths with holes create fill travel stitches.** If an `auto_fill` element has cutout holes (eyes, smile, counters), inkstitch must navigate around each hole with travel stitches on every row that intersects it. Two clean solutions: (a) **`contour_fill`** — traces the outline spiraling inward, no row-by-row interruptions, good for organic shapes; creates visible concentric-line texture. (b) **Split the holes into separate elements** with a contrasting thread color stitched on top after the main fill — the main shape becomes a clean solid fill, and the face/counter features become second-color shapes that cover it.
-21. **`fill_start` placement controls sweep direction, not just entry point.** The fill sweeps from the `fill_start` marker edge toward `fill_end`. For shapes where a single fill angle creates disconnected row sections (e.g., star tips, concave indentations), place `fill_start` at the topmost (or leading) point of the shape so the narrow extremity is stitched first and naturally connects into the widening body below — rather than being discovered mid-sweep as an isolated island requiring a jump. Use `commands attach --command fill_start --at-x <mm> --at-y <mm>` positioned at the element's bounding box edge.
+21. **`starting_point` placement controls fill entry and chaining.** The fill routes from the `starting_point` command toward `ending_point`. For shapes where a single fill angle creates disconnected row sections (e.g., star tips, concave indentations), place `fill_start` at the topmost (or leading) point of the shape so the narrow extremity is stitched first and naturally connects into the widening body below — rather than being discovered mid-sweep as an isolated island requiring a jump. Use `commands attach --command starting_point --at-x <x> --at-y <y>` (user units) on the shape's boundary; `ending_point` controls the exit. Verify with a stitch-plan diff — if moving the marker doesn't change the plan, the command isn't reaching the engine.
 22. **After any direct SVG edit outside the CLI, re-open with `--force`.** If you manipulate the SVG with Python/lxml directly (splitting compound paths, reordering elements, adding new elements), the project's stored SHA-256 will mismatch and the CLI will refuse to mutate. Resync with: `document open --project $PROJ --svg $SVG --force`.
 
 
@@ -482,7 +483,7 @@ cli-anything-inkstitch preview stitch-sim \
 
 If you see long jumps between scattered elements → reorder them in SVG document order geographically.
 If you see travel curves inside a fill → the element has compound-path holes; use `contour_fill` or split the holes into a separate color.
-If you see disconnected fill sections at a shape tip → move `fill_start` to that tip so it's stitched first.
+If you see disconnected fill sections at a shape tip → move the `starting_point` command to that tip so it's stitched first.
 
 
 ### Import an embroidery font

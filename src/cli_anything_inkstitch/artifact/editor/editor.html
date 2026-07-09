@@ -1114,8 +1114,14 @@ function startDrag(ev, desc) {
       deg = ((deg + 90) % 180 + 180) % 180 - 90;   // normalize to (-90, 90]
       desc.obj.params.angle = String(deg);
     } else if (desc.type === "handle") {
+      // start/end handles are constrained to the shape's outline: the engine
+      // stitches from/to boundary positions, so a free-floating handle is a
+      // lie — snap the pointer to the nearest boundary point while dragging
       const h = desc.obj[desc.role];
-      h.x += dx; h.y += dy;
+      if (!desc.boundary) desc.boundary = flatten(tokenizePath(desc.obj.d));
+      const snapped = nearestOnPoly(desc.boundary, p.x, p.y);
+      if (snapped) { h.x = snapped[0]; h.y = snapped[1]; }
+      else { h.x += dx; h.y += dy; }
     } else if (desc.type === "fill-node") {
       moveAnchor(desc.segs, desc.anchor, dx, dy);
       desc.obj.d = serializePath(desc.segs);

@@ -459,6 +459,53 @@ def assemble_schema(classes: dict[str, dict], version: str) -> dict:
     }
 
 
+def extract_commands(source_root: Path) -> list[dict] | None:
+    """Mine the engine's real command registry (COMMANDS + scope lists) from
+    lib/commands.py. Returns None when the file can't be parsed — the caller
+    keeps the bootstrap list rather than shipping an empty one.
+
+    The bootstrap list predates this and contained invented names
+    (fill_start/fill_end); the engine's actual commands are starting_point/
+    ending_point/etc.
+    """
+    path = Path(source_root) / "lib" / "commands.py"
+    if not path.is_file():
+        return None
+    try:
+        tree = ast.parse(path.read_text(), filename=str(path))
+    except SyntaxError:
+        return None
+    registry: dict[str, str] = {}
+    scopes: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        name = getattr(node.targets[0], "id", "")
+        if name == "COMMANDS" and isinstance(node.value, ast.Dict):
+            for k, v in zip(node.value.keys, node.value.values):
+                if not isinstance(k, ast.Constant):
+                    continue
+                desc = ""
+                if (isinstance(v, ast.Call) and v.args
+                        and isinstance(v.args[0], ast.Constant)):
+                    desc = str(v.args[0].value)   # N_("...") wrapper
+                elif isinstance(v, ast.Constant):
+                    desc = str(v.value)
+                registry[str(k.value)] = desc
+        elif name in ("OBJECT_COMMANDS", "LAYER_COMMANDS", "GLOBAL_COMMANDS") \
+                and isinstance(node.value, ast.List):
+            scopes[name] = [e.value for e in node.value.elts
+                            if isinstance(e, ast.Constant)]
+    if not registry:
+        return None
+    scope_of = {}
+    for scope_name, members in scopes.items():
+        for m in members:
+            scope_of[m] = scope_name.replace("_COMMANDS", "").lower()
+    return [{"name": n, "description": d, "scope": scope_of.get(n, "object")}
+            for n, d in registry.items()]
+
+
 def extract_schema(source_root: Path | None = None) -> dict:
     """Top-level: locate inkstitch source, AST-extract, assemble schema."""
     root = source_root or find_inkstitch_source()
@@ -471,6 +518,9 @@ def extract_schema(source_root: Path | None = None) -> dict:
         raise RuntimeError(f"no @param decorators found under {root}")
     version = detect_inkstitch_version(root)
     schema = assemble_schema(classes, version)
+    commands = extract_commands(root)
+    if commands:
+        schema["commands"] = commands
     schema["source"]["root"] = str(root)
     return schema
 

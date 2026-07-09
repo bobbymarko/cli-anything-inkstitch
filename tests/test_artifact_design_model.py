@@ -81,8 +81,12 @@ class TestReadDesign:
     def test_fill_start_end_handles(self, project):
         design = read_design(project)
         fill = next(o for o in design["objects"] if o["id"] == "elem_fill")
-        assert fill["start"] == {"x": 2.5, "y": 2.5, "use_id": "use_start"}
-        assert fill["end"] == {"x": 13.5, "y": 13.5, "use_id": "use_end"}
+        # bare child <use> markers are the legacy (engine-ignored) format —
+        # they still display, flagged legacy, until a move migrates them
+        assert fill["start"] == {"x": 2.5, "y": 2.5, "use_id": "use_start",
+                                 "legacy": True}
+        assert fill["end"] == {"x": 13.5, "y": 13.5, "use_id": "use_end",
+                               "legacy": True}
 
     def test_params_exposed(self, project):
         design = read_design(project)

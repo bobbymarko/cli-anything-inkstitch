@@ -21,7 +21,14 @@ from typing import Any
 from lxml import etree
 
 from cli_anything_inkstitch.errors import ProjectError, UserError
-from cli_anything_inkstitch.history import attr_diff, make_entry, node_delete, node_insert, push
+from cli_anything_inkstitch.history import (
+    attr_diff,
+    make_entry,
+    node_delete,
+    node_insert,
+    push,
+    subtree_replace,
+)
 from cli_anything_inkstitch.project import ProjectFile, project_lock
 from cli_anything_inkstitch.svg.attrs import (
     SVG_NS,
@@ -91,19 +98,12 @@ def _kind_for(stitch_type: str) -> str:
     return "other"
 
 
-def _command_uses(elem) -> list[dict[str, Any]]:
-    """Visual-command <use> children of an element (fill_start, fill_end, ...)."""
-    out = []
-    for child in elem.findall(f"{{{SVG_NS}}}use"):
-        href = child.get(f"{{{XLINK_NS}}}href") or child.get("href") or ""
-        if "inkstitch_" in href:
-            out.append({
-                "use_id": child.get("id"),
-                "command": href.split("#")[-1].removeprefix("inkstitch_"),
-                "x": float(child.get("x") or 0),
-                "y": float(child.get("y") or 0),
-            })
-    return out
+def _command_uses(tree, elem) -> list[dict[str, Any]]:
+    """The element's visual commands: real connector-attached ones (what the
+    engine honors) plus legacy bare-child markers (flagged legacy: the engine
+    ignores those; a drag in the editor migrates them)."""
+    from cli_anything_inkstitch.svg.commands import find_commands, find_legacy_markers
+    return find_commands(tree, elem) + find_legacy_markers(elem)
 
 
 def _is_command_use(elem) -> bool:
@@ -197,7 +197,7 @@ def read_design(project_file: str) -> dict[str, Any]:
                 "fill": summary["fill"],
                 "stroke": summary["stroke"],
                 "params": dict(iter_inkstitch_attrs(elem)),
-                "commands": _command_uses(elem),
+                "commands": _command_uses(tree, elem),
             }
             obj["param_meta"] = _param_meta_for(stitch_type, obj["params"])
             if kind == "satin" and elem.get("d"):
@@ -205,11 +205,16 @@ def read_design(project_file: str) -> dict[str, Any]:
                 obj["rails"] = subpaths[:2]
                 obj["rungs"] = subpaths[2:]
             if kind == "fill":
+                # engine names first; legacy invented names still display so
+                # old designs show their (inert) markers until migrated
                 for cmd in obj["commands"]:
-                    if cmd["command"] == "fill_start":
-                        obj["start"] = {"x": cmd["x"], "y": cmd["y"], "use_id": cmd["use_id"]}
-                    elif cmd["command"] == "fill_end":
-                        obj["end"] = {"x": cmd["x"], "y": cmd["y"], "use_id": cmd["use_id"]}
+                    name = cmd["command"]
+                    entry = {"x": cmd["x"], "y": cmd["y"], "use_id": cmd["use_id"],
+                             **({"legacy": True} if cmd.get("legacy") else {})}
+                    if name in ("starting_point", "fill_start"):
+                        obj["start"] = entry
+                    elif name in ("ending_point", "fill_end"):
+                        obj["end"] = entry
             objects.append(obj)
         return {
             "svg_path": proj.svg_path,
@@ -321,49 +326,79 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
         return {"op": name, "id": op["id"]}
 
     if name == "move_command":
+        from cli_anything_inkstitch.svg import commands as vc
         use = _find_use(tree, op["use_id"])
-        before = {"x": use.get("x"), "y": use.get("y")}
-        use.set("x", str(op["x"]))
-        use.set("y", str(op["y"]))
-        push(proj.history, make_entry(
-            command=f"artifact edit move_command --use-id {op['use_id']}",
-            patch=attr_diff(_xpath(op["use_id"]), before,
-                            {"x": use.get("x"), "y": use.get("y")})))
-        return {"op": name, "use_id": op["use_id"]}
+        group = use.getparent()
+        real = (etree.QName(group.tag).localname == "g"
+                and (group.get("id") or "").startswith("command_group_"))
+        if real:
+            before_xml = etree.tostring(group).decode()
+            result = vc.move_command(tree, op["use_id"], float(op["x"]), float(op["y"]))
+            push(proj.history, make_entry(
+                command=f"artifact edit move_command --use-id {op['use_id']}",
+                patch=subtree_replace(_xpath(group.get("id")), before_xml,
+                                      etree.tostring(group).decode())))
+        else:
+            # legacy bare-child marker: migrating it to the engine-recognized
+            # connector structure IS the move (two history entries)
+            elem = group
+            index = list(elem).index(use)
+            before_xml = etree.tostring(use).decode()
+            result = vc.move_command(tree, op["use_id"], float(op["x"]), float(op["y"]))
+            push(proj.history, make_entry(
+                command=f"artifact edit move_command --use-id {op['use_id']} (remove legacy)",
+                patch=node_delete(parent_xpath=_xpath(elem.get("id")), index=index,
+                                  before_xml=before_xml)))
+            new_group = result.pop("group")
+            parent = new_group.getparent()
+            _ensure_id(parent)
+            push(proj.history, make_entry(
+                command=f"artifact edit move_command --use-id {op['use_id']} (migrate)",
+                patch=node_insert(parent_xpath=_xpath(parent.get("id")),
+                                  index=list(parent).index(new_group),
+                                  after_xml=etree.tostring(new_group).decode())))
+        result.pop("group", None)
+        return {"op": name, **result}
 
     if name == "attach_command":
-        import secrets
+        from cli_anything_inkstitch.svg import commands as vc
         elem = find_by_id(tree, op["id"])
         if elem is None:
             raise UserError(f"no element with id={op['id']!r}")
-        use = etree.SubElement(elem, f"{{{SVG_NS}}}use")
-        use.set(f"{{{XLINK_NS}}}href", f"#inkstitch_{op['command']}")
-        use.set("id", f"use_{secrets.token_hex(3)}")
-        if op.get("x") is not None:
-            use.set("x", str(op["x"]))
-        if op.get("y") is not None:
-            use.set("y", str(op["y"]))
-        index = list(elem).index(use)
+        result = vc.attach_command(tree, elem, str(op["command"]),
+                                   float(op.get("x") or 0), float(op.get("y") or 0))
+        group = result.pop("group")
+        parent = group.getparent()
+        _ensure_id(parent)
         push(proj.history, make_entry(
-            command=f"artifact edit attach_command --id {op['id']} --command {op['command']}",
-            patch=node_insert(parent_xpath=_xpath(op["id"]), index=index,
-                              after_xml=etree.tostring(use).decode())))
-        return {"op": name, "id": op["id"], "use_id": use.get("id")}
+            command=f"artifact edit attach_command --id {op['id']} --command {result['command']}",
+            patch=node_insert(parent_xpath=_xpath(parent.get("id")),
+                              index=list(parent).index(group),
+                              after_xml=etree.tostring(group).decode())))
+        return {"op": name, "id": op["id"], **result}
 
     if name == "detach_command":
-        use = _find_use(tree, op["use_id"])
-        parent = use.getparent()
-        index = list(parent).index(use)
-        before_xml = etree.tostring(use).decode()
-        parent_id = parent.get("id")
-        parent.remove(use)
+        from cli_anything_inkstitch.svg import commands as vc
+        use = _find_use(tree, op["use_id"])         # validates existence
+        container_probe = use.getparent()
+        container = (container_probe.getparent()
+                     if (container_probe.get("id") or "").startswith("command_group_")
+                     else container_probe)
+        _ensure_id(container)
+        result = vc.detach_command(tree, op["use_id"])
         push(proj.history, make_entry(
             command=f"artifact edit detach_command --use-id {op['use_id']}",
-            patch=node_delete(parent_xpath=_xpath(parent_id), index=index,
-                              before_xml=before_xml)))
+            patch=node_delete(parent_xpath=_xpath(result["parent_id"]),
+                              index=result["index"], before_xml=result["xml"])))
         return {"op": name, "use_id": op["use_id"]}
 
     raise UserError(f"unknown edit op: {name!r}")
+
+
+def _ensure_id(elem) -> None:
+    if not elem.get("id"):
+        import secrets
+        elem.set("id", f"g_{secrets.token_hex(3)}")
 
 
 def apply_edits(project_file: str, ops: list[dict[str, Any]]) -> dict[str, Any]:

@@ -161,7 +161,7 @@ Eight groups, mirroring the inkscape skill's structure where applicable.
 | `document` | open/save/info; document-wide settings (hoop, units, target machine, palette) |
 | `element` | enumerate, inspect, identify SVG elements; clear params |
 | `params` | **the core group** — set stitch type, set/get individual params, copy params |
-| `commands` | attach/detach visual commands (`stop`, `trim`, `ignore`, `fill_start`, `fill_end`) |
+| `commands` | attach/detach visual commands (`starting_point`, `ending_point`, `trim`, `stop`, ... — engine names; `fill_start`/`fill_end` accepted as legacy aliases) |
 | `tools` | invoke binary-side rewrites: auto-satin, stroke↔satin, flip-satin, auto-route, break-apart |
 | `validate` | run troubleshoot extension; static checks (missing required params, unsupported attrs) |
 | `preview` | invoke `stitch_plan_preview`; return stats + path to rendered SVG |
@@ -276,7 +276,7 @@ When `--stitch-type` is set, the implementation:
 
 ### 2.7 `commands` group
 
-Visual commands are SVG `<use>` elements whose `xlink:href` points to an `<svg:symbol>` defined under `<defs>` (`#inkstitch_stop`, `#inkstitch_trim`, `#inkstitch_ignore`, `#inkstitch_fill_start`, `#inkstitch_fill_end`, plus less-common ones: `#inkstitch_pause`, `#inkstitch_satin_start`, `#inkstitch_satin_end`).
+Visual commands use the structure Ink/Stitch's `find_commands` actually reads: a marker `<use xlink:href="#inkstitch_<command>">` plus a **connector path** whose `inkscape:connection-start`/`inkscape:connection-end` link the marker to the target element, with the symbol present under `<defs>`. Command names come from the engine's registry (`starting_point`, `ending_point`, `target_point`, `stop`, `trim`, `ignore_object`, `satin_cut_point`, ...), mined into the schema. A bare `<use>` child without a connector is silently ignored by the engine — the gate flags these as `inert_command` and `commands migrate` upgrades them.
 
 ```
 commands list     --project <abs>  [--id <svg-id>]               # all visual commands; or just on one element
