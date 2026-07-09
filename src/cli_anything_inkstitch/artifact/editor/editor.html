@@ -186,6 +186,7 @@
          vector-effect: non-scaling-stroke; pointer-events: none; }
   .node { fill: var(--rail); stroke: #14161a; stroke-width: 1.5;
           vector-effect: non-scaling-stroke; cursor: grab; }
+  .node.nodeActive { fill: var(--accent); stroke: #fff; }
   .rungNode { fill: var(--rung); stroke: #14161a; stroke-width: 1.5;
               vector-effect: non-scaling-stroke; cursor: grab; }
   .handle { stroke: #14161a; stroke-width: 1.5; vector-effect: non-scaling-stroke;
@@ -282,6 +283,7 @@ let design = null;              // /design payload
 let selection = [];             // selected object ids (Illustrator model:
                                 // click replaces, shift-click adds/removes)
 let activeRung = null;          // {objId, index} — rung targeted for Delete
+let activeNode = null;          // {objId, index} — fill boundary node targeted for Delete
 let vb = null;                  // current viewBox {x,y,w,h}
 let baseVb = null;
 let dragging = null;            // active drag descriptor
@@ -352,6 +354,86 @@ function anchors(segs) {
     else if (s.c === "C") out.push({ si, x: s.p[4], y: s.p[5] });
   });
   return out;
+}
+/* segment-index ranges per subpath (each starting at its M) */
+function subpathRanges(segs) {
+  const ranges = [];
+  segs.forEach((s, i) => {
+    if (s.c === "M") ranges.push({ start: i, end: i });
+    else if (ranges.length) ranges[ranges.length - 1].end = i;
+  });
+  return ranges;
+}
+/* remove anchor ai, rejoining its neighbours (Illustrator delete-anchor:
+   the path stays closed). Refuses when the subpath would drop below 3
+   anchors. Returns true if the segs were changed. */
+function deleteAnchor(segs, ai) {
+  const as = anchors(segs);
+  const a = as[ai];
+  if (!a) return false;
+  const r = subpathRanges(segs).find(rr => a.si >= rr.start && a.si <= rr.end);
+  const inSub = as.filter(x => x.si >= r.start && x.si <= r.end).length;
+  if (inSub <= 3) return false;
+  const seg = segs[a.si];
+  if (seg.c === "M") {
+    // subpath start: promote the first segment's endpoint to be the new M
+    const next = segs[a.si + 1];
+    if (!next || (next.c !== "L" && next.c !== "C")) return false;
+    seg.p = [next.p[next.p.length - 2], next.p[next.p.length - 1]];
+    segs.splice(a.si + 1, 1);
+  } else {
+    segs.splice(a.si, 1);
+  }
+  return true;
+}
+/* start point of segment si (walking prior segments) */
+function segStart(segs, si) {
+  let cx = 0, cy = 0, mx = 0, my = 0;
+  for (let i = 0; i < si; i++) {
+    const s = segs[i];
+    if (s.c === "M") { cx = mx = s.p[0]; cy = my = s.p[1]; }
+    else if (s.c === "Z") { cx = mx; cy = my; }
+    else { cx = s.p[s.p.length - 2]; cy = s.p[s.p.length - 1]; }
+  }
+  return [cx, cy];
+}
+/* nearest (segment, t) on the path to a point — for add-node */
+function nearestSegT(segs, x, y) {
+  let best = null;
+  segs.forEach((s, si) => {
+    if (s.c === "M" || s.c === "Z") return;
+    const [ax, ay] = segStart(segs, si);
+    for (let k = 1; k <= 16; k++) {
+      const t = k / 17;             // interior samples only, never t=0/1
+      let pt;
+      if (s.c === "L") {
+        pt = [ax + (s.p[0] - ax) * t, ay + (s.p[1] - ay) * t];
+      } else {
+        const [x1, y1, x2, y2, xe, ye] = s.p, u = 1 - t;
+        pt = [u*u*u*ax + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*xe,
+              u*u*u*ay + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*ye];
+      }
+      const d = Math.hypot(x - pt[0], y - pt[1]);
+      if (!best || d < best.d) best = { si, t, d };
+    }
+  });
+  return best;
+}
+/* split segment si at parameter t — exact shape-preserving (de Casteljau) */
+function splitSegment(segs, si, t) {
+  const A = segStart(segs, si);
+  const s = segs[si];
+  const lp = (p, q) => [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+  if (s.c === "L") {
+    segs.splice(si, 0, { c: "L", p: lp(A, s.p) });
+  } else if (s.c === "C") {
+    const c1 = [s.p[0], s.p[1]], c2 = [s.p[2], s.p[3]], B = [s.p[4], s.p[5]];
+    const c1a = lp(A, c1), m = lp(c1, c2), c2b = lp(c2, B);
+    const c11 = lp(c1a, m), c22 = lp(m, c2b), P = lp(c11, c22);
+    segs.splice(si, 1,
+      { c: "C", p: [...c1a, ...c11, ...P] },
+      { c: "C", p: [...c22, ...c2b, ...B] });
+  }
 }
 /* move anchor `ai` by (dx,dy), dragging adjacent bezier control points along */
 function moveAnchor(segs, ai, dx, dy) {
@@ -902,9 +984,18 @@ function renderSatin(o) {
 }
 function renderFill(o) {
   el("path", { d: o.d, class: "fillBoundary" }, editLayer);
+  // boundary anchor nodes — drag to reshape, click + Delete to remove
+  const boundarySegs = tokenizePath(o.d);
+  anchors(boundarySegs).forEach((a, ai) => {
+    const isActive = activeNode && activeNode.objId === o.id && activeNode.index === ai;
+    const c = el("circle", { cx: a.x, cy: a.y, r: px(isActive ? 6 : 4.5),
+                             class: "node" + (isActive ? " nodeActive" : "") }, editLayer);
+    c.addEventListener("pointerdown", (ev) =>
+      startDrag(ev, { type: "fill-node", obj: o, anchor: ai, segs: boundarySegs }));
+  });
   // fill-angle handle: dashed line through the bbox centre with a knob —
   // drag the knob around the centre to rotate the fill angle
-  const flatsAll = flatten(tokenizePath(o.d));
+  const flatsAll = flatten(boundarySegs);
   if (flatsAll.length) {
     const xs = flatsAll.map(p => p[0]), ys = flatsAll.map(p => p[1]);
     const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
@@ -942,6 +1033,7 @@ const byId = (id) => design.objects.find(x => x.id === id);
 function setSelection(ids) {
   selection = [...new Set(ids)].filter(id => byId(id));
   activeRung = null;
+  activeNode = null;
   renderPills();
   renderEditLayer();
 }
@@ -993,6 +1085,9 @@ function startDrag(ev, desc) {
     } else if (desc.type === "handle") {
       const h = desc.obj[desc.role];
       h.x += dx; h.y += dy;
+    } else if (desc.type === "fill-node") {
+      moveAnchor(desc.segs, desc.anchor, dx, dy);
+      desc.obj.d = serializePath(desc.segs);
     } else if (desc.type === "rail-node") {
       moveAnchor(desc.segs[desc.rail], desc.anchor, dx, dy);
       desc.obj.rails[desc.rail] = serializePath(desc.segs[desc.rail]);
@@ -1006,7 +1101,16 @@ function startDrag(ev, desc) {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     dragging = null;
-    if (!movedAny) { renderEditLayer(); return; }   // click, not a drag — no edit
+    if (!movedAny) {
+      // click, not a drag — for fill nodes this targets the node for Delete
+      if (desc.type === "fill-node") {
+        const same = activeNode && activeNode.objId === desc.obj.id &&
+                     activeNode.index === desc.anchor;
+        activeNode = same ? null : { objId: desc.obj.id, index: desc.anchor };
+      }
+      renderEditLayer();
+      return;
+    }
     try {
       if (desc.type === "angle") {
         renderEditLayer();                       // drop the live degree label
@@ -1016,6 +1120,8 @@ function startDrag(ev, desc) {
         const h = desc.obj[desc.role];
         await postEdit([{ op: "move_command", use_id: desc.use_id,
                           x: fmt(h.x), y: fmt(h.y) }]);
+      } else if (desc.type === "fill-node") {
+        await postEdit([{ op: "set_path", id: desc.obj.id, d: desc.obj.d }]);
       } else {
         await postEdit([{ op: "set_path", id: desc.obj.id, d: satinD(desc.obj) }]);
       }
@@ -1025,7 +1131,30 @@ function startDrag(ev, desc) {
   window.addEventListener("pointerup", up);
 }
 const satinD = (o) => [...o.rails, ...o.rungs].join(" ");
+async function deleteFillNode(o, ai) {
+  const segs = tokenizePath(o.d);
+  if (!deleteAnchor(segs, ai)) {
+    showToast("can't remove — the boundary needs at least 3 nodes", true);
+    renderEditLayer();
+    return;
+  }
+  o.d = serializePath(segs);
+  renderEditLayer();
+  await postEdit([{ op: "set_path", id: o.id, d: o.d }]);
+}
+async function addFillNode(o, ev) {
+  const p = clientToSvg(ev);
+  const segs = tokenizePath(o.d);
+  const hit = nearestSegT(segs, p.x, p.y);
+  if (!hit) return;
+  splitSegment(segs, hit.si, hit.t);
+  o.d = serializePath(segs);
+  activeNode = null;
+  renderEditLayer();
+  await postEdit([{ op: "set_path", id: o.id, d: o.d }]);
+}
 async function addRung(o, ev) {
+  if (o.kind === "fill") return addFillNode(o, ev);
   if (o.kind !== "satin") return;
   const p = clientToSvg(ev);
   const a = nearestOnPoly(flatten(tokenizePath(o.rails[0])), p.x, p.y);
@@ -1075,6 +1204,11 @@ document.addEventListener("keydown", (ev) => {
     const idx = activeRung.index;
     activeRung = null;
     if (o) deleteRung(o, idx);
+  } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeNode) {
+    const o = byId(activeNode.objId);
+    const idx = activeNode.index;
+    activeNode = null;
+    if (o) deleteFillNode(o, idx);
   } else if (mod && ev.shiftKey && k === "a") {
     ev.preventDefault(); setSelection([]);
   } else if (mod && k === "a") {
@@ -1298,9 +1432,10 @@ const HELP = [
     [`${MOD_LABEL}0 / ${MOD_LABEL}1`, "fit in window / actual size"],
   ]],
   ["Editing", [
-    ["Drag nodes, rungs, handles", "reshape rails, move fill start/end"],
+    ["Drag nodes, rungs, handles", "reshape rails and fill boundaries, move fill start/end"],
     ["Double-click a satin", "add a rung at that spot"],
-    [`Click a rung, then ${DEL}`, "delete the rung"],
+    ["Double-click a fill", "add a boundary node at the nearest point"],
+    [`Click a rung or node, then ${DEL}`, "delete it (boundaries stay closed)"],
     ["Inspector values", "click to edit; Enter commits, Esc reverts"],
     [`${MOD_LABEL}Z / ${MOD_LABEL}⇧Z`, "undo / redo (shared with the agent's history)"],
   ]],
