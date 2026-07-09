@@ -2,6 +2,40 @@
 
 Stateful CLI for machine-embroidery digitization with Ink/Stitch — writes `inkstitch:*` XML attributes onto SVG elements, then delegates stitch generation / preview / export to the Ink/Stitch binary.
 
+## Engine contract discipline (non-negotiable)
+
+This tool's entire value is fidelity to the Ink/Stitch engine, and the engine
+**fails silent**: invalid attr values, unknown command names, and unconnected
+markers produce a perfectly valid stitch file that quietly ignores them. We
+shipped three such bugs (invented `fill_start`/`fill_end` command names, a
+command `<use>` structure the engine never reads, GUI-label dropdown values
+where the engine stores indexes) — all plausible, all invisible to exit codes,
+stitch counts, and our own unit tests. The engine source is checked out at
+`./inkstitch` (also the schema-extraction source). Rules:
+
+1. **No write without a read.** Before writing anything the engine consumes —
+   attr names/values, XML structures, metadata keys, command names — find the
+   engine-side READER in `./inkstitch/lib/` and cite it (file + symbol) in a
+   code comment. If you cannot find the reader, stop and say so; do not
+   interpolate a plausible format. Good examples: `svg/document.py` metadata
+   helpers (cites `lib/metadata.py`), `svg/commands.py` (cites
+   `lib/commands.py find_commands`).
+2. **Enumerable engine facts are mined, never hand-written.** Params, command
+   names, dropdown options and their value encodings come from
+   `schema/extract.py` AST extraction. A hand-maintained list of engine facts
+   is a bug (the bootstrap command list was one).
+3. **Behavioral proof, not success signals.** Engine-facing changes ship with
+   a differential test: drive the input two ways and assert the stitch plans
+   differ (or are identical when they must be). Templates:
+   `tests/test_extractor.py::TestEngineReadContract` (declared type vs read
+   contract) and `tests/test_svg_commands.py::TestCommandsChangeStitchPlan`
+   (marker moves must change the plan). Binary-backed tests use the
+   `discover() is None` skipif pattern.
+4. **Verify by looking, not counting.** For geometry/visual output, check the
+   produced stitch geometry (segment-length distributions, rendered plan)
+   or a screenshot — a plausible stitch count proved nothing when a satin's
+   zigzag swept across the whole shape.
+
 ## Running tests
 
 ```bash
