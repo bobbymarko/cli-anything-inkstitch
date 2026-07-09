@@ -194,8 +194,10 @@ def read_design(project_file: str) -> dict[str, Any]:
             summary = element_summary(elem)
             stitch_type = summary["stitch_type"]
             kind = _kind_for(stitch_type)
+            from cli_anything_inkstitch.svg.commands import INKSCAPE_LABEL
             obj: dict[str, Any] = {
                 "id": elem.get("id"),
+                "label": elem.get(INKSCAPE_LABEL),
                 "kind": kind,
                 "stitch_type": stitch_type,
                 "tag": local,
@@ -292,19 +294,23 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
         # plain (non-inkstitch) presentation attrs — needed for conversions
         # like fill→satin where the element must become a stroke element.
         # Whitelisted: this op must not become a generic XML escape hatch.
-        allowed = {"fill", "stroke", "stroke-width", "style", "opacity"}
+        # "label" maps to inkscape:label — the human-friendly display name
+        # (ids stay stable; connectors and history reference them).
+        from cli_anything_inkstitch.svg.commands import INKSCAPE_LABEL
+        allowed = {"fill", "stroke", "stroke-width", "style", "opacity", "label"}
         attr = str(op["name"])
         if attr not in allowed:
             raise UserError(
                 f"set_svg_attr: {attr!r} not allowed (one of {sorted(allowed)})")
+        key = INKSCAPE_LABEL if attr == "label" else attr
         elem = find_by_id(tree, op["id"])
         if elem is None:
             raise UserError(f"no element with id={op['id']!r}")
-        before = {attr: elem.get(attr)}
-        elem.set(attr, str(op["value"]))
+        before = {key: elem.get(key)}
+        elem.set(key, str(op["value"]))
         push(proj.history, make_entry(
             command=f"artifact edit set_svg_attr --id {op['id']} {attr}={op['value']}",
-            patch=attr_diff(_xpath(op["id"]), before, {attr: elem.get(attr)})))
+            patch=attr_diff(_xpath(op["id"]), before, {key: elem.get(key)})))
         return {"op": name, "id": op["id"], "name": attr}
 
     if name == "del_attr":
@@ -397,6 +403,33 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
             patch=node_delete(parent_xpath=_xpath(result["parent_id"]),
                               index=result["index"], before_xml=result["xml"])))
         return {"op": name, "use_id": op["use_id"]}
+
+    if name == "delete_element":
+        from cli_anything_inkstitch.svg import commands as vc
+        elem = find_by_id(tree, op["id"])
+        if elem is None:
+            raise UserError(f"no element with id={op['id']!r}")
+        # attached command groups reference the element by id — remove them
+        # first so no dangling connectors survive (each its own undo step)
+        removed_commands = 0
+        for cmd in vc.find_commands(tree, elem):
+            result = vc.detach_command(tree, cmd["use_id"])
+            push(proj.history, make_entry(
+                command=f"artifact edit delete_element --id {op['id']} "
+                        f"(detach {cmd['command']})",
+                patch=node_delete(parent_xpath=_xpath(result["parent_id"]),
+                                  index=result["index"], before_xml=result["xml"])))
+            removed_commands += 1
+        parent = elem.getparent()
+        _ensure_id(parent)
+        index = list(parent).index(elem)
+        before_xml = etree.tostring(elem).decode()
+        parent.remove(elem)
+        push(proj.history, make_entry(
+            command=f"artifact edit delete_element --id {op['id']}",
+            patch=node_delete(parent_xpath=_xpath(parent.get("id")),
+                              index=index, before_xml=before_xml)))
+        return {"op": name, "id": op["id"], "removed_commands": removed_commands}
 
     raise UserError(f"unknown edit op: {name!r}")
 

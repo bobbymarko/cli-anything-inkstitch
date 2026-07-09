@@ -387,3 +387,48 @@ class TestSetSvgAttr:
                 {"op": "set_svg_attr", "id": "elem_fill", "name": "onclick",
                  "value": "alert(1)"},
             ])
+
+
+class TestDeleteElement:
+    def test_deletes_element_and_attached_commands(self, project):
+        # attach a real command first so deletion must cascade
+        r = apply_edits(project, [{"op": "attach_command", "id": "elem_run",
+                                   "command": "trim", "x": 28, "y": 20}])
+        use_id = r["results"][0]["use_id"]
+        result = apply_edits(project, [{"op": "delete_element", "id": "elem_run"}])
+        assert result["results"][0]["removed_commands"] == 1
+        design = read_design(project)
+        assert "elem_run" not in [o["id"] for o in design["objects"]]
+        svg_text = __import__("pathlib").Path(
+            ProjectFile.load(project).svg_path).read_text()
+        assert use_id not in svg_text            # connector group gone too
+
+    def test_delete_unknown_element_rejected(self, project):
+        with pytest.raises(UserError, match="no element"):
+            apply_edits(project, [{"op": "delete_element", "id": "nope"}])
+
+    def test_delete_is_undoable(self, project):
+        from cli_anything_inkstitch.artifact.design_model import apply_history_step
+        apply_edits(project, [{"op": "delete_element", "id": "elem_run"}])
+        apply_history_step(project)              # undo the element removal
+        design = read_design(project)
+        assert "elem_run" in [o["id"] for o in design["objects"]]
+
+
+class TestElementLabel:
+    def test_label_roundtrip(self, project):
+        apply_edits(project, [{"op": "set_svg_attr", "id": "elem_fill",
+                               "name": "label", "value": "outer ring"}])
+        design = read_design(project)
+        fill = next(o for o in design["objects"] if o["id"] == "elem_fill")
+        assert fill["label"] == "outer ring"
+        # stored as inkscape:label, id untouched
+        svg_text = __import__("pathlib").Path(
+            ProjectFile.load(project).svg_path).read_text()
+        assert 'label="outer ring"' in svg_text
+        assert 'id="elem_fill"' in svg_text
+
+    def test_label_absent_is_none(self, project):
+        design = read_design(project)
+        fill = next(o for o in design["objects"] if o["id"] == "elem_fill")
+        assert fill["label"] is None

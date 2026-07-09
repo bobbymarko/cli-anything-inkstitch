@@ -87,6 +87,10 @@
   #timelineBar.show { display: flex; }
   #tlPlay { all: unset; cursor: pointer; color: var(--accent); font-size: 13px;
             width: 18px; text-align: center; }
+  #tlSpeed { all: unset; cursor: pointer; color: var(--muted); font-size: 11px;
+             width: 26px; text-align: center; border: 1px solid var(--line);
+             border-radius: 4px; padding: 1px 0; }
+  #tlSpeed:hover { color: var(--text); }
   /* the track is a color-block map: each thread color occupies its share of
      the stitch count, so you can see what color stitches at any point */
   #timeline { flex: 1; -webkit-appearance: none; appearance: none; height: 8px;
@@ -123,6 +127,12 @@
   #inspectBody { flex: 1; overflow-y: auto; padding: 4px 14px 14px; }
   #inspectBody .noSel { color: var(--muted); }
   #inspectBody .objTitle { font-weight: 700; margin-bottom: 2px; word-break: break-all; }
+  .titleEdit { background: transparent; border: 1px solid transparent;
+               border-radius: 4px; color: var(--text); font: inherit;
+               font-weight: 700; width: 100%; padding: 1px 4px; }
+  .titleEdit:hover { border-color: var(--line); }
+  .titleEdit:focus { border-color: var(--accent); outline: none;
+                     background: #14161a; }
   #inspectBody .objKind { color: var(--accent); font-size: 11px; text-transform: uppercase;
                           letter-spacing: .06em; margin-bottom: 10px; }
   #inspectBody .prow { display: flex; justify-content: space-between; gap: 8px;
@@ -258,6 +268,7 @@
     <div id="toast"></div>
     <div id="timelineBar">
       <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
+      <button id="tlSpeed" type="button" title="Playback speed">1×</button>
       <input id="timeline" type="range" min="0" max="100" value="100">
       <span id="tlLabel">0 / 0</span>
     </div>
@@ -564,11 +575,19 @@ async function fetchTier2() {
       showToast("stitch plan failed: " + (data.error || r.status), true);
       return;
     }
-    stitchData = data;
-    timelinePos = data.total_stitches;
     const tl = $("timeline");
+    // preserve the scrub position across plan refreshes — resetting to the
+    // end after every edit makes deep-timeline stitch-order debugging
+    // impossible. "At the end" follows the new end; mid-scrub positions
+    // clamp to the new total.
+    const prevTotal = stitchData ? stitchData.total_stitches : null;
+    const wasAtEnd = timelinePos == null || prevTotal == null
+                     || timelinePos >= prevTotal;
+    stitchData = data;
+    timelinePos = wasAtEnd ? data.total_stitches
+                           : Math.min(timelinePos, data.total_stitches);
     tl.max = data.total_stitches;
-    tl.value = data.total_stitches;
+    tl.value = timelinePos;
     tl.style.background = timelineGradient();
     $("timelineBar").classList.toggle("show", planOn);
     stopTimelinePlay();
@@ -732,14 +751,20 @@ function stopTimelinePlay() {
   if (tlPlayTimer) { clearInterval(tlPlayTimer); tlPlayTimer = null; }
   $("tlPlay").textContent = "▶";
 }
+const TL_SPEEDS = [0.5, 1, 2, 4];
+let tlSpeed = 1;
+$("tlSpeed").onclick = () => {
+  tlSpeed = TL_SPEEDS[(TL_SPEEDS.indexOf(tlSpeed) + 1) % TL_SPEEDS.length];
+  $("tlSpeed").textContent = `${tlSpeed}×`;
+};
 $("tlPlay").onclick = () => {
   if (tlPlayTimer) { stopTimelinePlay(); return; }
   if (!stitchData) return;
   const total = stitchData.total_stitches;
   if (timelinePos >= total) timelinePos = 0;   // replay from the start
-  const step = Math.max(1, Math.round(total / 600));  // ~10s full run
   $("tlPlay").textContent = "⏸";
   tlPlayTimer = setInterval(() => {
+    const step = Math.max(1, Math.round(total / 600 * tlSpeed)); // 1× ≈ 10s run
     timelinePos = Math.min(total, timelinePos + step);
     $("timeline").value = timelinePos;
     updateTimelineLabel();
@@ -829,9 +854,12 @@ function renderAll() {
   renderPlanLayer();
   for (const o of design.objects) {
     if (!o.d) continue;
-    el("path", { d: o.d, fill: o.fill || "none",
+    // satins draw rails only in the artwork layer — rungs are editing
+    // scaffolding (shown in the edit layer when selected), not shape outline
+    const displayD = (o.kind === "satin" && o.rails) ? o.rails.join(" ") : o.d;
+    el("path", { d: displayD, fill: o.fill || "none",
       stroke: o.stroke || "none", "stroke-width": .4 }, artworkLayer);
-    const hit = el("path", { d: o.d, class: "obj-hit",
+    const hit = el("path", { d: displayD, class: "obj-hit",
       fill: o.fill ? "rgba(0,0,0,0)" : "none" }, artworkLayer);
     hit.addEventListener("pointerdown", (ev) => {
       if (spaceHeld) return;                      // hand tool wins
@@ -953,7 +981,8 @@ function renderInspect(objs) {
       const row = document.createElement("div");
       row.className = "prow";
       const a = document.createElement("a");
-      a.textContent = o.id;
+      a.textContent = o.label || o.id;
+      a.title = o.id;
       a.style.cursor = "pointer";
       a.style.color = "var(--accent)";
       a.onclick = () => select(o.id);           // solo it
@@ -966,9 +995,24 @@ function renderInspect(objs) {
     return;
   }
   const o = objs[0];
-  const title = document.createElement("div");
-  title.className = "objTitle";
-  title.textContent = o.id;
+  // title doubles as the rename field: shows the friendly label (falling
+  // back to the id), commits to inkscape:label — ids stay stable underneath
+  const title = document.createElement("input");
+  title.type = "text";
+  title.className = "objTitle titleEdit";
+  title.value = o.label || o.id;
+  title.title = `id: ${o.id} — click to rename`;
+  title.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") { ev.preventDefault(); title.blur(); }
+    if (ev.key === "Escape") { title.value = o.label || o.id; title.blur(); }
+  });
+  title.addEventListener("blur", () => {
+    const v = title.value.trim();
+    if (v && v !== (o.label || o.id))
+      postEdit([{ op: "set_svg_attr", id: o.id, name: "label", value: v }])
+        .catch(() => refresh());
+  });
   const kind = document.createElement("div");
   kind.className = "objKind";
   kind.textContent = `${o.kind} · ${humanizeType(o.stitch_type)}`;
@@ -1296,6 +1340,11 @@ document.addEventListener("keydown", (ev) => {
     const idx = activeNode.index;
     activeNode = null;
     if (o) deleteFillNode(o, idx);
+  } else if ((ev.key === "Delete" || ev.key === "Backspace") && selection.length) {
+    // no rung/node targeted → delete the selected object(s); Cmd+Z restores
+    const ids = [...selection];
+    setSelection([]);
+    postEdit(ids.map(id => ({ op: "delete_element", id })));
   } else if (mod && ev.shiftKey && k === "a") {
     ev.preventDefault(); setSelection([]);
   } else if (mod && k === "a") {
@@ -1331,7 +1380,9 @@ function renderPills() {
   for (const id of selection) {
     const pill = document.createElement("span");
     pill.className = "pill";
-    pill.textContent = id + " ";
+    const obj = design ? byId(id) : null;
+    pill.textContent = ((obj && obj.label) || id) + " ";
+    pill.title = id;
     const x = document.createElement("button");
     x.textContent = "×";
     x.onclick = () => setSelection(selection.filter(s => s !== id));
