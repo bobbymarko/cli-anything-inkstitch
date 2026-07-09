@@ -119,7 +119,13 @@
   #inspectBody .prow { display: flex; justify-content: space-between; gap: 8px;
                        align-items: center; padding: 3px 0;
                        border-bottom: 1px solid var(--line); }
-  #inspectBody .pname { color: var(--muted); word-break: break-all; }
+  #inspectBody .pname { color: var(--muted); word-break: normal; }
+  #inspectBody .pname.hasTip { cursor: help;
+    text-decoration: underline dotted rgba(154,161,176,.5);
+    text-underline-offset: 3px; }
+  #inspectBody .pname.hasTip:hover { color: var(--text); }
+  #inspectBody .pctrl { display: inline-flex; align-items: center; gap: 5px; }
+  #inspectBody .punit { color: var(--muted); font-size: 11px; }
   #inspectBody .pval { text-align: right; word-break: break-all; }
   .pvalEdit { background: transparent; border: 1px solid transparent;
               color: var(--text); text-align: right; width: 90px; font: inherit;
@@ -865,6 +871,18 @@ function paramControl(o, k, v) {
   });
   return input;
 }
+/* "fill_underlay_row_spacing_mm" → label "Fill Underlay Row Spacing" + unit
+   "mm" (units read as a tag beside the value, not label noise) */
+function humanizeParam(name) {
+  let base = name, unit = null;
+  if (base.endsWith("_mm")) { unit = "mm"; base = base.slice(0, -3); }
+  else if (base.endsWith("_percent")) { unit = "%"; base = base.slice(0, -8); }
+  const label = base.split("_").filter(Boolean)
+    .map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
+  return { label, unit };
+}
+const humanizeType = (t) => (t || "").split("_").filter(Boolean)
+  .map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
 function renderInspect(objs) {
   const body = $("inspectBody");
   // don't clobber a param edit in progress (live reloads re-render freely)
@@ -893,7 +911,7 @@ function renderInspect(objs) {
       a.onclick = () => select(o.id);           // solo it
       const kind = document.createElement("span");
       kind.className = "pname";
-      kind.textContent = o.stitch_type;
+      kind.textContent = humanizeType(o.stitch_type);
       row.append(a, kind);
       body.appendChild(row);
     }
@@ -905,18 +923,33 @@ function renderInspect(objs) {
   title.textContent = o.id;
   const kind = document.createElement("div");
   kind.className = "objKind";
-  kind.textContent = `${o.kind} · ${o.stitch_type}`;
+  kind.textContent = `${o.kind} · ${humanizeType(o.stitch_type)}`;
   body.append(title, kind);
   for (const [k, v] of Object.entries(o.params)) {
     const row = document.createElement("div");
     row.className = "prow";
     const name = document.createElement("span");
     name.className = "pname";
-    name.textContent = k;
-    const meta = (o.param_meta || {})[k];
-    if (meta && (meta.tooltip || meta.gui_text))
-      name.title = meta.tooltip || meta.gui_text;
-    row.append(name, paramControl(o, k, v));
+    const meta = (o.param_meta || {})[k] || {};
+    const { label, unit } = humanizeParam(k);
+    name.textContent = label;
+    const tip = [meta.gui_text, meta.tooltip]
+      .filter(Boolean).filter((t, i, a) => a.indexOf(t) === i).join(" — ");
+    if (tip) {
+      name.title = tip;
+      name.classList.add("hasTip");
+    }
+    const ctrl = document.createElement("span");
+    ctrl.className = "pctrl";
+    ctrl.appendChild(paramControl(o, k, v));
+    const u = meta.unit || unit;
+    if (u) {
+      const tag = document.createElement("span");
+      tag.className = "punit";
+      tag.textContent = u;
+      ctrl.appendChild(tag);
+    }
+    row.append(name, ctrl);
     body.appendChild(row);
   }
 }
