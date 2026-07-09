@@ -871,18 +871,16 @@ function paramControl(o, k, v) {
   });
   return input;
 }
-/* "fill_underlay_row_spacing_mm" → label "Fill Underlay Row Spacing" + unit
-   "mm" (units read as a tag beside the value, not label noise) */
+/* "fill_underlay_row_spacing_mm" → label "Fill underlay row spacing" + unit
+   "mm" (sentence case; units read as a tag beside the value, not label noise) */
+const sentenceCase = (s) => s ? s[0].toUpperCase() + s.slice(1) : s;
 function humanizeParam(name) {
   let base = name, unit = null;
   if (base.endsWith("_mm")) { unit = "mm"; base = base.slice(0, -3); }
   else if (base.endsWith("_percent")) { unit = "%"; base = base.slice(0, -8); }
-  const label = base.split("_").filter(Boolean)
-    .map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
-  return { label, unit };
+  return { label: sentenceCase(base.split("_").filter(Boolean).join(" ")), unit };
 }
-const humanizeType = (t) => (t || "").split("_").filter(Boolean)
-  .map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
+const humanizeType = (t) => sentenceCase((t || "").split("_").filter(Boolean).join(" "));
 function renderInspect(objs) {
   const body = $("inspectBody");
   // don't clobber a param edit in progress (live reloads re-render freely)
