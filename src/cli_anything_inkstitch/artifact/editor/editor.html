@@ -230,6 +230,16 @@
   .palCell { all: unset; width: 17px; height: 17px; border-radius: 4px;
              border: 1px solid rgba(255,255,255,.18); cursor: pointer; }
   .palCell:hover { outline: 2px solid var(--accent); }
+  #ctxMenu { position: fixed; z-index: 40; min-width: 190px; background: var(--panel);
+             border: 1px solid var(--line); border-radius: 9px; padding: 4px;
+             box-shadow: 0 8px 28px rgba(0,0,0,.5); display: flex;
+             flex-direction: column; }
+  .ctxItem { all: unset; padding: 6px 10px; border-radius: 6px; cursor: pointer;
+             font-size: 12px; color: var(--text); }
+  .ctxItem:hover { background: rgba(110,168,254,.12); }
+  .ctxItem.danger { color: var(--end); }
+  .ctxItem.danger:hover { background: rgba(229,83,75,.12); }
+  .ctxSep { height: 1px; background: var(--line); margin: 4px 6px; }
   .layerRow .swInput::-webkit-color-swatch-wrapper { padding: 0; }
   .layerRow .swInput::-webkit-color-swatch { border: 1px solid var(--line);
                                              border-radius: 3px; }
@@ -1327,9 +1337,14 @@ function renderAll() {
     hit.addEventListener("pointerdown", (ev) => {
       if (spaceHeld) return;                      // hand tool wins
       ev.stopPropagation();
+      if (ev.button === 2) return;                // contextmenu handles it
       select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey);
     });
     hit.addEventListener("dblclick", (ev) => { ev.stopPropagation(); addRung(o, ev); });
+    hit.addEventListener("contextmenu", (ev) => {
+      if (!selection.includes(o.id)) select(o.id);
+      showContextMenu(ev, objectMenuItems(o));
+    });
   }
   renderEditLayer();
   renderPills();
@@ -1482,9 +1497,7 @@ function renderInspect(objs) {
   body.append(title, kind);
   // stitch-type conversion (fill → satin isn't offered: the engine's
   // fill_to_satin needs user-drawn rung guides — the server explains if asked)
-  const targets = ({ satin: [["fill", "Fill"], ["run", "Running stitch"]],
-                     fill: [["run", "Running stitch"]],
-                     run: [["satin", "Satin column"], ["fill", "Fill"]] })[o.kind] || [];
+  const targets = CONVERT_TARGETS[o.kind] || [];
   if (targets.length) {
     const row = document.createElement("div");
     row.className = "prow";
@@ -1783,6 +1796,12 @@ function renderSatin(o) {
         renderEditLayer();
         postEdit([{ op: "set_path", id: o.id, d: satinD(o) }]).catch(() => refresh());
       });
+      c.addEventListener("contextmenu", (ev) =>
+        showContextMenu(ev, nodeMenuItems(o, railSegs[ri], ai, () => {
+          o.rails[ri] = serializePath(railSegs[ri]);
+          activeNode = { objId: o.id, index: ai, rail: ri };
+          postEdit([{ op: "set_path", id: o.id, d: satinD(o) }]).catch(() => refresh());
+        }, () => deleteRailNode(o, ri, ai))));
     });
     if (activeNode && activeNode.objId === o.id && activeNode.rail === ri)
       renderBezControls(o, railSegs[ri], activeNode.index, { rail: ri });
@@ -1826,6 +1845,12 @@ function renderFill(o) {
       renderEditLayer();
       postEdit([{ op: "set_path", id: o.id, d: o.d }]).catch(() => refresh());
     });
+    c.addEventListener("contextmenu", (ev) =>
+      showContextMenu(ev, nodeMenuItems(o, boundarySegs, ai, () => {
+        o.d = serializePath(boundarySegs);
+        activeNode = { objId: o.id, index: ai };
+        postEdit([{ op: "set_path", id: o.id, d: o.d }]).catch(() => refresh());
+      }, () => deleteFillNode(o, ai))));
   });
   if (activeNode && activeNode.objId === o.id && activeNode.rail === undefined)
     renderBezControls(o, boundarySegs, activeNode.index, {});
@@ -1862,6 +1887,97 @@ function renderFill(o) {
     c.addEventListener("pointerdown", (ev) =>
       startDrag(ev, { type: "handle", obj: o, role, use_id: h.use_id }));
   }
+}
+
+/* ---------- context menus ---------- */
+let ctxMenu = null;
+function showContextMenu(ev, items) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  closeContextMenu();
+  const m = document.createElement("div");
+  m.id = "ctxMenu";
+  for (const it of items) {
+    if (it === "-") {
+      const s = document.createElement("div");
+      s.className = "ctxSep";
+      m.appendChild(s);
+      continue;
+    }
+    const row = document.createElement("button");
+    row.className = "ctxItem" + (it.danger ? " danger" : "");
+    row.textContent = it.label;
+    row.addEventListener("click", () => { closeContextMenu(); it.run(); });
+    m.appendChild(row);
+  }
+  document.body.appendChild(m);
+  m.style.left = Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8) + "px";
+  m.style.top = Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8) + "px";
+  ctxMenu = m;
+  setTimeout(() => document.addEventListener("pointerdown", _ctxOutside, true), 0);
+}
+function _ctxOutside(ev) {
+  if (ctxMenu && !ctxMenu.contains(ev.target)) closeContextMenu();
+}
+function closeContextMenu() {
+  document.removeEventListener("pointerdown", _ctxOutside, true);
+  if (ctxMenu) ctxMenu.remove();
+  ctxMenu = null;
+}
+const CONVERT_TARGETS = { satin: [["fill", "Fill"], ["run", "Running stitch"]],
+                          fill: [["run", "Running stitch"]],
+                          run: [["satin", "Satin column"], ["fill", "Fill"]] };
+/* the same actions everywhere an object can be right-clicked (layer row,
+   canvas shape) — all reuse existing edit ops, so everything undoes */
+function objectMenuItems(o) {
+  const idx = design.objects.findIndex(x => x.id === o.id);
+  const items = [{
+    label: "Rename",
+    run: () => {
+      select(o.id);
+      setTimeout(() => {
+        const t = $("inspectBody").querySelector(".titleEdit");
+        if (t) { t.focus(); t.select(); }
+      }, 150);
+    },
+  }];
+  for (const [to, label] of CONVERT_TARGETS[o.kind] || [])
+    items.push({ label: "Convert to " + label.toLowerCase(),
+                 run: () => postEdit([{ op: "convert_element", id: o.id, to }])
+                   .catch(() => refresh()) });
+  items.push("-");
+  if (idx > 0)
+    items.push({ label: "Move up (stitches earlier)",
+                 run: () => postEdit([{ op: "reorder_element", id: o.id,
+                                        before_id: design.objects[idx - 1].id }])
+                   .catch(() => refresh()) });
+  if (idx >= 0 && idx < design.objects.length - 1)
+    items.push({ label: "Move down (stitches later)",
+                 run: () => postEdit([{ op: "reorder_element", id: o.id,
+                                        before_id: design.objects[idx + 2]
+                                          ? design.objects[idx + 2].id : null }])
+                   .catch(() => refresh()) });
+  items.push("-", {
+    label: "Delete", danger: true,
+    run: () => {
+      setSelection(selection.filter(x => x !== o.id));
+      postEdit([{ op: "delete_element", id: o.id }]).catch(() => refresh());
+    },
+  });
+  return items;
+}
+function nodeMenuItems(o, segs, ai, commitD, del) {
+  const shape = (fn) => () => {
+    if (!fn(segs, ai)) return;
+    commitD();
+    renderEditLayer();
+  };
+  return [
+    { label: "Smooth (pull out handles)", run: shape(smoothAnchor) },
+    { label: "Retract handles (corner)", run: shape(retractAnchor) },
+    "-",
+    { label: "Delete node", danger: true, run: del },
+  ];
 }
 
 /* ---------- interactions ---------- */
@@ -2120,6 +2236,7 @@ document.addEventListener("keydown", (ev) => {
   const mod = IS_MAC ? ev.metaKey : ev.ctrlKey;
   const k = ev.key.toLowerCase();
   if (ev.key === "Escape") {
+    if (ctxMenu) { closeContextMenu(); return; }
     if ($("helpOverlay").classList.contains("show")) { helpClose(); return; }
     if (penDraft) { penDraft = null; renderEditLayer(); return; }
     setSelection([]);
@@ -2468,6 +2585,8 @@ function renderLayers() {
     r.append(num, sw, nm, kd);
     r.addEventListener("click", (ev) =>
       select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey));
+    r.addEventListener("contextmenu", (ev) =>
+      showContextMenu(ev, objectMenuItems(o)));
     r.addEventListener("dragstart", (ev) => {
       ev.dataTransfer.setData("text/plain", o.id);
       ev.dataTransfer.effectAllowed = "move";
@@ -2693,6 +2812,7 @@ const HELP = [
     ["Double-click a satin", "add a rung at that spot"],
     ["Double-click a fill", "add a boundary node at the nearest point"],
     [`Click a rung or node, then ${DEL}`, "delete it (boundaries stay closed)"],
+    ["Right-click", "layers, shapes, and nodes have context menus (rename, convert, reorder, delete...)"],
     ["Inspector values", "click to edit; Enter commits, Esc reverts"],
     [`${MOD_LABEL}Z / ${MOD_LABEL}⇧Z`, "undo / redo (shared with the agent's history)"],
   ]],
