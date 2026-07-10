@@ -250,6 +250,35 @@ def read_design(project_file: str) -> dict[str, Any]:
             "height": root.get("height"),
             "viewBox": root.get("viewBox"),
             "objects": objects,
+            # design-intent context (document set-context) + machine settings —
+            # the constraints that drove digitizing decisions belong in front
+            # of whoever is correcting the design
+            "context": proj.session.get("context") or {},
+            "session": {k: proj.session.get(k)
+                        for k in ("hoop", "thread_palette", "machine_target")
+                        if proj.session.get(k)},
+        }
+
+
+def history_entries(project_file: str, limit: int = 50) -> dict[str, Any]:
+    """Project history for the editor's History panel (read-only)."""
+    from cli_anything_inkstitch.history import can_redo, can_undo
+    with _open_locked(project_file) as (proj, _tree):
+        entries = proj.history.get("entries", [])
+        cursor = proj.history.get("cursor", -1)
+        recent = entries[-limit:] if limit > 0 else entries
+        offset = len(entries) - len(recent)
+        return {
+            "entries": [{
+                "index": offset + i,
+                "command": e["command"],
+                "ts": e["ts"],
+                "current": (offset + i) == cursor,
+            } for i, e in enumerate(recent)],
+            "cursor": cursor,
+            "total": len(entries),
+            "can_undo": can_undo(proj.history),
+            "can_redo": can_redo(proj.history),
         }
 
 
@@ -443,6 +472,38 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
             patch=attr_diff(_xpath(op["id"]), before,
                             {"d": elem.get("d"), "transform": None})))
         return {"op": name, "id": op["id"], "changed": True}
+
+    if name == "reorder_element":
+        # element order IS stitch order — the Layers panel's drag-to-reorder
+        # is a digitizing operation. Moves elem before `before_id`, or to the
+        # end of its parent when before_id is null.
+        elem = find_by_id(tree, op["id"])
+        if elem is None:
+            raise UserError(f"no element with id={op['id']!r}")
+        parent = elem.getparent()
+        _ensure_id(parent)
+        before_id = op.get("before_id")
+        target = None
+        if before_id:
+            target = find_by_id(tree, str(before_id))
+            if target is None or target.getparent() is not parent:
+                raise UserError(
+                    f"before_id={before_id!r} is not a sibling of {op['id']!r}")
+        old_index = list(parent).index(elem)
+        xml = etree.tostring(elem).decode()
+        push(proj.history, make_entry(
+            command=f"artifact edit reorder_element --id {op['id']} (remove)",
+            patch=node_delete(parent_xpath=_xpath(parent.get("id")),
+                              index=old_index, before_xml=xml)))
+        parent.remove(elem)
+        new_index = list(parent).index(target) if target is not None else len(parent)
+        parent.insert(new_index, elem)
+        push(proj.history, make_entry(
+            command=f"artifact edit reorder_element --id {op['id']} (insert)",
+            patch=node_insert(parent_xpath=_xpath(parent.get("id")),
+                              index=new_index,
+                              after_xml=etree.tostring(elem).decode())))
+        return {"op": name, "id": op["id"], "index": new_index}
 
     if name == "delete_element":
         from cli_anything_inkstitch.svg import commands as vc

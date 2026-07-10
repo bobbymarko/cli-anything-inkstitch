@@ -61,9 +61,25 @@
   #gateBanner li a { color: var(--accent); cursor: pointer; text-decoration: underline; }
   #gateBanner .row { display: flex; gap: 8px; }
   #timelineBar { position: absolute; left: 50%; transform: translateX(-50%);
-                 bottom: 10px; display: none; align-items: center; gap: 10px;
+                 bottom: 58px; display: none; align-items: center; gap: 10px;
                  background: rgba(20,22,26,.92); border: 1px solid var(--line);
                  border-radius: 8px; padding: 6px 12px; min-width: 340px; z-index: 2; }
+  #toolbar { position: absolute; left: 50%; transform: translateX(-50%);
+             bottom: 12px; display: flex; gap: 2px; background: rgba(28,31,38,.95);
+             border: 1px solid var(--line); border-radius: 10px; padding: 4px;
+             z-index: 3; }
+  #toolbar .tool { all: unset; width: 34px; height: 34px; border-radius: 7px;
+                   display: flex; align-items: center; justify-content: center;
+                   color: var(--muted); cursor: pointer; position: relative; }
+  #toolbar .tool:hover { color: var(--text); background: rgba(110,168,254,.10); }
+  #toolbar .tool.on { color: #0c1523; background: var(--accent); }
+  #toolbar .tool .kbd { position: absolute; bottom: 1px; right: 3px;
+                        font-size: 8px; opacity: .7; }
+  .gizmoBox { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
+              vector-effect: non-scaling-stroke; cursor: move; }
+  .gizmoFill { fill: rgba(110,168,254,.05); cursor: move; }
+  .gizmoHandle { fill: #fff; stroke: var(--accent); stroke-width: 1.5;
+                 vector-effect: non-scaling-stroke; cursor: nwse-resize; }
   #helpOverlay { position: fixed; inset: 0; display: none; align-items: center;
                  justify-content: center; background: rgba(10,12,15,.7); z-index: 20; }
   #helpOverlay.show { display: flex; }
@@ -112,7 +128,42 @@
   .side { display: flex; flex-direction: column; background: var(--panel);
           overflow: hidden; }
   #panel { width: 320px; border-right: 1px solid var(--line); }   /* left side */
-  #inspect { width: 230px; border-left: 1px solid var(--line); }  /* right side */
+  #inspect { width: 260px; border-left: 1px solid var(--line); }  /* right side */
+  #panelStack { flex: 1; overflow-y: auto; padding: 0 10px 12px; }
+  .panel { border-bottom: 1px solid var(--line); }
+  .panelHead { padding: 8px 4px; font-size: 11px; text-transform: uppercase;
+               letter-spacing: .07em; color: var(--text); cursor: pointer;
+               user-select: none; }
+  .panelHead::before { content: "▾"; color: var(--muted); margin-right: 6px;
+                       font-size: 9px; }
+  .panel.closed .panelHead { color: var(--muted); }
+  .panel.closed .panelHead::before { content: "▸"; }
+  .panel.closed .panelBody { display: none; }
+  .panelBody { padding: 2px 4px 10px; }
+  .ovRow { display: flex; justify-content: space-between; gap: 8px;
+           padding: 2px 0; font-size: 12px; }
+  .ovRow .k { color: var(--muted); }
+  .ovSwatches { display: flex; gap: 5px; padding: 4px 0; }
+  .ovSwatches i { width: 16px; height: 16px; border-radius: 4px;
+                  border: 1px solid var(--line); display: inline-block; }
+  .layerRow { display: flex; align-items: center; gap: 7px; padding: 4px 5px;
+              border-radius: 6px; font-size: 12px; cursor: pointer; }
+  .layerRow:hover { background: rgba(110,168,254,.08); }
+  .layerRow.sel { background: rgba(110,168,254,.16); }
+  .layerRow.dropTarget { box-shadow: 0 -2px 0 var(--accent); }
+  .layerRow .num { color: var(--muted); width: 16px; text-align: right;
+                   font-size: 10px; }
+  .layerRow .sw { width: 11px; height: 11px; border-radius: 3px;
+                  border: 1px solid var(--line); flex: none; }
+  .layerRow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                  white-space: nowrap; }
+  .layerRow .kd { color: var(--muted); font-size: 10px; }
+  .histRow { padding: 3px 5px; border-radius: 5px; font-size: 11px;
+             color: var(--muted); cursor: pointer; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+  .histRow:hover { background: rgba(110,168,254,.08); color: var(--text); }
+  .histRow.cur { color: var(--accent); }
+  .histRow.future { opacity: .45; }
   .sideHead { display: flex; align-items: center; padding: 10px 10px 6px 14px; }
   .sideHead h2 { flex: 1; font-size: 12px; text-transform: uppercase;
                  letter-spacing: .08em; color: var(--muted); }
@@ -272,6 +323,25 @@
       <input id="timeline" type="range" min="0" max="100" value="100">
       <span id="tlLabel">0 / 0</span>
     </div>
+    <div id="toolbar" role="toolbar" aria-label="Tools">
+      <button class="tool on" id="toolSelect" type="button"
+              title="Select and transform (V) — drag to move, corners to scale">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"
+             aria-hidden="true"><path d="M3 1.5 L12.5 8.6 L8.2 9.3 L10.6 14 L8.8 14.9 L6.4 10.2 L3 13 Z"/></svg>
+        <span class="kbd">V</span>
+      </button>
+      <button class="tool" id="toolNode" type="button"
+              title="Edit nodes, rungs, and handles (A)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <path d="M2.5 12 C5 4, 11 4, 13.5 12"/>
+          <rect x="1" y="10.5" width="3" height="3" fill="currentColor" stroke="none"/>
+          <rect x="12" y="10.5" width="3" height="3" fill="currentColor" stroke="none"/>
+          <rect x="6.6" y="4.6" width="2.8" height="2.8" fill="currentColor" stroke="none"/>
+        </svg>
+        <span class="kbd">A</span>
+      </button>
+    </div>
     <div id="gateBanner">
       <h3>Stitchability check failed — this design may not stitch cleanly</h3>
       <ul id="gateFindings"></ul>
@@ -282,11 +352,28 @@
     </div>
   </div>
   <aside id="inspect" class="side">
-    <div class="sideHead"><h2>Inspect</h2>
+    <div class="sideHead"><h2>Panels</h2>
       <button class="collapseBtn" id="inspectToggle" type="button"
-              title="Collapse inspector">»</button></div>
-    <div id="inspectBody"><div class="noSel">Nothing selected — click an object
-      on the canvas.</div></div>
+              title="Collapse panels">»</button></div>
+    <div id="panelStack" class="sideBody">
+      <div class="panel" data-panel="overview">
+        <div class="panelHead">Overview</div>
+        <div class="panelBody" id="overviewBody"></div>
+      </div>
+      <div class="panel" data-panel="inspect">
+        <div class="panelHead">Inspect</div>
+        <div class="panelBody" id="inspectBody"><div class="noSel">Nothing
+          selected — click an object on the canvas.</div></div>
+      </div>
+      <div class="panel" data-panel="layers">
+        <div class="panelHead">Layers</div>
+        <div class="panelBody" id="layersBody"></div>
+      </div>
+      <div class="panel closed" data-panel="history">
+        <div class="panelHead">History</div>
+        <div class="panelBody" id="historyBody"></div>
+      </div>
+    </div>
   </aside>
 </div>
 <div id="endedOverlay"><div class="card">
@@ -313,6 +400,7 @@ let selection = [];             // selected object ids (Illustrator model:
                                 // click replaces, shift-click adds/removes)
 let activeRung = null;          // {objId, index} — rung targeted for Delete
 let activeNode = null;          // {objId, index} — fill boundary node targeted for Delete
+let activeTool = "select";      // select (V: move/scale gizmo) | node (A: direct editing)
 let vb = null;                  // current viewBox {x,y,w,h}
 let baseVb = null;
 let dragging = null;            // active drag descriptor
@@ -593,6 +681,7 @@ async function fetchTier2() {
     stopTimelinePlay();
     updateTimelineLabel();
     renderPlanLayer();
+    renderOverview();                  // stitch count + block colors just landed
   } catch (e) {
     if (gen === tier2Gen) showToast("stitch plan: server unreachable", true);
   } finally {
@@ -1067,11 +1156,90 @@ function renderEditLayer() {
   editLayer.textContent = "";
   const objs = selection.map(byId).filter(Boolean);
   renderInspect(objs);
+  if (activeTool === "select") {
+    if (objs.length) renderTransformGizmo(objs);
+    return;
+  }
   for (const o of objs) {
     if (o.kind === "satin") renderSatin(o);
     else if (o.kind === "fill") renderFill(o);
     else el("path", { d: o.d, class: "fillBoundary" }, editLayer);
   }
+}
+
+/* ---------- select tool: move/scale gizmo (Figma-style) ---------- */
+function selectionBBox(objs) {
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const o of objs) {
+    for (const [x, y] of flatten(tokenizePath(o.d))) {
+      if (x < minx) minx = x;
+      if (x > maxx) maxx = x;
+      if (y < miny) miny = y;
+      if (y > maxy) maxy = y;
+    }
+  }
+  return { minx, miny, maxx, maxy };
+}
+function snapshotObjs(objs) {
+  return objs.map(o => ({
+    o,
+    segs0: tokenizePath(o.d),                 // fresh parse = private copy
+    start0: o.start ? { x: o.start.x, y: o.start.y } : null,
+    end0: o.end ? { x: o.end.x, y: o.end.y } : null,
+  }));
+}
+/* uniform affine from the drag-start snapshot: p' = p*s + t */
+function applyAffine(snap, s, tx, ty) {
+  for (const rec of snap) {
+    const segs = rec.segs0.map(seg => ({
+      c: seg.c,
+      p: seg.p.map((v, i) => i % 2 === 0 ? v * s + tx : v * s + ty),
+    }));
+    rec.o.d = serializePath(segs);
+    if (rec.o.kind === "satin" && rec.o.rails) {
+      const subs = rec.o.d.split(/(?=M)/).map(x => x.trim()).filter(Boolean);
+      rec.o.rails = subs.slice(0, 2);
+      rec.o.rungs = subs.slice(2);
+    }
+    if (rec.start0 && rec.o.start) {
+      rec.o.start.x = rec.start0.x * s + tx;
+      rec.o.start.y = rec.start0.y * s + ty;
+    }
+    if (rec.end0 && rec.o.end) {
+      rec.o.end.x = rec.end0.x * s + tx;
+      rec.o.end.y = rec.end0.y * s + ty;
+    }
+  }
+}
+function renderTransformGizmo(objs) {
+  const bb = selectionBBox(objs);
+  if (!isFinite(bb.minx)) return;
+  for (const o of objs)                        // live outline ghosts
+    el("path", { d: o.d, class: "fillBoundary" }, editLayer);
+  const attrs = { x: bb.minx, y: bb.miny,
+                  width: Math.max(bb.maxx - bb.minx, 0.01),
+                  height: Math.max(bb.maxy - bb.miny, 0.01) };
+  const fillRect = el("rect", { ...attrs, class: "gizmoFill" }, editLayer);
+  const box = el("rect", { ...attrs, class: "gizmoBox" }, editLayer);
+  const startMove = (ev) => {
+    if (spaceHeld) return;
+    startDrag(ev, { type: "g-move", snap: snapshotObjs(objs), tx: 0, ty: 0 });
+  };
+  fillRect.addEventListener("pointerdown", startMove);
+  box.addEventListener("pointerdown", startMove);
+  const corners = [[bb.minx, bb.miny], [bb.maxx, bb.miny],
+                   [bb.maxx, bb.maxy], [bb.minx, bb.maxy]];
+  corners.forEach((c, i) => {
+    const h = el("rect", { x: c[0] - px(4), y: c[1] - px(4),
+                           width: px(8), height: px(8),
+                           class: "gizmoHandle" }, editLayer);
+    h.addEventListener("pointerdown", (ev) => {
+      if (spaceHeld) return;
+      const anchor = corners[(i + 2) % 4];
+      startDrag(ev, { type: "g-scale", snap: snapshotObjs(objs), anchor,
+                      diag0: Math.hypot(c[0] - anchor[0], c[1] - anchor[1]) || 1 });
+    });
+  });
 }
 function renderSatin(o) {
   const railSegs = o.rails.map(tokenizePath);
@@ -1178,6 +1346,7 @@ function setSelection(ids) {
   activeNode = null;
   renderPills();
   renderEditLayer();
+  if (typeof renderLayers === "function") renderLayers();
 }
 /* Illustrator model: plain click replaces the selection, shift-click (or
    cmd/ctrl-click) toggles membership. Selecting an element that carries a
@@ -1241,6 +1410,16 @@ function startDrag(ev, desc) {
       const snapped = nearestOnPoly(desc.boundary, p.x, p.y);
       if (snapped) { h.x = snapped[0]; h.y = snapped[1]; }
       else { h.x += dx; h.y += dy; }
+    } else if (desc.type === "g-move") {
+      desc.tx += dx;
+      desc.ty += dy;
+      applyAffine(desc.snap, 1, desc.tx, desc.ty);
+    } else if (desc.type === "g-scale") {
+      const s = Math.max(0.05,
+        Math.hypot(p.x - desc.anchor[0], p.y - desc.anchor[1]) / desc.diag0);
+      desc.s = s;
+      applyAffine(desc.snap, s,
+                  desc.anchor[0] * (1 - s), desc.anchor[1] * (1 - s));
     } else if (desc.type === "fill-node") {
       moveAnchor(desc.segs, desc.anchor, dx, dy);
       desc.obj.d = serializePath(desc.segs);
@@ -1276,6 +1455,16 @@ function startDrag(ev, desc) {
         const h = desc.obj[desc.role];
         await postEdit([{ op: "move_command", use_id: desc.use_id,
                           x: fmt(h.x), y: fmt(h.y) }]);
+      } else if (desc.type === "g-move" || desc.type === "g-scale") {
+        const ops = [];
+        for (const rec of desc.snap) {
+          ops.push({ op: "set_path", id: rec.o.id, d: rec.o.d });
+          for (const h of [rec.o.start, rec.o.end])
+            if (h && h.use_id && !h.legacy)
+              ops.push({ op: "move_command", use_id: h.use_id,
+                         x: fmt(h.x), y: fmt(h.y) });
+        }
+        await postEdit(ops);
       } else if (desc.type === "fill-node") {
         await postEdit([{ op: "set_path", id: desc.obj.id, d: desc.obj.d }]);
       } else {
@@ -1310,6 +1499,7 @@ async function addFillNode(o, ev) {
   await postEdit([{ op: "set_path", id: o.id, d: o.d }]);
 }
 async function addRung(o, ev) {
+  if (activeTool !== "node") return;     // adding geometry is a node-tool action
   if (o.kind === "fill") return addFillNode(o, ev);
   if (o.kind !== "satin") return;
   const p = clientToSvg(ev);
@@ -1355,6 +1545,10 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") {
     if ($("helpOverlay").classList.contains("show")) { helpClose(); return; }
     setSelection([]);
+  } else if (!mod && k === "v") {
+    setTool("select");
+  } else if (!mod && k === "a" && !ev.shiftKey) {
+    setTool("node");
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeRung) {
     const o = byId(activeRung.objId);
     const idx = activeRung.index;
@@ -1532,6 +1726,18 @@ for (const id of ["inspect", "panel"]) {
   } catch (e) { /* private mode */ }
 }
 
+/* ---------- floating toolbar (Figma-style) ---------- */
+function setTool(t) {
+  activeTool = t;
+  $("toolSelect").classList.toggle("on", t === "select");
+  $("toolNode").classList.toggle("on", t === "node");
+  activeRung = null;
+  activeNode = null;
+  renderEditLayer();
+}
+$("toolSelect").onclick = () => setTool("select");
+$("toolNode").onclick = () => setTool("node");
+
 function setViewMode(mode) {
   viewMode = mode;
   planOn = mode !== "outline";
@@ -1573,6 +1779,141 @@ function connectSSE() {
   es.onerror = () => { es.close(); setTimeout(connectSSE, 2000); };
 }
 
+/* ---------- right panel stack (Overview / Inspect / Layers / History) ---------- */
+for (const pnl of ["overview", "inspect", "layers", "history"]) {
+  const root = document.querySelector(`[data-panel="${pnl}"]`);
+  root.querySelector(".panelHead").addEventListener("click", () => {
+    root.classList.toggle("closed");
+    try {
+      localStorage.setItem("artifact-panel-" + pnl,
+                           root.classList.contains("closed") ? "1" : "0");
+    } catch (e) { /* private mode */ }
+    if (pnl === "history" && !root.classList.contains("closed")) renderHistory();
+  });
+  try {
+    const saved = localStorage.getItem("artifact-panel-" + pnl);
+    if (saved === "1") root.classList.add("closed");
+    else if (saved === "0") root.classList.remove("closed");
+  } catch (e) { /* private mode */ }
+}
+
+function renderOverview() {
+  const body = $("overviewBody");
+  body.textContent = "";
+  if (!design) return;
+  const row = (k, v) => {
+    const r = document.createElement("div");
+    r.className = "ovRow";
+    const kk = document.createElement("span");
+    kk.className = "k";
+    kk.textContent = k;
+    const vv = document.createElement("span");
+    vv.textContent = v;
+    r.append(kk, vv);
+    body.appendChild(r);
+  };
+  row("Size", `${design.width || "?"} × ${design.height || "?"}`.replaceAll("mm", " mm"));
+  const counts = {};
+  for (const o of design.objects) counts[o.kind] = (counts[o.kind] || 0) + 1;
+  row("Objects", Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(" · "));
+  row("Stitches", stitchData ? stitchData.total_stitches.toLocaleString()
+                             : "— open a stitch view");
+  const colors = stitchData ? stitchData.blocks.map(b => b.color)
+    : [...new Set(design.objects.map(o => o.fill || o.stroke).filter(Boolean))];
+  if (colors.length) {
+    const sw = document.createElement("div");
+    sw.className = "ovSwatches";
+    for (const c of colors.slice(0, 10)) {
+      const chip = document.createElement("i");
+      chip.style.background = c;
+      chip.title = c;
+      sw.appendChild(chip);
+    }
+    body.appendChild(sw);
+  }
+  const sess = design.session || {};
+  if (sess.hoop) row("Hoop", sess.hoop.name ||
+                     `${sess.hoop.width_mm}×${sess.hoop.height_mm} mm`);
+  if (sess.thread_palette) row("Palette", sess.thread_palette);
+  if (sess.machine_target) row("Format", String(sess.machine_target).toUpperCase());
+  for (const [k, v] of Object.entries(design.context || {}))
+    row(sentenceCase(k.replaceAll("_", " ")), String(v));
+}
+
+function renderLayers() {
+  const body = $("layersBody");
+  body.textContent = "";
+  if (!design) return;
+  design.objects.forEach((o, i) => {
+    const r = document.createElement("div");
+    r.className = "layerRow" + (selection.includes(o.id) ? " sel" : "");
+    r.draggable = true;
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = i + 1;
+    const sw = document.createElement("span");
+    sw.className = "sw";
+    sw.style.background = o.fill || o.stroke || "transparent";
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = o.label || o.id;
+    nm.title = o.id;
+    const kd = document.createElement("span");
+    kd.className = "kd";
+    kd.textContent = o.kind;
+    r.append(num, sw, nm, kd);
+    r.addEventListener("click", (ev) =>
+      select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey));
+    r.addEventListener("dragstart", (ev) => {
+      ev.dataTransfer.setData("text/plain", o.id);
+      ev.dataTransfer.effectAllowed = "move";
+    });
+    r.addEventListener("dragover", (ev) => {
+      ev.preventDefault();
+      r.classList.add("dropTarget");
+    });
+    r.addEventListener("dragleave", () => r.classList.remove("dropTarget"));
+    r.addEventListener("drop", async (ev) => {
+      ev.preventDefault();
+      r.classList.remove("dropTarget");
+      const dragged = ev.dataTransfer.getData("text/plain");
+      if (dragged && dragged !== o.id)
+        await postEdit([{ op: "reorder_element", id: dragged, before_id: o.id }]);
+    });
+    body.appendChild(r);
+  });
+}
+
+async function renderHistory() {
+  const root = document.querySelector('[data-panel="history"]');
+  if (root.classList.contains("closed")) return;
+  const body = $("historyBody");
+  try {
+    const h = await (await fetch(api("/history"))).json();
+    body.textContent = "";
+    h.entries.slice().reverse().forEach((e2) => {
+      const r = document.createElement("div");
+      r.className = "histRow" + (e2.current ? " cur" : "")
+                    + (e2.index > h.cursor ? " future" : "");
+      r.textContent = (e2.current ? "● " : "") +
+                      e2.command.replace("artifact edit ", "");
+      r.title = `${e2.command} — ${e2.ts} (click to jump here)`;
+      r.addEventListener("click", () => jumpToHistory(e2.index, h.cursor));
+      body.appendChild(r);
+    });
+  } catch (err) {
+    body.textContent = "history unavailable";
+  }
+}
+async function jumpToHistory(index, cursor) {
+  const dir = cursor > index ? "/undo" : "/redo";
+  for (let i = 0; i < Math.abs(cursor - index); i++) {
+    const r = await (await fetch(api(dir), { method: "POST" })).json();
+    if (!r.applied) break;
+  }
+  renderHistory();
+}
+
 /* ---------- toast (transient status/errors) ---------- */
 let toastTimer = null;
 function showToast(text, isError = false) {
@@ -1587,6 +1928,10 @@ function showToast(text, isError = false) {
 const ALT = IS_MAC ? "⌥" : "Alt";
 const DEL = IS_MAC ? "⌫" : "Del";
 const HELP = [
+  ["Tools", [
+    ["V — Select", "move the selection (drag) or scale it (corner handles); markers move with their shape"],
+    ["A — Edit nodes", "boundary nodes, satin rails and rungs, fill start/end handles, angle knob"],
+  ]],
   ["View modes", [
     ["Outline", "artwork and edit handles only"],
     ["Stitches", "hairline strokes — read stitch directions at any zoom"],
@@ -1653,6 +1998,9 @@ $("helpOverlay").addEventListener("click", (ev) => {
 async function refresh() {
   design = await getDesign();
   renderAll();
+  renderOverview();
+  renderLayers();
+  renderHistory();
   scheduleTier2();
 }
 refresh().then(connectSSE).catch((e) => {

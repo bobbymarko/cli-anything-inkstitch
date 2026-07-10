@@ -497,3 +497,50 @@ class TestFlattenTransform:
     def test_noop_without_transform(self, project):
         result = apply_edits(project, [{"op": "flatten_transform", "id": "elem_run"}])
         assert result["results"][0]["changed"] is False
+
+
+class TestOverviewData:
+    def test_context_and_session_in_design(self, project):
+        proj = ProjectFile.load(project)
+        proj.session["context"] = {"material": "stretchy knit", "size": "3 inch"}
+        proj.session["thread_palette"] = "Madeira Polyneon"
+        proj.save()
+        design = read_design(project)
+        assert design["context"]["material"] == "stretchy knit"
+        assert design["session"]["thread_palette"] == "Madeira Polyneon"
+
+    def test_history_entries_shape(self, project):
+        from cli_anything_inkstitch.artifact.design_model import history_entries
+        apply_edits(project, [{"op": "set_attr", "id": "elem_fill",
+                               "name": "angle", "value": "15"}])
+        h = history_entries(project)
+        assert h["total"] >= 1
+        assert h["entries"][-1]["current"] is True
+        assert "angle" in h["entries"][-1]["command"]
+        assert h["can_undo"] is True
+
+
+class TestReorderElement:
+    def test_moves_before_sibling(self, project):
+        design = read_design(project)
+        ids = [o["id"] for o in design["objects"]]
+        assert ids == ["elem_fill", "elem_satin", "elem_run"]
+        apply_edits(project, [{"op": "reorder_element", "id": "elem_run",
+                               "before_id": "elem_fill"}])
+        ids = [o["id"] for o in read_design(project)["objects"]]
+        assert ids == ["elem_run", "elem_fill", "elem_satin"]
+
+    def test_moves_to_end_without_before(self, project):
+        apply_edits(project, [{"op": "reorder_element", "id": "elem_fill",
+                               "before_id": None}])
+        ids = [o["id"] for o in read_design(project)["objects"]]
+        assert ids[-1] == "elem_fill"
+
+    def test_reorder_is_undoable(self, project):
+        from cli_anything_inkstitch.artifact.design_model import apply_history_step
+        apply_edits(project, [{"op": "reorder_element", "id": "elem_run",
+                               "before_id": "elem_fill"}])
+        apply_history_step(project)   # undo insert
+        apply_history_step(project)   # undo remove
+        ids = [o["id"] for o in read_design(project)["objects"]]
+        assert ids == ["elem_fill", "elem_satin", "elem_run"]
