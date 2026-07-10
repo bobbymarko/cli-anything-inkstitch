@@ -608,7 +608,60 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
     if name == "convert_element":
         return _convert_element(proj, tree, op)
 
+    if name == "add_element":
+        return _add_element(proj, tree, op)
+
     raise UserError(f"unknown edit op: {name!r}")
+
+
+def _add_element(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
+    """Create a new <path> from drawn geometry (editor pen tool).
+
+    kind picks the paint so the engine classifies it as intended
+    (svg/elements.py classify): "fill" → filled path (auto_fill),
+    "run" → stroked path (running_stitch; also usable as rung guides for
+    the engine's fill_to_satin). Appended after the last design element so
+    it stitches last and inherits the same parent/layer context.
+    """
+    d = str(op.get("d") or "").strip()
+    if not d or not d.upper().startswith("M"):
+        raise UserError("add_element: 'd' must be SVG path data starting at M")
+    kind = str(op.get("kind") or "run")
+    if kind not in ("fill", "run"):
+        raise UserError("add_element: 'kind' must be fill or run")
+    color = str(op.get("color") or "#000000")
+    import secrets
+    new_id = "elem_" + secrets.token_hex(3)
+    elem = etree.SubElement(tree.getroot(), f"{{{SVG_NS}}}path")
+    elem.set("id", new_id)
+    elem.set("d", d)
+    if kind == "fill":
+        elem.set("fill", color)
+        elem.set("stroke", "none")
+    else:
+        elem.set("fill", "none")
+        elem.set("stroke", color)
+        elem.set("stroke-width", "1")
+    # place after the last design element (element order IS stitch order)
+    last = None
+    for e in tree.getroot().iter():
+        if (isinstance(e.tag, str) and e is not elem and e.get("id")
+                and etree.QName(e.tag).localname in
+                ("path", "rect", "circle", "ellipse", "line", "polygon", "polyline")
+                and not _is_command_use(e) and not _is_command_plumbing(e)):
+            last = e
+    parent = tree.getroot()
+    if last is not None:
+        parent = last.getparent()
+        parent.remove(elem)
+        parent.insert(list(parent).index(last) + 1, elem)
+    _ensure_id(parent)
+    push(proj.history, make_entry(
+        command=f"artifact edit add_element --kind {kind} ({new_id})",
+        patch=node_insert(parent_xpath=_xpath(parent.get("id")),
+                          index=list(parent).index(elem),
+                          after_xml=etree.tostring(elem).decode("utf-8"))))
+    return {"op": "add_element", "id": new_id, "kind": kind}
 
 
 # -- stitch-type conversion -------------------------------------------------------

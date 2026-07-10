@@ -295,6 +295,9 @@
             vector-effect: non-scaling-stroke; pointer-events: none; }
   .bezHandle { fill: #fff; stroke: var(--accent); stroke-width: 1.5;
                vector-effect: non-scaling-stroke; cursor: grab; }
+  .penDraft { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
+              vector-effect: non-scaling-stroke; pointer-events: none; }
+  .node.penFirst { fill: var(--start); }
 </style>
 </head>
 <body>
@@ -357,6 +360,15 @@
           <rect x="6.6" y="4.6" width="2.8" height="2.8" fill="currentColor" stroke="none"/>
         </svg>
         <span class="kbd">A</span>
+      </button>
+      <button class="tool" id="toolPen" type="button"
+              title="Pen (P) — click to place points; click the first point to close as a fill, Enter finishes a running stitch, Esc cancels">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+          <path d="M10.8 1.6 L14.4 5.2 L5.6 14 L1.5 14.5 L2 10.4 Z"/>
+          <path d="M8.9 3.5 L12.5 7.1"/>
+        </svg>
+        <span class="kbd">P</span>
       </button>
     </div>
     <div id="gateBanner">
@@ -1136,8 +1148,51 @@ canvas.addEventListener("pointerdown", (ev) => {
     ev.stopPropagation();
     ev.preventDefault();
     startPan(ev);
+    return;
+  }
+  if (activeTool === "pen" && ev.button === 0) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    const p = clientToSvg(ev);
+    if (!penDraft) penDraft = [];
+    // clicking back on the first point closes the shape → fill
+    if (penDraft.length > 2 &&
+        Math.hypot(p.x - penDraft[0][0], p.y - penDraft[0][1]) < px(8)) {
+      commitPen(true);
+      return;
+    }
+    penDraft.push([p.x, p.y]);
+    renderEditLayer();
   }
 }, true);
+/* pen tool: click-placed points; straight segments — smooth curves after
+   with the node tool (double-click pulls bezier handles out of corners) */
+let penDraft = null;
+function renderPenDraft() {
+  if (!penDraft || !penDraft.length) return;
+  const dd = "M" + penDraft.map(p => fmt(p[0]) + "," + fmt(p[1])).join(" L");
+  el("path", { d: dd, class: "penDraft" }, editLayer);
+  penDraft.forEach(([x, y], i) => el("circle", {
+    cx: x, cy: y, r: px(i === 0 ? 5.5 : 4),
+    class: "node" + (i === 0 ? " penFirst" : "") }, editLayer));
+}
+async function commitPen(closed) {
+  const pts = penDraft;
+  penDraft = null;
+  if (!pts || pts.length < 2) { renderEditLayer(); return; }
+  const d = "M" + pts.map(p => fmt(p[0]) + "," + fmt(p[1])).join(" L")
+            + (closed ? " Z" : "");
+  renderEditLayer();
+  try {
+    const r = await postEdit([{ op: "add_element",
+                                kind: closed ? "fill" : "run", d }]);
+    const id = r && r.results && r.results[0] && r.results[0].id;
+    showToast(closed
+      ? "added fill shape — double-click nodes (A) to smooth corners"
+      : "added running-stitch path — Convert to satin from the Inspect panel");
+    if (id) { setTool("node"); select(id); }
+  } catch (e) { await refresh(); }
+}
 
 /* ---------- rendering ---------- */
 function parseViewBox() {
@@ -1454,6 +1509,10 @@ function renderEditLayer() {
   editLayer.textContent = "";
   const objs = selection.map(byId).filter(Boolean);
   renderInspect(objs);
+  if (activeTool === "pen") {
+    renderPenDraft();
+    return;
+  }
   if (activeTool === "select") {
     if (objs.length) renderTransformGizmo(objs);
     return;
@@ -1914,11 +1973,17 @@ document.addEventListener("keydown", (ev) => {
   const k = ev.key.toLowerCase();
   if (ev.key === "Escape") {
     if ($("helpOverlay").classList.contains("show")) { helpClose(); return; }
+    if (penDraft) { penDraft = null; renderEditLayer(); return; }
     setSelection([]);
+  } else if (ev.key === "Enter" && penDraft) {
+    ev.preventDefault();
+    commitPen(false);
   } else if (!mod && k === "v") {
     setTool("select");
   } else if (!mod && k === "a" && !ev.shiftKey) {
     setTool("node");
+  } else if (!mod && k === "p") {
+    setTool("pen");
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeRung) {
     const o = byId(activeRung.objId);
     const idx = activeRung.index;
@@ -2102,12 +2167,16 @@ function setTool(t) {
   activeTool = t;
   $("toolSelect").classList.toggle("on", t === "select");
   $("toolNode").classList.toggle("on", t === "node");
+  $("toolPen").classList.toggle("on", t === "pen");
   activeRung = null;
   activeNode = null;
+  if (t !== "pen") penDraft = null;
+  canvas.style.cursor = t === "pen" ? "crosshair" : "";
   renderEditLayer();
 }
 $("toolSelect").onclick = () => setTool("select");
 $("toolNode").onclick = () => setTool("node");
+$("toolPen").onclick = () => setTool("pen");
 
 function setViewMode(mode) {
   viewMode = mode;
@@ -2356,6 +2425,7 @@ const HELP = [
   ["Tools", [
     ["V — Select", "move the selection (drag) or scale it (corner handles); markers move with their shape"],
     ["A — Edit nodes", "boundary nodes, satin rails and rungs, fill start/end handles, angle knob"],
+    ["P — Pen", "click to place points; click the first point to close as a fill, Enter finishes a running stitch, Esc cancels. Smooth corners afterwards with A + double-click"],
   ]],
   ["View modes", [
     ["Outline", "artwork and edit handles only"],

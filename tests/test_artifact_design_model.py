@@ -663,3 +663,29 @@ class TestSetSvgAttrStyleCascade:
         fill = next(o for o in read_design(project)["objects"]
                     if o["id"] == "elem_fill")
         assert fill["fill"] == "#111111"      # style declaration back, wins again
+
+
+class TestAddElement:
+    def test_add_run_path_appends_last(self, project):
+        r = apply_edits(project, [{"op": "add_element", "kind": "run",
+                                   "d": "M2,25 L28,25"}])
+        new_id = r["results"][0]["id"]
+        objs = read_design(project)["objects"]
+        assert objs[-1]["id"] == new_id      # element order IS stitch order
+        assert objs[-1]["kind"] == "run"
+
+    def test_add_fill_and_undo(self, project):
+        from cli_anything_inkstitch.artifact.design_model import apply_history_step
+        r = apply_edits(project, [{"op": "add_element", "kind": "fill",
+                                   "d": "M2,16 L8,16 L8,19 L2,19 Z",
+                                   "color": "#ff0000"}])
+        new_id = r["results"][0]["id"]
+        obj = next(o for o in read_design(project)["objects"] if o["id"] == new_id)
+        assert obj["kind"] == "fill"
+        assert obj["fill"] == "#ff0000"
+        apply_history_step(project)
+        assert all(o["id"] != new_id for o in read_design(project)["objects"])
+
+    def test_bad_d_rejected(self, project):
+        with pytest.raises(UserError, match="path data"):
+            apply_edits(project, [{"op": "add_element", "kind": "run", "d": "10,10"}])
