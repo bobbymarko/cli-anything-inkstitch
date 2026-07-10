@@ -289,9 +289,13 @@ def read_design(project_file: str) -> dict[str, Any]:
                 subpaths = split_subpaths(elem.get("d"))
                 obj["rails"] = subpaths[:2]
                 obj["rungs"] = subpaths[2:]
-            if kind == "fill":
-                # engine names first; legacy invented names still display so
-                # old designs show their (inert) markers until migrated
+            if kind in ("fill", "satin"):
+                # SatinColumn reads the same commands as fills — engine
+                # satin_column.py start_point()/end_point() call
+                # _get_command_point('starting_point'/'ending_point'), and
+                # the command wins over nearest-point routing when present.
+                # Engine names first; legacy invented names still display so
+                # old designs show their (inert) markers until migrated.
                 for cmd in obj["commands"]:
                     name = cmd["command"]
                     entry = {"x": cmd["x"], "y": cmd["y"], "use_id": cmd["use_id"],

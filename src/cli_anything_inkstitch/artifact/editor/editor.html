@@ -1555,7 +1555,7 @@ function renderAll() {
     hit.addEventListener("dblclick", (ev) => { ev.stopPropagation(); addRung(o, ev); });
     hit.addEventListener("contextmenu", (ev) => {
       if (!selection.includes(o.id)) select(o.id);
-      showContextMenu(ev, objectMenuItems(o));
+      showContextMenu(ev, objectMenuItems(o, clientToSvg(ev)));
     });
   }
   renderEditLayer();
@@ -2018,6 +2018,17 @@ function renderSatin(o) {
     if (activeNode && activeNode.objId === o.id && activeNode.rail === ri)
       renderBezControls(o, railSegs[ri], activeNode.index, { rail: ri });
   });
+  // start/end command handles — the engine's SatinColumn reads the same
+  // starting_point/ending_point commands fills do (they win over
+  // nearest-point routing), so satins get the same draggable handles
+  for (const role of ["start", "end"]) {
+    const h = o[role];
+    if (!h) continue;
+    const c = el("circle", { cx: h.x, cy: h.y, r: px(5.5),
+                             class: "handle " + role }, editLayer);
+    c.addEventListener("pointerdown", (ev) =>
+      startDrag(ev, { type: "handle", obj: o, role, use_id: h.use_id }));
+  }
   // rungs + endpoints
   o.rungs.forEach((d, ri) => {
     const segs = tokenizePath(d);
@@ -2140,8 +2151,10 @@ const CONVERT_TARGETS = { satin: [["fill", "Fill"], ["run", "Running stitch"]],
                           fill: [["run", "Running stitch"]],
                           run: [["satin", "Satin column"], ["fill", "Fill"]] };
 /* the same actions everywhere an object can be right-clicked (layer row,
-   canvas shape) — all reuse existing edit ops, so everything undoes */
-function objectMenuItems(o) {
+   canvas shape) — all reuse existing edit ops, so everything undoes.
+   `at` = svg coords of the click (canvas menus only): placing start/end
+   commands needs a position. */
+function objectMenuItems(o, at) {
   const idx = design.objects.findIndex(x => x.id === o.id);
   const items = [{
     label: "Rename",
@@ -2153,6 +2166,18 @@ function objectMenuItems(o) {
       }, 150);
     },
   }];
+  if (at && (o.kind === "fill" || o.kind === "satin")) {
+    // engine: starting_point/ending_point commands (read by FillStitch and
+    // SatinColumn alike) — attach at the clicked spot, then drag to refine
+    for (const [cmd, label] of [["starting_point", "start"], ["ending_point", "end"]]) {
+      if (o[cmd === "starting_point" ? "start" : "end"]) continue;
+      items.push({ label: `Add ${label} point here`,
+                   run: () => postEdit([{ op: "attach_command", id: o.id,
+                                          command: cmd,
+                                          x: fmt(at.x), y: fmt(at.y) }])
+                     .catch(() => refresh()) });
+    }
+  }
   for (const [to, label] of CONVERT_TARGETS[o.kind] || [])
     items.push({ label: "Convert to " + label.toLowerCase(),
                  run: () => postEdit([{ op: "convert_element", id: o.id, to }])
@@ -2259,10 +2284,20 @@ function startDrag(ev, desc) {
     } else if (desc.type === "handle") {
       // start/end handles are constrained to the shape's outline: the engine
       // stitches from/to boundary positions, so a free-floating handle is a
-      // lie — snap the pointer to the nearest boundary point while dragging
+      // lie — snap the pointer to the nearest boundary point while dragging.
+      // Satins snap to their rails (never the rungs — editing scaffolding).
       const h = desc.obj[desc.role];
-      if (!desc.boundary) desc.boundary = flatten(tokenizePath(desc.obj.d));
-      const snapped = nearestOnPoly(desc.boundary, p.x, p.y);
+      if (!desc.boundaries)
+        desc.boundaries = desc.obj.kind === "satin" && desc.obj.rails
+          ? desc.obj.rails.map(r => flatten(tokenizePath(r)))
+          : [flatten(tokenizePath(desc.obj.d))];
+      let snapped = null, best = Infinity;
+      for (const poly of desc.boundaries) {
+        const q = nearestOnPoly(poly, p.x, p.y);
+        if (!q) continue;
+        const dd = Math.hypot(q[0] - p.x, q[1] - p.y);
+        if (dd < best) { best = dd; snapped = q; }
+      }
       if (snapped) { h.x = snapped[0]; h.y = snapped[1]; }
       else { h.x += dx; h.y += dy; }
     } else if (desc.type === "g-move") {

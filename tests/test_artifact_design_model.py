@@ -689,3 +689,19 @@ class TestAddElement:
     def test_bad_d_rejected(self, project):
         with pytest.raises(UserError, match="path data"):
             apply_edits(project, [{"op": "add_element", "kind": "run", "d": "10,10"}])
+
+
+class TestSatinStartEnd:
+    """Satins promote starting_point/ending_point commands into start/end
+    handles just like fills — the engine's SatinColumn reads the same
+    commands (satin_column.py _get_command_point)."""
+
+    def test_satin_start_promoted_to_handle(self, project):
+        r = apply_edits(project, [{"op": "attach_command", "id": "elem_satin",
+                                   "command": "starting_point",
+                                   "x": 16, "y": 2}])
+        satin = next(o for o in read_design(project)["objects"]
+                     if o["id"] == "elem_satin")
+        assert satin["start"]["use_id"] == r["results"][0]["use_id"]
+        assert satin["start"]["x"] == 16
+        assert "end" not in satin or satin.get("end") is None

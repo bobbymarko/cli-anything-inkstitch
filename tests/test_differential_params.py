@@ -158,6 +158,23 @@ RUN_LINE = ('<path id="e" d="M5,20 C15,10 25,30 35,20" fill="none" '
             'stroke="#000" stroke-width="0.8"/>')
 
 
+class TestSatinStartEndCommands:
+    """SatinColumn reads starting_point/ending_point commands
+    (satin_column.py start_point()/end_point() → _get_command_point('...')
+    .target_point; the command wins over nearest-point routing) — so
+    moving the marker between the column's ends must change the plan."""
+
+    def test_moving_starting_point_changes_plan(self, tmp_path):
+        p = make_project(tmp_path, SATIN)
+        r = apply_edits(p, [{"op": "attach_command", "id": "e",
+                             "command": "starting_point", "x": 8, "y": 15}])
+        use_id = r["results"][0]["use_id"]
+        left_start = plan_hash(p)
+        apply_edits(p, [{"op": "move_command", "use_id": use_id,
+                         "x": 32, "y": 25}])
+        assert plan_hash(p) != left_start
+
+
 class TestConvertElementEngine:
     """Engine-backed conversions: design_model convert_element shells out to
     the real extension and records a document_replace history entry."""
