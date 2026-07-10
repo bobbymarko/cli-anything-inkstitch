@@ -198,6 +198,15 @@
   #inspectBody .punit { color: var(--muted); font-size: 11px; }
   #inspectBody .moreHead { margin: 8px 0 2px; font-size: 11px; color: var(--muted);
           cursor: pointer; user-select: none; }
+  .colorRow { display: flex; align-items: center; gap: 8px; padding: 4px 2px;
+              border-radius: 6px; cursor: pointer; }
+  .colorRow:hover { background: rgba(255,255,255,0.04); }
+  .colorRow .nm { flex: 1; font-family: ui-monospace, monospace; font-size: 11px; }
+  .colorRow .kd { color: var(--muted); font-size: 11px; }
+  .colorSw { width: 26px; height: 20px; padding: 0; border: 1px solid var(--line);
+             border-radius: 5px; background: none; cursor: pointer; }
+  .colorSw::-webkit-color-swatch-wrapper { padding: 1px; }
+  .colorSw::-webkit-color-swatch { border: none; border-radius: 4px; }
   #inspectBody .moreHead::before { content: "▸ "; }
   #inspectBody .moreHead.open::before { content: "▾ "; }
   #inspectBody .pval { text-align: right; word-break: break-all; }
@@ -376,6 +385,10 @@
       <div class="panel" data-panel="layers">
         <div class="panelHead">Layers</div>
         <div class="panelBody" id="layersBody"></div>
+      </div>
+      <div class="panel" data-panel="colors">
+        <div class="panelHead">Colors</div>
+        <div class="panelBody" id="colorsBody"></div>
       </div>
       <div class="panel closed" data-panel="history">
         <div class="panelHead">History</div>
@@ -2137,8 +2150,8 @@ function connectSSE() {
   es.onerror = () => { es.close(); setTimeout(connectSSE, 2000); };
 }
 
-/* ---------- right panel stack (Overview / Inspect / Layers / History) ---------- */
-for (const pnl of ["overview", "inspect", "layers", "history"]) {
+/* ---------- right panel stack (Overview / Inspect / Layers / Colors / History) ---------- */
+for (const pnl of ["overview", "inspect", "layers", "colors", "history"]) {
   const root = document.querySelector(`[data-panel="${pnl}"]`);
   root.querySelector(".panelHead").addEventListener("click", () => {
     root.classList.toggle("closed");
@@ -2240,6 +2253,60 @@ function renderLayers() {
     });
     body.appendChild(r);
   });
+}
+
+/* Colors panel — machine embroidery thinks in THREADS: one thread colors
+   many elements, so rows group elements by display color and recoloring a
+   row rethreads all of them (one set_svg_attr per element: fill attr for
+   fills, stroke for satins/runs — the same color the engine stitches).
+   Clicking a row selects the group. */
+function renderColors() {
+  const body = $("colorsBody");
+  if (!body || !design) return;
+  body.textContent = "";
+  const groups = new Map();     // colorKey → {color, objs: []}
+  for (const o of design.objects) {
+    const c = (o.kind === "fill" ? o.fill : o.stroke) || o.fill || o.stroke;
+    if (!c) continue;
+    const key = c.toLowerCase();
+    if (!groups.has(key)) groups.set(key, { color: c, objs: [] });
+    groups.get(key).objs.push(o);
+  }
+  for (const { color, objs } of groups.values()) {
+    const r = document.createElement("div");
+    r.className = "colorRow";
+    const input = document.createElement("input");
+    input.type = "color";
+    input.className = "colorSw";
+    // native picker needs #rrggbb — named/short colors fall back via canvas
+    input.value = normalizeHex(color);
+    input.title = "Change this thread color";
+    input.addEventListener("click", (ev) => ev.stopPropagation());
+    input.addEventListener("change", () => {
+      const next = input.value;
+      postEdit(objs.map(o => ({
+        op: "set_svg_attr", id: o.id,
+        name: o.kind === "fill" ? "fill" : "stroke", value: next,
+      }))).catch(() => refresh());
+    });
+    const hex = document.createElement("span");
+    hex.className = "nm";
+    hex.textContent = normalizeHex(color);
+    const count = document.createElement("span");
+    count.className = "kd";
+    count.textContent = objs.length === 1 ? "1 object" : `${objs.length} objects`;
+    r.append(input, hex, count);
+    r.addEventListener("click", () => setSelection(objs.map(o => o.id)));
+    body.appendChild(r);
+  }
+}
+let _hexCtx = null;
+function normalizeHex(c) {
+  if (/^#[0-9a-fA-F]{6}$/.test(c)) return c.toLowerCase();
+  if (!_hexCtx) _hexCtx = document.createElement("canvas").getContext("2d");
+  _hexCtx.fillStyle = "#000";
+  _hexCtx.fillStyle = c;           // browser canonicalizes to #rrggbb
+  return _hexCtx.fillStyle;
 }
 
 async function renderHistory() {
@@ -2361,6 +2428,7 @@ async function refresh() {
   renderAll();
   renderOverview();
   renderLayers();
+  renderColors();
   renderHistory();
   scheduleTier2();
 }

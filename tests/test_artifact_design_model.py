@@ -636,3 +636,30 @@ class TestConvertElement:
             apply_edits(project, [
                 {"op": "set_attr", "id": "elem_fill", "name": "angle", "value": "5"},
                 {"op": "convert_element", "id": "elem_run", "to": "satin"}])
+
+
+class TestSetSvgAttrStyleCascade:
+    """Inline style beats presentation attrs — a set_svg_attr paint write
+    against a styled element used to be a silent visual no-op (the engine
+    stitches the cascade winner). The op now strips the competing style
+    declaration in the same undoable patch."""
+
+    def test_paint_write_strips_competing_style(self, project):
+        apply_edits(project, [{"op": "set_svg_attr", "id": "elem_fill",
+                               "name": "style", "value": "fill:#111111; opacity:0.9"}])
+        apply_edits(project, [{"op": "set_svg_attr", "id": "elem_fill",
+                               "name": "fill", "value": "#222222"}])
+        fill = next(o for o in read_design(project)["objects"]
+                    if o["id"] == "elem_fill")
+        assert fill["fill"] == "#222222"      # attr wins now — style stripped
+
+    def test_undo_restores_the_style(self, project):
+        from cli_anything_inkstitch.artifact.design_model import apply_history_step
+        apply_edits(project, [{"op": "set_svg_attr", "id": "elem_fill",
+                               "name": "style", "value": "fill:#111111"}])
+        apply_edits(project, [{"op": "set_svg_attr", "id": "elem_fill",
+                               "name": "fill", "value": "#222222"}])
+        apply_history_step(project)
+        fill = next(o for o in read_design(project)["objects"]
+                    if o["id"] == "elem_fill")
+        assert fill["fill"] == "#111111"      # style declaration back, wins again

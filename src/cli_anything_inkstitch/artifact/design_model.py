@@ -414,9 +414,25 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
             raise UserError(f"no element with id={op['id']!r}")
         before = {key: elem.get(key)}
         elem.set(key, str(op["value"]))
+        # inline style beats presentation attrs in the SVG cascade (and the
+        # engine reads the cascade winner) — a competing style declaration
+        # would make this write a silent visual no-op, so strip it in the
+        # same undoable patch
+        style = elem.get("style")
+        if attr != "label" and style and attr in style:
+            decls = [s.strip() for s in style.split(";")
+                     if s.strip() and not s.strip().startswith(attr + ":")]
+            before["style"] = style
+            if decls:
+                elem.set("style", "; ".join(decls))
+            else:
+                del elem.attrib["style"]
+        after = {key: elem.get(key)}
+        if "style" in before:
+            after["style"] = elem.get("style")
         push(proj.history, make_entry(
             command=f"artifact edit set_svg_attr --id {op['id']} {attr}={op['value']}",
-            patch=attr_diff(_xpath(op["id"]), before, {key: elem.get(key)})))
+            patch=attr_diff(_xpath(op["id"]), before, after)))
         return {"op": name, "id": op["id"], "name": attr}
 
     if name == "del_attr":
