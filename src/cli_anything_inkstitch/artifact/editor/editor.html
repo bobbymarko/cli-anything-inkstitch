@@ -240,6 +240,23 @@
   .ctxItem.danger { color: var(--end); }
   .ctxItem.danger:hover { background: rgba(229,83,75,.12); }
   .ctxSep { height: 1px; background: var(--line); margin: 4px 6px; }
+  #rulerTop { position: absolute; top: 0; left: 18px; right: 0; height: 18px;
+              z-index: 4; display: none; cursor: s-resize; }
+  #rulerLeft { position: absolute; top: 18px; left: 0; bottom: 0; width: 18px;
+               z-index: 4; display: none; cursor: e-resize; }
+  #rulerCorner { position: absolute; top: 0; left: 0; width: 18px; height: 18px;
+                 z-index: 4; display: none; background: rgba(20,22,26,.95);
+                 border-right: 1px solid var(--line);
+                 border-bottom: 1px solid var(--line); }
+  .guideLine { stroke: #46c8cd; stroke-dasharray: 6 4; opacity: .8;
+               vector-effect: non-scaling-stroke; pointer-events: none; }
+  .guideHit { stroke: rgba(0,0,0,0); stroke-width: 7;
+              vector-effect: non-scaling-stroke; }
+  .guideHit.gx { cursor: ew-resize; }
+  .guideHit.gy { cursor: ns-resize; }
+  .gridLine { stroke: rgba(255,255,255,.05); vector-effect: non-scaling-stroke;
+              pointer-events: none; }
+  .gridLine.major { stroke: rgba(255,255,255,.11); }
   .layerRow .swInput::-webkit-color-swatch-wrapper { padding: 0; }
   .layerRow .swInput::-webkit-color-swatch { border: 1px solid var(--line);
                                              border-radius: 3px; }
@@ -370,6 +387,9 @@
   <div id="canvasWrap">
     <canvas id="realCanvas"></canvas>
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+    <canvas id="rulerTop" title="Drag down to pull out a horizontal guide"></canvas>
+    <canvas id="rulerLeft" title="Drag right to pull out a vertical guide"></canvas>
+    <div id="rulerCorner"></div>
     <div id="toast"></div>
     <div id="toolbar" role="toolbar" aria-label="Tools">
       <button class="tool on" id="toolSelect" type="button"
@@ -404,6 +424,21 @@
         <button data-mode="stitches" type="button" title="Thin strokes — read stitch directions">Stitches</button>
         <button data-mode="realistic" type="button" title="Thread thickness with shading">Realistic</button>
       </div>
+      <span class="tbSep"></span>
+      <button class="tool" id="toggleRulers" type="button"
+              title="Rulers & guides — drag a guide out of a ruler">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+          <rect x="1.5" y="5.5" width="13" height="5" rx="1"/>
+          <path d="M4.5 5.5 v2.4 M7.5 5.5 v3.4 M10.5 5.5 v2.4 M13 5.5 v3.4"/>
+        </svg>
+      </button>
+      <button class="tool" id="toggleGrid" type="button" title="mm grid">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+          <path d="M1.5 5.8 H14.5 M1.5 10.2 H14.5 M5.8 1.5 V14.5 M10.2 1.5 V14.5"/>
+        </svg>
+      </button>
       <div id="timelineBar">
         <span class="tbSep"></span>
         <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
@@ -1143,7 +1178,179 @@ function setViewBox() {
   canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
   renderEditLayer();                          // keep marker sizes screen-constant
   if (typeof drawRealistic === "function") drawRealistic();
+  if (typeof drawRulers === "function") { drawRulers(); renderGrid(); }
 }
+/* ---------- rulers, grid & guides ---------- */
+let rulersOn = localStorage.getItem("artifact-rulers") !== "0";  // default on
+let gridOn = localStorage.getItem("artifact-grid") === "1";
+let guides = [];        // {axis: "x"|"y", pos} — x = vertical line at x=pos
+try {
+  guides = JSON.parse(localStorage.getItem("artifact-guides-" + KEY) || "[]");
+} catch (e) { /* fresh */ }
+const saveGuides = () => {
+  try { localStorage.setItem("artifact-guides-" + KEY, JSON.stringify(guides)); }
+  catch (e) { /* private mode */ }
+};
+function unitsPerMm() {
+  const m = /^([\d.]+)\s*mm$/.exec((design && design.width) || "");
+  return m && baseVb ? baseVb.w / parseFloat(m[1]) : 96 / 25.4;
+}
+/* screen-space mapping shared with drawRealistic (preserveAspectRatio meet) */
+function viewTransform() {
+  const rect = canvas.getBoundingClientRect();
+  const s = Math.min(rect.width / vb.w, rect.height / vb.h);
+  return { rect,
+           s,
+           ox: (rect.width - vb.w * s) / 2 - vb.x * s,
+           oy: (rect.height - vb.h * s) / 2 - vb.y * s };
+}
+function rulerStepMm(pxPerMm) {
+  for (const [minor, major] of [[1, 10], [2, 10], [5, 25], [10, 50], [50, 100]])
+    if (pxPerMm * minor >= 5) return [minor, major];
+  return [100, 500];
+}
+function drawRulers() {
+  const rt = $("rulerTop"), rl = $("rulerLeft"), rc = $("rulerCorner");
+  const on = rulersOn && !!design && !!baseVb;
+  rt.style.display = rl.style.display = rc.style.display = on ? "block" : "none";
+  if (!on) return;
+  const { rect, s, ox, oy } = viewTransform();
+  const upm = unitsPerMm();
+  const pxPerMm = s * upm;
+  const [minor, major] = rulerStepMm(pxPerMm);
+  const dpr = window.devicePixelRatio || 1;
+  const draw = (cv, horiz) => {
+    const w = horiz ? rect.width - 18 : 18, h = horiz ? 18 : rect.height - 18;
+    if (cv.width !== Math.round(w * dpr)) cv.width = Math.round(w * dpr);
+    if (cv.height !== Math.round(h * dpr)) cv.height = Math.round(h * dpr);
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "rgba(20,22,26,.95)";
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = "rgba(255,255,255,.25)";
+    ctx.fillStyle = "#9aa1b0";
+    ctx.font = "9px ui-monospace, monospace";
+    ctx.beginPath();
+    // ruler canvases sit 18px in from the wrap origin — offset accordingly
+    const off = horiz ? ox - 18 : oy - 18;
+    const span = horiz ? w : h;
+    const mm0 = Math.floor((0 - off) / pxPerMm / minor) * minor;
+    const mm1 = (span - off) / pxPerMm;
+    for (let mm = mm0; mm <= mm1; mm += minor) {
+      const t = mm * pxPerMm + off;
+      if (t < 0) continue;
+      const isMajor = Math.round(mm / minor) % Math.round(major / minor) === 0;
+      const len = isMajor ? 10 : 4.5;
+      if (horiz) { ctx.moveTo(t, 18); ctx.lineTo(t, 18 - len); }
+      else { ctx.moveTo(18, t); ctx.lineTo(18 - len, t); }
+      if (isMajor) {
+        if (horiz) ctx.fillText(String(Math.round(mm)), t + 2, 8);
+        else {
+          ctx.save();
+          ctx.translate(8, t + 2);
+          ctx.rotate(-Math.PI / 2);
+          ctx.textAlign = "right";
+          ctx.fillText(String(Math.round(mm)), 0, 0);
+          ctx.restore();
+        }
+      }
+    }
+    ctx.stroke();
+  };
+  draw(rt, true);
+  draw(rl, false);
+}
+let gridLayer = null;
+function renderGrid() {
+  if (!gridLayer) return;
+  gridLayer.textContent = "";
+  if (!gridOn || !design || !baseVb) return;
+  const { s } = viewTransform();
+  const upm = unitsPerMm();
+  const [minor, major] = rulerStepMm(s * upm);
+  const step = minor * upm;
+  const x0 = Math.floor(vb.x / step) * step, x1 = vb.x + vb.w;
+  const y0 = Math.floor(vb.y / step) * step, y1 = vb.y + vb.h;
+  const majEvery = Math.round(major / minor);
+  for (let x = x0, i = Math.round(x0 / step); x <= x1; x += step, i++)
+    el("line", { x1: x, y1: vb.y, x2: x, y2: y1,
+                 class: "gridLine" + (i % majEvery === 0 ? " major" : "") }, gridLayer);
+  for (let y = y0, i = Math.round(y0 / step); y <= y1; y += step, i++)
+    el("line", { x1: vb.x, y1: y, x2: x1, y2: y,
+                 class: "gridLine" + (i % majEvery === 0 ? " major" : "") }, gridLayer);
+}
+let guideLayer = null;
+function renderGuides() {
+  if (!guideLayer) return;
+  guideLayer.textContent = "";
+  const ext = Math.max(baseVb ? baseVb.w : 1000, 1000) * 20;
+  for (const g of guides) {
+    const coords = g.axis === "x"
+      ? { x1: g.pos, y1: -ext, x2: g.pos, y2: ext }
+      : { x1: -ext, y1: g.pos, x2: ext, y2: g.pos };
+    el("line", { ...coords, class: "guideLine" }, guideLayer);
+    const hit = el("line", { ...coords, class: "guideHit g" + g.axis }, guideLayer);
+    hit.addEventListener("pointerdown", (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      dragGuide(g);
+    });
+    hit.addEventListener("contextmenu", (ev) => showContextMenu(ev, [
+      { label: "Delete guide", danger: true,
+        run: () => { guides.splice(guides.indexOf(g), 1); saveGuides(); renderGuides(); } },
+    ]));
+  }
+}
+function dragGuide(g) {
+  const move = (e) => {
+    const p = clientToSvg(e);
+    g.pos = g.axis === "x" ? p.x : p.y;
+    renderGuides();
+  };
+  const up = (e) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    // dropped back on a ruler → remove (Illustrator gesture)
+    const el2 = document.elementFromPoint(e.clientX, e.clientY);
+    if (el2 === $("rulerTop") || el2 === $("rulerLeft"))
+      guides.splice(guides.indexOf(g), 1);
+    saveGuides();
+    renderGuides();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+for (const [id, axis] of [["rulerTop", "y"], ["rulerLeft", "x"]]) {
+  $(id).addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    const g = { axis, pos: 0 };
+    guides.push(g);
+    dragGuide(g);
+  });
+}
+/* pointer snapping to guides for node-following drags */
+function snapPoint(p) {
+  for (const g of guides) {
+    if (g.axis === "x" && Math.abs(p.x - g.pos) < px(5)) p.x = g.pos;
+    if (g.axis === "y" && Math.abs(p.y - g.pos) < px(5)) p.y = g.pos;
+  }
+  return p;
+}
+$("toggleRulers").classList.toggle("on", rulersOn);
+$("toggleGrid").classList.toggle("on", gridOn);
+$("toggleRulers").onclick = () => {
+  rulersOn = !rulersOn;
+  localStorage.setItem("artifact-rulers", rulersOn ? "1" : "0");
+  $("toggleRulers").classList.toggle("on", rulersOn);
+  drawRulers();
+};
+$("toggleGrid").onclick = () => {
+  gridOn = !gridOn;
+  localStorage.setItem("artifact-grid", gridOn ? "1" : "0");
+  $("toggleGrid").classList.toggle("on", gridOn);
+  renderGrid();
+};
+window.addEventListener("resize", () => { drawRulers(); renderGrid(); });
 function clientToSvg(ev) {
   const pt = new DOMPoint(ev.clientX, ev.clientY);
   return pt.matrixTransform(canvas.getScreenCTM().inverse());
@@ -1304,10 +1511,15 @@ function renderAll() {
   const bg = el("rect", { x: baseVb.x - baseVb.w, y: baseVb.y - baseVb.h,
     width: baseVb.w * 3, height: baseVb.h * 3, fill: "transparent" }, canvas);
   bg.addEventListener("pointerdown", startPan);
+  gridLayer = el("g", {}, canvas);
   artworkLayer = el("g", { class: "artwork" }, canvas);
   planLayer = el("g", { class: "planLayer" }, canvas);
+  guideLayer = el("g", {}, canvas);
   editLayer = el("g", {}, canvas);
   renderPlanLayer();
+  renderGrid();
+  renderGuides();
+  drawRulers();
   for (const o of design.objects) {
     if (!o.d) continue;
     // satins preview as the FILLED column between the rails — the thread
@@ -2035,7 +2247,8 @@ function startDrag(ev, desc) {
   dragging = desc;
   const move = (e) => {
     movedAny = true;
-    const p = clientToSvg(e);
+    // node-following drags snap the pointer to nearby guides
+    const p = snapPoint(clientToSvg(e));
     const dx = p.x - last.x, dy = p.y - last.y;
     last = p;
     if (desc.type === "angle") {
@@ -2801,6 +3014,7 @@ const HELP = [
     [`${ALT}+scroll or pinch`, "zoom at cursor"],
     ["Hold Space + drag", "hand tool (pan)"],
     ["Hold Z + click / drag", `zoom in at the cursor / zoom to the drawn box (${ALT} = zoom out)`],
+    ["Rulers & grid", "toolbar toggles; drag out of a ruler to place a guide (drags snap to it), drag a guide back to remove"],
     [`${MOD_LABEL}= / ${MOD_LABEL}−`, "zoom in / out"],
     [`${MOD_LABEL}0 / ${MOD_LABEL}1`, "fit in window / actual size"],
   ]],
