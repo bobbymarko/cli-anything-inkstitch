@@ -213,6 +213,12 @@
              border-radius: 5px; background: none; cursor: pointer; }
   .colorSw::-webkit-color-swatch-wrapper { padding: 1px; }
   .colorSw::-webkit-color-swatch { border: none; border-radius: 4px; }
+  .layerRow .swInput { width: 13px; height: 13px; padding: 0; border: none;
+                       border-radius: 3px; background: none; cursor: pointer;
+                       flex: none; }
+  .layerRow .swInput::-webkit-color-swatch-wrapper { padding: 0; }
+  .layerRow .swInput::-webkit-color-swatch { border: 1px solid var(--line);
+                                             border-radius: 3px; }
   #inspectBody .moreHead::before { content: "▸ "; }
   #inspectBody .moreHead.open::before { content: "▾ "; }
   #inspectBody .pval { text-align: right; word-break: break-all; }
@@ -2425,9 +2431,19 @@ function renderLayers() {
     const num = document.createElement("span");
     num.className = "num";
     num.textContent = i + 1;
-    const sw = document.createElement("span");
-    sw.className = "sw";
-    sw.style.background = o.fill || o.stroke || "transparent";
+    // editable swatch: recolors just this element (Colors panel rethreads
+    // the whole thread group; this is the per-element complement)
+    const sw = document.createElement("input");
+    sw.type = "color";
+    sw.className = "sw swInput";
+    sw.value = normalizeHex(o.fill || o.stroke || "#000000");
+    sw.title = "Change this element's color";
+    sw.addEventListener("click", (ev) => ev.stopPropagation());
+    sw.addEventListener("change", () => {
+      postEdit([{ op: "set_svg_attr", id: o.id,
+                  name: o.kind === "fill" ? "fill" : "stroke",
+                  value: sw.value }]).catch(() => refresh());
+    });
     const nm = document.createElement("span");
     nm.className = "nm";
     nm.textContent = o.label || o.id;
