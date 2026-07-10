@@ -8,7 +8,7 @@ from lxml import etree
 from cli_anything_inkstitch.binary import require, run_extension
 from cli_anything_inkstitch.commands._helpers import open_project
 from cli_anything_inkstitch.errors import UserError
-from cli_anything_inkstitch.history import subtree_replace
+from cli_anything_inkstitch.history import document_replace, make_entry, push
 from cli_anything_inkstitch.output import emit
 
 
@@ -36,6 +36,13 @@ def _run_tool(ctx, project_path, extension_name, ids, args):
             return
         new_tree = etree.ElementTree(etree.fromstring(stdout))
         ensure_inkstitch_namespace(new_tree)
+        # binary tools rewrite the whole document — record it so undo/redo
+        # and the artifact History panel see it like any other edit
+        push(proj.history, make_entry(
+            command=f"tools {extension_name}" + (f" --ids {','.join(ids)}" if ids else ""),
+            patch=document_replace(
+                etree.tostring(_tree.getroot()).decode("utf-8"),
+                etree.tostring(new_tree.getroot()).decode("utf-8"))))
         proj.svg_sha256 = save_svg(new_tree, proj.svg_path)
         proj.save()
         emit(ctx, {"tool": extension_name, "ids": ids, "changed": True, "bytes": len(stdout)})

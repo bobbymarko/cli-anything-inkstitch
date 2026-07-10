@@ -202,3 +202,28 @@ def test_metadata_undo_removes_added_key():
     _reverse_metadata(proj, patch)
     assert "thread_palette" not in proj.session
     assert proj.session["units"] == "mm"
+
+
+class TestDocumentReplace:
+    """document_replace swaps the whole root — the patch shape binary tools
+    record (tools convert-to-satin etc. rewrite the full SVG on stdout,
+    and subtree_replace refuses root targets)."""
+
+    def test_apply_and_reverse_roundtrip(self, tree):
+        from cli_anything_inkstitch.history import document_replace
+        before = etree.tostring(tree.getroot()).decode()
+        new_root = etree.fromstring(before)
+        new_root.find(".//*[@id='a']").set("stroke", "blue")
+        after = etree.tostring(new_root).decode()
+
+        patch = document_replace(before, after)
+        apply_patch(tree, patch)
+        assert find(tree, "a").get("stroke") == "blue"
+        apply_patch(tree, patch, reverse=True)
+        assert find(tree, "a").get("stroke") == "red"
+
+    def test_oversize_document_degrades_to_marker(self):
+        from cli_anything_inkstitch.history import MAX_PATCH_XML_BYTES, document_replace
+        huge = "<svg>" + "x" * MAX_PATCH_XML_BYTES + "</svg>"
+        entry = make_entry("tools something", document_replace(huge, huge))
+        assert entry["patch"]["type"] == "oversize"

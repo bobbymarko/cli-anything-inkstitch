@@ -51,6 +51,18 @@ def subtree_replace(target_xpath: str, before_xml: str, after_xml: str) -> dict:
     }
 
 
+def document_replace(before_xml: str, after_xml: str) -> dict:
+    """Whole-document swap — for binary tools that rewrite the full SVG
+    (subtree_replace can't target the root). Same oversize guard applies:
+    make_entry degrades entries beyond MAX_PATCH_XML_BYTES to an explicit
+    non-undoable marker."""
+    return {
+        "type": "document_replace",
+        "before_xml": before_xml,
+        "after_xml": after_xml,
+    }
+
+
 def node_insert(parent_xpath: str, index: int, after_xml: str) -> dict:
     return {
         "type": "node_insert",
@@ -148,6 +160,10 @@ def apply_patch(tree, patch: dict, *, reverse: bool = False) -> None:
         _apply_attr_diff(tree, patch, reverse=reverse)
     elif ptype == "subtree_replace":
         _apply_subtree_replace(tree, patch, reverse=reverse)
+    elif ptype == "document_replace":
+        xml = patch["before_xml"] if reverse else patch["after_xml"]
+        tree._setroot(etree.fromstring(xml.encode("utf-8")
+                                       if isinstance(xml, str) else xml))
     elif ptype == "node_insert":
         _apply_node_insert(tree, patch, reverse=reverse)
     elif ptype == "node_delete":

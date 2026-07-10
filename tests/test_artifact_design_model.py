@@ -587,3 +587,52 @@ class TestAvailableParams:
         assert "angle" in fill["params"]
         assert "angle" not in fill["available_params"]
         assert "fill_method" not in fill["available_params"]
+
+
+class TestConvertElement:
+    """Pure-lxml conversions (engine-backed pairs are exercised in
+    test_differential_params.py with the real binary)."""
+
+    def test_satin_to_fill_band(self, project):
+        apply_edits(project, [{"op": "convert_element",
+                               "id": "elem_satin", "to": "fill"}])
+        design = read_design(project)
+        obj = next(o for o in design["objects"] if o["id"] == "elem_satin")
+        assert obj["kind"] == "fill"
+        assert obj["fill"] == "#000000"          # took the rail stroke color
+        assert "satin_column" not in obj["params"]
+        assert obj["d"].rstrip().endswith("Z")   # closed band ring
+
+    def test_satin_to_fill_is_undoable(self, project):
+        from cli_anything_inkstitch.artifact.design_model import apply_history_step
+        apply_edits(project, [{"op": "convert_element",
+                               "id": "elem_satin", "to": "fill"}])
+        apply_history_step(project)
+        design = read_design(project)
+        obj = next(o for o in design["objects"] if o["id"] == "elem_satin")
+        assert obj["kind"] == "satin"
+        assert obj["params"]["satin_column"] == "True"
+
+    def test_run_to_fill_paints(self, project):
+        apply_edits(project, [{"op": "convert_element",
+                               "id": "elem_run", "to": "fill"}])
+        obj = next(o for o in read_design(project)["objects"]
+                   if o["id"] == "elem_run")
+        assert obj["kind"] == "fill"
+        assert obj["fill"] == "#000000"
+
+    def test_fill_to_satin_needs_rungs(self, project):
+        with pytest.raises(UserError, match="rung"):
+            apply_edits(project, [{"op": "convert_element",
+                                   "id": "elem_fill", "to": "satin"}])
+
+    def test_same_kind_rejected(self, project):
+        with pytest.raises(UserError, match="already"):
+            apply_edits(project, [{"op": "convert_element",
+                                   "id": "elem_fill", "to": "fill"}])
+
+    def test_convert_must_be_alone_in_batch(self, project):
+        with pytest.raises(UserError, match="only op"):
+            apply_edits(project, [
+                {"op": "set_attr", "id": "elem_fill", "name": "angle", "value": "5"},
+                {"op": "convert_element", "id": "elem_run", "to": "satin"}])

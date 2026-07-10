@@ -154,6 +154,30 @@ class TestComboValueDifferential:
         assert stored == "contour_fill"               # id string out
 
 
+RUN_LINE = ('<path id="e" d="M5,20 C15,10 25,30 35,20" fill="none" '
+            'stroke="#000" stroke-width="0.8"/>')
+
+
+class TestConvertElementEngine:
+    """Engine-backed conversions: design_model convert_element shells out to
+    the real extension and records a document_replace history entry."""
+
+    def test_run_to_satin_and_undo(self, tmp_path):
+        from cli_anything_inkstitch.artifact.design_model import (
+            apply_history_step,
+            read_design,
+        )
+        p = make_project(tmp_path, RUN_LINE)
+        apply_edits(p, [{"op": "convert_element", "id": "e", "to": "satin"}])
+        objs = read_design(p)["objects"]
+        satins = [o for o in objs if o["kind"] == "satin"]
+        assert satins, f"no satin after conversion: {[(o['id'], o['kind']) for o in objs]}"
+        assert len(satins[0]["rails"]) == 2
+        apply_history_step(p)   # undo the whole-document replace
+        kinds = [o["kind"] for o in read_design(p)["objects"]]
+        assert kinds == ["run"]
+
+
 class TestMultiValueDifferential:
     def test_per_side_pull_compensation_differs(self, tmp_path):
         # engine reads a space-separated per-side list (get_split_float_param)

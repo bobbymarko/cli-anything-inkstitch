@@ -23,6 +23,7 @@ from lxml import etree
 from cli_anything_inkstitch.errors import ProjectError, UserError
 from cli_anything_inkstitch.history import (
     attr_diff,
+    document_replace,
     make_entry,
     node_delete,
     node_insert,
@@ -588,7 +589,153 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
                               index=index, before_xml=before_xml)))
         return {"op": name, "id": op["id"], "removed_commands": removed_commands}
 
+    if name == "convert_element":
+        return _convert_element(proj, tree, op)
+
     raise UserError(f"unknown edit op: {name!r}")
+
+
+# -- stitch-type conversion -------------------------------------------------------
+
+# (from_kind, to_kind) → (engine extension, args). Each extension rewrites
+# the whole document on stdout; verified against
+# ./inkstitch/lib/extensions/<name>.py (same tools `tools convert-*` wrap).
+_ENGINE_CONVERSIONS = {
+    ("run", "satin"): ("stroke_to_satin", {}),
+    ("satin", "run"): ("satin_to_stroke", {"keep_satin": "false"}),
+    ("fill", "run"): ("fill_to_stroke", {}),
+}
+
+
+def _convert_element(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
+    elem = find_by_id(tree, op["id"])
+    if elem is None:
+        raise UserError(f"no element with id={op['id']!r}")
+    kind = _kind_for(classify(elem))
+    to = str(op.get("to") or "")
+    if to not in ("satin", "fill", "run"):
+        raise UserError("convert_element: 'to' must be one of satin, fill, run")
+    if to == kind:
+        raise UserError(f"element {op['id']} is already a {kind}")
+    if kind == "fill" and to == "satin":
+        # the engine's fill_to_satin demands user-drawn rung guide lines
+        # crossing the shape (lib/extensions/fill_to_satin.py errors without
+        # them) — not a one-click conversion
+        raise UserError(
+            "fill → satin needs rung guide lines crossing the shape; "
+            "ask the agent to add rungs and run the engine's fill_to_satin, "
+            "or convert to a running stitch first")
+    if (kind, to) in _ENGINE_CONVERSIONS:
+        return _convert_via_engine(proj, tree, elem, op["id"], kind, to)
+    if kind == "satin" and to == "fill":
+        return _satin_to_fill(proj, tree, elem, op["id"])
+    if kind == "run" and to == "fill":
+        return _stroke_to_fill(proj, tree, elem, op["id"])
+    raise UserError(f"conversion {kind} → {to} is not supported")
+
+
+def _convert_via_engine(proj: ProjectFile, tree, elem, svg_id: str,
+                        kind: str, to: str) -> dict[str, Any]:
+    from cli_anything_inkstitch.binary import require, run_extension
+    from cli_anything_inkstitch.svg.attrs import ensure_inkstitch_namespace
+    ext, args = _ENGINE_CONVERSIONS[(kind, to)]
+    binary = require(None, proj.session)
+    # the binary reads the file on disk — apply_edits guarantees this op is
+    # alone in its batch, so disk still matches the in-memory tree here
+    before_xml = etree.tostring(tree.getroot()).decode("utf-8")
+    stdout = run_extension(binary, ext, proj.svg_path, args=args,
+                           ids=[svg_id], capture_stdout=True)
+    if not stdout:
+        raise UserError(
+            f"{ext}: engine made no changes — the element may not meet the "
+            "tool's geometry requirements")
+    new_root = etree.fromstring(stdout)
+    tree._setroot(new_root)
+    ensure_inkstitch_namespace(tree)
+    push(proj.history, make_entry(
+        command=f"artifact edit convert_element --id {svg_id} --to {to} ({ext})",
+        patch=document_replace(before_xml,
+                               etree.tostring(new_root).decode("utf-8"))))
+    return {"op": "convert_element", "id": svg_id, "to": to, "via": ext}
+
+
+def _set_paint(elem, fill: str, stroke: str) -> None:
+    """Set fill/stroke winning over any inline style (style beats
+    presentation attrs in the SVG cascade, so stale declarations must go)."""
+    style = elem.get("style")
+    if style:
+        decls = [s.strip() for s in style.split(";")
+                 if s.strip() and not s.strip().startswith(("fill:", "stroke:"))]
+        if decls:
+            elem.set("style", "; ".join(decls))
+        else:
+            del elem.attrib["style"]
+    elem.set("fill", fill)
+    elem.set("stroke", stroke)
+
+
+def _satin_only_params() -> set[str]:
+    """Param names read only by SatinColumn (mined from the schema) —
+    cleared on conversion away from satin so no-longer-read attrs don't
+    clutter the params panel. Falls back to just satin_column."""
+    try:
+        from cli_anything_inkstitch.schema.cache import load_schema
+        st = load_schema()["stitch_types"]
+        satin = set(st.get("satin_column", {}).get("params", {}))
+        others: set[str] = set()
+        for name, spec in st.items():
+            if name in ("satin_column", "satin_zigzag"):
+                continue
+            others |= set(spec.get("params", {}))
+        return (satin - others) | {"satin_column"}
+    except Exception:  # noqa: BLE001 — schema problems must never block edits
+        return {"satin_column"}
+
+
+def _satin_to_fill(proj: ProjectFile, tree, elem, svg_id: str) -> dict[str, Any]:
+    """Satin column → fill: the stitched band outline becomes the fill shape.
+
+    Geometry only — the band ring is railA + reversed railB, the same
+    outline the editor draws for satins. The result is an ordinary filled
+    path; the engine classifies any element with a fill color as FillStitch
+    (lib/elements/fill_stitch.py) — no invented attrs involved.
+    """
+    from cli_anything_inkstitch.artifact.gate import flatten_path
+    subpaths = split_subpaths(elem.get("d") or "")
+    if len(subpaths) < 2:
+        raise UserError("satin → fill needs two rails on the element")
+    rail_a = flatten_path(subpaths[0])
+    rail_b = flatten_path(subpaths[1])
+    if len(rail_a) < 2 or len(rail_b) < 2:
+        raise UserError("satin → fill: could not read rail geometry")
+    before_xml = etree.tostring(elem).decode("utf-8")
+    color = element_summary(elem)["stroke"] or "#000000"
+    ring = rail_a + rail_b[::-1]
+    elem.set("d", "M " + " L ".join(f"{x:.4g},{y:.4g}" for x, y in ring) + " Z")
+    _set_paint(elem, fill=color, stroke="none")
+    for local in _satin_only_params():
+        key = qname(local)
+        if key in elem.attrib:
+            del elem.attrib[key]
+    push(proj.history, make_entry(
+        command=f"artifact edit convert_element --id {svg_id} --to fill",
+        patch=subtree_replace(_xpath(svg_id), before_xml,
+                              etree.tostring(elem).decode("utf-8"))))
+    return {"op": "convert_element", "id": svg_id, "to": "fill", "via": "band"}
+
+
+def _stroke_to_fill(proj: ProjectFile, tree, elem, svg_id: str) -> dict[str, Any]:
+    """Stroke → fill: keep the path, paint it filled. FillStitch polygonizes
+    the path shape (shapely closes open rings), so no geometry change is
+    needed."""
+    before_xml = etree.tostring(elem).decode("utf-8")
+    color = element_summary(elem)["stroke"] or "#000000"
+    _set_paint(elem, fill=color, stroke="none")
+    push(proj.history, make_entry(
+        command=f"artifact edit convert_element --id {svg_id} --to fill",
+        patch=subtree_replace(_xpath(svg_id), before_xml,
+                              etree.tostring(elem).decode("utf-8"))))
+    return {"op": "convert_element", "id": svg_id, "to": "fill", "via": "paint"}
 
 
 def _ensure_id(elem) -> None:
@@ -606,6 +753,11 @@ def apply_edits(project_file: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
     """
     if not ops:
         return {"applied": 0}
+    if len(ops) > 1 and any(o.get("op") == "convert_element" for o in ops):
+        # engine-backed conversions run the binary against the on-disk file
+        # and swap in its whole-document output — batching them with other
+        # ops would silently drop the earlier in-memory edits
+        raise UserError("convert_element must be the only op in its batch")
     results = []
     with _open_locked(project_file, mutate=True) as (proj, tree):
         for op in ops:

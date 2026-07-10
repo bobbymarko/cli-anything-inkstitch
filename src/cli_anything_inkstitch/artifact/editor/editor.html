@@ -1127,6 +1127,42 @@ function renderInspect(objs) {
   kind.className = "objKind";
   kind.textContent = `${o.kind} · ${humanizeType(o.stitch_type)}`;
   body.append(title, kind);
+  // stitch-type conversion (fill → satin isn't offered: the engine's
+  // fill_to_satin needs user-drawn rung guides — the server explains if asked)
+  const targets = ({ satin: [["fill", "Fill"], ["run", "Running stitch"]],
+                     fill: [["run", "Running stitch"]],
+                     run: [["satin", "Satin column"], ["fill", "Fill"]] })[o.kind] || [];
+  if (targets.length) {
+    const row = document.createElement("div");
+    row.className = "prow";
+    const name = document.createElement("span");
+    name.className = "pname";
+    name.textContent = "Convert to";
+    const sel = document.createElement("select");
+    sel.className = "pvalEdit pvalSelect";
+    const ph = document.createElement("option");
+    ph.value = "";
+    ph.textContent = "…";
+    sel.appendChild(ph);
+    for (const [v, l] of targets) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = l;
+      sel.appendChild(opt);
+    }
+    sel.value = "";
+    sel.addEventListener("change", () => {
+      const to = sel.value;
+      if (!to) return;
+      sel.value = "";
+      postEdit([{ op: "convert_element", id: o.id, to }]).catch(() => refresh());
+    });
+    const ctrl = document.createElement("span");
+    ctrl.className = "pctrl";
+    ctrl.appendChild(sel);
+    row.append(name, ctrl);
+    body.appendChild(row);
+  }
   for (const [k, v] of Object.entries(o.params))
     body.appendChild(paramRow(o, k, v, (o.param_meta || {})[k] || {}));
   renderAvailableParams(o, body);
