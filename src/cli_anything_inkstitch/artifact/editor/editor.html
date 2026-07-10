@@ -853,6 +853,112 @@ function renderPlanLayer() {
     }
   }
 }
+/* Thread sprites — the commercial-viewer look comes from treating each
+   stitch as a lit cylinder, not a flat stroke. Per (color, width-px) we
+   pre-render three capsules once and stamp them per stitch:
+     body  — cross-section gradient across the width (dark edges, bright
+             band just off-center = round thread under top light) with the
+             ends dipped dark where the needle pulls thread into the fabric
+     shadow— the same capsule in blurred black, offset toward bottom-right
+     sheen — a thin bright core whose alpha is modulated per stitch by the
+             angle to the light, so satin columns show luster bands that
+             turn with stitch direction
+   3-slice stamping keeps the end dips at needle scale on long satin
+   stitches instead of stretching them. drawImage stamps also beat the old
+   3-stroke-per-stitch approach on speed. */
+const spriteCache = new Map();
+const LIGHT_ANG = -Math.PI / 4;          // light from top-left
+function threadSprites(color, tw) {
+  const twQ = Math.max(2, Math.min(64, Math.round(tw)));
+  const key = color + "|" + twQ;
+  const hit = spriteCache.get(key);
+  if (hit) return hit;
+  if (spriteCache.size > 240) spriteCache.clear();   // zoom churn guard
+  const r = twQ / 2, capW = Math.ceil(twQ * 1.5), mid = 32;
+  const W = capW * 2 + mid, H = twQ + 4;
+  const mk = () => Object.assign(document.createElement("canvas"),
+                                 { width: W, height: H });
+  const body = mk(), bc = body.getContext("2d");
+  const g = bc.createLinearGradient(0, 2, 0, 2 + twQ);
+  g.addColorStop(0, shade(color, -0.5));
+  g.addColorStop(0.3, shade(color, 0.15));
+  g.addColorStop(0.44, shade(color, 0.6));
+  g.addColorStop(0.6, shade(color, 0.2));
+  g.addColorStop(1, shade(color, -0.62));
+  bc.strokeStyle = g;
+  bc.lineWidth = twQ;
+  bc.lineCap = "round";
+  bc.beginPath();
+  bc.moveTo(r + 1, H / 2);
+  bc.lineTo(W - r - 1, H / 2);
+  bc.stroke();
+  bc.globalCompositeOperation = "source-atop";
+  // twist striations: slanted ply lines kill the plastic-tube look at zoom
+  bc.lineWidth = Math.max(1, twQ * 0.13);
+  bc.strokeStyle = "rgba(0,0,0,0.13)";
+  const step = Math.max(2.5, twQ * 0.6);
+  for (let x = -twQ; x < W + twQ; x += step) {
+    bc.beginPath();
+    bc.moveTo(x, H);
+    bc.lineTo(x + twQ * 0.8, 0);
+    bc.stroke();
+  }
+  for (const [x0, x1] of [[0, capW], [W, W - capW]]) {
+    const eg = bc.createLinearGradient(x0, 0, x1, 0);
+    eg.addColorStop(0, "rgba(0,0,0,0.34)");
+    eg.addColorStop(1, "rgba(0,0,0,0)");
+    bc.fillStyle = eg;
+    bc.fillRect(Math.min(x0, x1), 0, capW, H);
+  }
+  const sh = mk(), sc = sh.getContext("2d");
+  sc.filter = `blur(${Math.max(1, twQ / 4)}px)`;
+  sc.strokeStyle = "rgba(0,0,0,0.5)";
+  sc.lineWidth = twQ * 0.9;
+  sc.lineCap = "round";
+  sc.beginPath();
+  sc.moveTo(r + 1, H / 2 + 1);
+  sc.lineTo(W - r - 1, H / 2 + 1);
+  sc.stroke();
+  const sheen = mk(), hc = sheen.getContext("2d");
+  hc.strokeStyle = shade(color, 0.9);
+  hc.lineWidth = Math.max(1, twQ * 0.22);
+  hc.lineCap = "round";
+  hc.beginPath();
+  hc.moveTo(r + 2, H / 2 - twQ * 0.08);
+  hc.lineTo(W - r - 2, H / 2 - twQ * 0.08);
+  hc.stroke();
+  const sp = { body, sh, sheen, W, H, capW, twQ };
+  spriteCache.set(key, sp);
+  return sp;
+}
+function stampSprite(ctx, img, sp, x1, y1, x2, y2, tw) {
+  const len = Math.hypot(x2 - x1, y2 - y1);
+  const ang = Math.atan2(y2 - y1, x2 - x1);
+  const r = tw / 2;
+  const k = tw / sp.twQ;                 // sprite px → dest px
+  const H = sp.H * k, capD = sp.capW * k;
+  const destW = len + 2 * r + 2 * k;     // capsule extends r past each end
+  ctx.save();
+  ctx.translate(x1, y1);
+  ctx.rotate(ang);
+  if (destW <= 2 * capD) {
+    ctx.drawImage(img, 0, 0, sp.W, sp.H, -r - k, -H / 2, destW, H);
+  } else {
+    ctx.drawImage(img, 0, 0, sp.capW, sp.H, -r - k, -H / 2, capD, H);
+    // tile the middle at natural scale (don't stretch — the twist striation
+    // period must stay constant along long satin stitches)
+    const midDest = destW - 2 * capD;
+    const midNat = Math.max(1, (sp.W - 2 * sp.capW) * k);
+    const tiles = Math.max(1, Math.round(midDest / midNat));
+    const tileW = midDest / tiles;
+    for (let t = 0; t < tiles; t++)
+      ctx.drawImage(img, sp.capW, 0, sp.W - 2 * sp.capW, sp.H,
+                    -r - k + capD + t * tileW - 0.3, -H / 2, tileW + 0.6, H);
+    ctx.drawImage(img, sp.W - sp.capW, 0, sp.capW, sp.H,
+                  -r - k + destW - capD, -H / 2, capD, H);
+  }
+  ctx.restore();
+}
 function drawRealistic() {
   const rc = $("realCanvas");
   const rect = $("canvasWrap").getBoundingClientRect();
@@ -868,12 +974,11 @@ function drawRealistic() {
   const s = Math.min(rect.width / vb.w, rect.height / vb.h);
   const ox = (rect.width - vb.w * s) / 2 - vb.x * s;
   const oy = (rect.height - vb.h * s) / 2 - vb.y * s;
-  const tw = Math.max(1.2, threadWidth() * s);
-  ctx.lineCap = "round";
+  const tw = Math.max(1.4, threadWidth() * s);
   let remaining = timelinePos == null ? Infinity : timelinePos;
+  let si = 0;                             // running stitch index (variation)
   for (const block of stitchData.blocks) {
-    const shadow = shade(block.color, -0.55);
-    const sheen = shade(block.color, 0.55);
+    const sp = threadSprites(block.color, tw);
     for (let pi = 0; pi < block.paths.length; pi++) {
       if (remaining <= 0) return;
       if (pi > 0 && block.jumps && block.jumps[pi - 1]) {
@@ -894,27 +999,21 @@ function drawRealistic() {
       const take = Math.min(pts.length, remaining);
       remaining -= take;
       if (take < 2) continue;
-      for (let i = 1; i < take; i++) {
+      for (let i = 1; i < take; i++, si++) {
         const x1 = pts[i - 1][0] * s + ox, y1 = pts[i - 1][1] * s + oy;
         const x2 = pts[i][0] * s + ox, y2 = pts[i][1] * s + oy;
-        ctx.strokeStyle = shadow;
-        ctx.lineWidth = tw * 1.25;
-        ctx.beginPath();
-        ctx.moveTo(x1 + tw * 0.16, y1 + tw * 0.26);
-        ctx.lineTo(x2 + tw * 0.16, y2 + tw * 0.26);
-        ctx.stroke();
-        ctx.strokeStyle = block.color;
-        ctx.lineWidth = tw;
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.stroke();
-        ctx.strokeStyle = sheen;
-        ctx.lineWidth = Math.max(0.6, tw * 0.32);
-        ctx.beginPath();
-        ctx.moveTo(x1 - tw * 0.08, y1 - tw * 0.14);
-        ctx.lineTo(x2 - tw * 0.08, y2 - tw * 0.14);
-        ctx.stroke();
+        stampSprite(ctx, sp.sh, sp,
+                    x1 + tw * 0.14, y1 + tw * 0.24,
+                    x2 + tw * 0.14, y2 + tw * 0.24, tw);
+        stampSprite(ctx, sp.body, sp, x1, y1, x2, y2, tw);
+        // luster: cylinders lit from top-left reflect most when the stitch
+        // runs perpendicular to the light; slight per-stitch variation
+        // breaks machine-perfect uniformity (thread twist)
+        const ang = Math.atan2(y2 - y1, x2 - x1);
+        const perp = Math.abs(Math.sin(ang - LIGHT_ANG));
+        ctx.globalAlpha = (0.15 + 0.55 * perp * perp) * (si % 3 ? 1 : 0.75);
+        stampSprite(ctx, sp.sheen, sp, x1, y1, x2, y2, tw);
+        ctx.globalAlpha = 1;
       }
     }
   }
