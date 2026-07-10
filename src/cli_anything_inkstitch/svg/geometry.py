@@ -533,3 +533,71 @@ def open_closed_subpaths(d: str) -> str:
                         f"{int(large)} {int(sweep)} {_fmt(x)} {_fmt(y)}")
 
     return ' '.join(out)
+
+
+_D_TOKEN = None  # populated lazily in transform_d
+
+
+def transform_d(d: str, matrix) -> str:
+    """Apply an affine matrix to every coordinate of a path's d.
+
+    Parses to absolute M/L/C segments (H/V normalize to L; S/Q/T/A endpoints
+    conservatively to L, matching the editor's tokenizer) and matrix-applies
+    each point — used to FLATTEN an element's transform into its geometry so
+    the whole pipeline can keep working in root coordinates. Engine tools
+    (e.g. convert_to_satin) emit elements with compensating transforms.
+    """
+    import re as _re
+    global _D_TOKEN
+    if _D_TOKEN is None:
+        _D_TOKEN = _re.compile(
+            r"[MmLlCcZzHhVvSsQqTtAa]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+    tokens = _D_TOKEN.findall(d or "")
+    out: list[str] = []
+    i = 0
+    cx = cy = sx = sy = 0.0
+    cmd = None
+
+    def num() -> float:
+        nonlocal i
+        v = float(tokens[i]); i += 1
+        return v
+
+    def pt(x: float, y: float) -> str:
+        tx, ty = apply_matrix(matrix, x, y)
+        return f"{round(tx, 3)},{round(ty, 3)}"
+
+    while i < len(tokens):
+        if _re.match(r"[A-Za-z]", tokens[i]):
+            cmd = tokens[i]; i += 1
+        rel = cmd.islower()
+        c = cmd.upper()
+        if c == "M":
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
+            out.append("M" + pt(x, y)); cx, cy, sx, sy = x, y, x, y
+            cmd = "l" if rel else "L"
+        elif c == "L":
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
+            out.append("L" + pt(x, y)); cx, cy = x, y
+        elif c == "H":
+            x = num() + (cx if rel else 0)
+            out.append("L" + pt(x, cy)); cx = x
+        elif c == "V":
+            y = num() + (cy if rel else 0)
+            out.append("L" + pt(cx, y)); cy = y
+        elif c == "C":
+            x1 = num() + (cx if rel else 0); y1 = num() + (cy if rel else 0)
+            x2 = num() + (cx if rel else 0); y2 = num() + (cy if rel else 0)
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
+            out.append("C" + " ".join((pt(x1, y1), pt(x2, y2), pt(x, y))))
+            cx, cy = x, y
+        elif c in ("S", "Q", "T", "A"):
+            n = {"S": 4, "Q": 4, "T": 2, "A": 7}[c]
+            vals = [num() for _ in range(n)]
+            x = vals[-2] + (cx if rel else 0); y = vals[-1] + (cy if rel else 0)
+            out.append("L" + pt(x, y)); cx, cy = x, y
+        elif c == "Z":
+            out.append("Z"); cx, cy = sx, sy
+        else:
+            i += 1
+    return " ".join(out)

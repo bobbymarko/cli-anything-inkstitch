@@ -870,10 +870,14 @@ function renderAll() {
         displayD = o.rails.join(" ");
       }
     }
+    // engine-emitted elements can carry a transform; honor it for display
+    // (selection flattens it into the geometry so editing stays in root
+    // coordinates)
+    const tAttr = o.transform ? { transform: o.transform } : {};
     el("path", { d: displayD, fill: displayFill || "none",
-      stroke: displayStroke || "none", "stroke-width": .4 }, artworkLayer);
+      stroke: displayStroke || "none", "stroke-width": .4, ...tAttr }, artworkLayer);
     const hit = el("path", { d: displayD, class: "obj-hit",
-      fill: displayFill ? "rgba(0,0,0,0)" : "none" }, artworkLayer);
+      fill: displayFill ? "rgba(0,0,0,0)" : "none", ...tAttr }, artworkLayer);
     hit.addEventListener("pointerdown", (ev) => {
       if (spaceHeld) return;                      // hand tool wins
       ev.stopPropagation();
@@ -1176,8 +1180,16 @@ function setSelection(ids) {
   renderEditLayer();
 }
 /* Illustrator model: plain click replaces the selection, shift-click (or
-   cmd/ctrl-click) toggles membership */
+   cmd/ctrl-click) toggles membership. Selecting an element that carries a
+   transform first flattens it into the geometry (one undoable edit) so all
+   editing math stays in root coordinates. */
 function select(id, additive = false) {
+  const o = byId(id);
+  if (o && o.transform) {
+    postEdit([{ op: "flatten_transform", id }])
+      .then(() => showToast("normalized " + (o.label || id) + " for editing"))
+      .catch(() => {});
+  }
   if (!additive) { setSelection([id]); return; }
   setSelection(selection.includes(id)
     ? selection.filter(x => x !== id)

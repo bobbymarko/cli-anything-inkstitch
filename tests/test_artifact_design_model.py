@@ -473,3 +473,27 @@ class TestDefsNotDesignObjects:
         assert "<defs" in pathlib.Path(proj.svg_path).read_text() or True
         for o in design["objects"]:
             assert not o["id"].startswith("inkstitch_")
+
+
+class TestFlattenTransform:
+    def test_bakes_transform_into_geometry(self, tmp_path):
+        svg = tmp_path / "design.svg"
+        svg.write_text(SVG.replace(
+            '<path id="elem_run" d="M2,20 L28,20" fill="none" stroke="#000000"/>',
+            '<path id="elem_run" d="M4,40 L56,40" fill="none" stroke="#000000" '
+            'transform="scale(0.5, 0.5)"/>'))
+        proj_path = tmp_path / "design.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        p = str(proj_path)
+        result = apply_edits(p, [{"op": "flatten_transform", "id": "elem_run"}])
+        assert result["results"][0]["changed"] is True
+        run = next(o for o in read_design(p)["objects"] if o["id"] == "elem_run")
+        assert run["transform"] is None
+        assert run["d"] == "M2.0,20.0 L28.0,20.0"
+
+    def test_noop_without_transform(self, project):
+        result = apply_edits(project, [{"op": "flatten_transform", "id": "elem_run"}])
+        assert result["results"][0]["changed"] is False

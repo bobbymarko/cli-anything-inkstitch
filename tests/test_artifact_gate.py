@@ -214,3 +214,14 @@ class TestClosedRailDirection:
     def test_same_direction_passes(self, tmp_path):
         result = run_gate(make_project(tmp_path, self._ring(inner_reversed=False)))
         assert not any(f["check"] == "rail_direction" for f in result["errors"])
+
+
+class TestTaperedColumnEnds:
+    def test_end_taper_not_width_min_error(self, tmp_path):
+        # rails meet at both ends (natural satin taper) but the column body
+        # is a healthy 3mm — interior-only minimum must not flag the tips
+        body = ('<path id="s" fill="none" stroke="#000" inkstitch:satin_column="True" '
+                'd="M10,20 C20,17 40,17 50,20 M10,20 C20,23 40,23 50,20 '
+                'M20,17.5 L20,22.5 M40,17.5 L40,22.5"/>')
+        result = run_gate(make_project(tmp_path, body))
+        assert not any(f["check"] == "width_min" for f in result["errors"])

@@ -551,9 +551,30 @@ def serve(state_dir: str, *, port: int = 0, idle_timeout_s: float | None = DEFAU
     state_path = Path(state_dir)
     state_path.mkdir(parents=True, exist_ok=True)
     store = SessionStore(str(state_path / "state.json"))
+    if port == 0:
+        # STABLE URLS: reuse the last port this state dir served on, so
+        # editor tabs survive server restarts. Fall back to ephemeral only
+        # if that port is taken by someone else.
+        try:
+            last = json.loads((state_path / "server.json").read_text()).get("port")
+        except (OSError, ValueError):
+            last = None
+        if last:
+            try:
+                server = ArtifactServer(("127.0.0.1", int(last)),
+                                        ArtifactState(store),
+                                        idle_timeout_s=idle_timeout_s)
+                _write_server_json(state_path, server)
+                return server
+            except OSError:
+                pass                      # someone else owns it — go ephemeral
     server = ArtifactServer(("127.0.0.1", port), ArtifactState(store), idle_timeout_s=idle_timeout_s)
+    _write_server_json(state_path, server)
+    return server
+
+
+def _write_server_json(state_path: Path, server: ArtifactServer) -> None:
     import os
     (state_path / "server.json").write_text(
         json.dumps({"port": server.server_address[1], "pid": os.getpid()})
     )
-    return server

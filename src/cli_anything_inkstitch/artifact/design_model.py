@@ -217,6 +217,7 @@ def read_design(project_file: str) -> dict[str, Any]:
             obj: dict[str, Any] = {
                 "id": elem.get("id"),
                 "label": elem.get(INKSCAPE_LABEL),
+                "transform": elem.get("transform"),
                 "kind": kind,
                 "stitch_type": stitch_type,
                 "tag": local,
@@ -422,6 +423,26 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
             patch=node_delete(parent_xpath=_xpath(result["parent_id"]),
                               index=result["index"], before_xml=result["xml"])))
         return {"op": name, "use_id": op["use_id"]}
+
+    if name == "flatten_transform":
+        # engine tools (convert_to_satin, ...) emit elements with compensating
+        # transforms; the editor works in root coordinates, so bake the
+        # transform into the geometry and drop the attribute
+        from cli_anything_inkstitch.svg.geometry import parse_transform, transform_d
+        elem = find_by_id(tree, op["id"])
+        if elem is None:
+            raise UserError(f"no element with id={op['id']!r}")
+        t = elem.get("transform")
+        if not t:
+            return {"op": name, "id": op["id"], "changed": False}
+        before = {"d": elem.get("d"), "transform": t}
+        elem.set("d", transform_d(elem.get("d") or "", parse_transform(t)))
+        del elem.attrib["transform"]
+        push(proj.history, make_entry(
+            command=f"artifact edit flatten_transform --id {op['id']}",
+            patch=attr_diff(_xpath(op["id"]), before,
+                            {"d": elem.get("d"), "transform": None})))
+        return {"op": name, "id": op["id"], "changed": True}
 
     if name == "delete_element":
         from cli_anything_inkstitch.svg import commands as vc

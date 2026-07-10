@@ -276,7 +276,13 @@ def check_satin(obj: dict[str, Any], scale: float) -> list[dict]:
     a = sample_poly(flat[0], _WIDTH_SAMPLES)
     widths = [point_to_poly_dist(p, flat[1]) * scale for p in a]
     if widths:
-        wmin, wmax = min(widths), max(widths)
+        # open columns legitimately taper to ~0 where the rails meet at the
+        # ends — evaluate the minimum on the interior only; closed rings have
+        # no ends and keep the full-sample minimum
+        rails_closed = all(math.dist(f[0], f[-1]) * scale < 0.5 for f in flat)
+        interior = widths if rails_closed or len(widths) < 10 \
+            else widths[len(widths) // 10: -len(widths) // 10]
+        wmin, wmax = min(interior or widths), max(widths)
         if wmin < SATIN_MIN_WIDTH_MM:
             out.append(_finding("error", obj["id"], "width_min",
                                 f"satin narrows to {wmin:.2f}mm (min stitchable "
