@@ -239,21 +239,37 @@ def _extract_param_call(call: ast.Call) -> dict[str, Any] | None:
     for kw in call.keywords:
         if kw.arg is None:
             continue
+        if kw.arg == "options" and isinstance(kw.value, ast.Name):
+            # `options=_fill_methods` — a class-attr reference; resolved
+            # against _resolve_method_options() in parse_element_file.
+            info["options_ref"] = kw.value.id
+            continue
         info[kw.arg] = _safe_literal(kw.value)
     return info
 
 
-def _resolve_method_options(class_node: ast.ClassDef) -> dict[str, list[str]]:
+def _resolve_method_options(class_node: ast.ClassDef) -> dict[str, dict[str, list[str]]]:
     """Find `_fill_methods = [ParamOption('auto_fill', ...), ...]` style class attrs.
 
-    Returns {assign_name: [option_value, ...]}.
+    Returns {assign_name: {"values": [...], "labels": [...]}}. ParamOption's
+    first arg (.id) is the STORED value — the engine reads it verbatim via
+    get_param() (lib/elements/fill_stitch.py fill_method, lib/elements/
+    stroke.py stroke_method); .name is GUI-only.
     """
-    out: dict[str, list[str]] = {}
+    out: dict[str, dict[str, list[str]]] = {}
     for stmt in class_node.body:
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
             value = _safe_literal(stmt.value)
             if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
-                out[stmt.targets[0].id] = value
+                labels = list(value)
+                if isinstance(stmt.value, ast.List):
+                    for i, elt in enumerate(stmt.value.elts):
+                        if (isinstance(elt, ast.Call) and isinstance(elt.func, ast.Name)
+                                and elt.func.id == "ParamOption" and len(elt.args) > 1):
+                            lab = _safe_literal(elt.args[1])
+                            if isinstance(lab, str):
+                                labels[i] = lab
+                out[stmt.targets[0].id] = {"values": value, "labels": labels}
     return out
 
 
@@ -306,9 +322,15 @@ def parse_element_file(path: Path) -> dict[str, dict]:
                             info["value_kind"] = kind
                         params.append(info)
         if params:
+            opts_map = _resolve_method_options(node)
+            for info in params:
+                ref = info.pop("options_ref", None)
+                if ref and ref in opts_map:
+                    info["options"] = opts_map[ref]["values"]
+                    info["option_labels"] = opts_map[ref]["labels"]
             classes[node.name] = {
                 "params": params,
-                "options": _resolve_method_options(node),
+                "options": opts_map,
                 "lineno": node.lineno,
             }
     return classes
@@ -350,6 +372,10 @@ def _normalize_param(raw: dict) -> dict:
             out["options"] = opts
             if ptype in ("combo", "dropdown") and "enum" not in out:
                 out["enum"] = opts
+            labels = raw.get("option_labels")
+            if (isinstance(labels, list) and len(labels) == len(opts)
+                    and all(isinstance(x, str) for x in labels)):
+                out["option_labels"] = labels
     if "select_items" in raw and raw["select_items"] is not None:
         si = raw["select_items"]
         if isinstance(si, list):
@@ -518,11 +544,50 @@ def extract_schema(source_root: Path | None = None) -> dict:
         raise RuntimeError(f"no @param decorators found under {root}")
     version = detect_inkstitch_version(root)
     schema = assemble_schema(classes, version)
+    _mine_tile_options(root, schema)
     commands = extract_commands(root)
     if commands:
         schema["commands"] = commands
     schema["source"]["root"] = str(root)
     return schema
+
+
+def _mine_tile_options(root: Path, schema: dict) -> None:
+    """Fill meander_pattern's options from the bundled tiles directory.
+
+    The decorator declares `options=sorted(tiles.all_tiles())` — dynamic, so
+    AST extraction can't see it. The engine stores the Tile .id read from
+    each <tiles>/<dir>/tile.json (lib/tiles.py Tile._load_metadata,
+    all_tiles reads get_bundled_dir('tiles')), and the element getter falls
+    back to `min(all_tiles()).id` — the first tile sorted by name
+    (lib/elements/fill_stitch.py meander_pattern).
+    """
+    tiles_dir = root / "tiles"
+    if not tiles_dir.is_dir():
+        return
+    tiles: list[tuple[str, str]] = []      # (name, id) — engine sorts by name
+    for entry in tiles_dir.iterdir():
+        meta_file = entry / "tile.json"
+        if not meta_file.is_file():
+            continue
+        try:
+            meta = json.loads(meta_file.read_text())
+        except (OSError, ValueError):
+            continue
+        tile_id = str(meta.get("id") or entry.name)
+        tiles.append((str(meta.get("name") or tile_id), tile_id))
+    if not tiles:
+        return
+    tiles.sort()
+    values = [t[1] for t in tiles]
+    labels = [t[0] for t in tiles]
+    for st in schema.get("stitch_types", {}).values():
+        spec = (st.get("params") or {}).get("meander_pattern")
+        if isinstance(spec, dict) and not spec.get("options"):
+            spec["options"] = values
+            spec["option_labels"] = labels
+            spec["enum"] = values
+            spec["default"] = values[0]
 
 
 def write_cache(schema: dict, version: str | None = None) -> Path:

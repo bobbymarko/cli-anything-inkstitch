@@ -99,6 +99,10 @@ def _request(url: str, *, payload: dict | None = None, timeout: float = 30) -> d
         raise UserError(f"artifact server error ({e.code}): {detail}") from e
     except urllib.error.URLError as e:
         raise UserError(f"artifact server unreachable: {e.reason}") from e
+    except (ValueError, OSError) as e:
+        # empty/truncated body or reset connection — the server shut down
+        # mid-request (e.g. `artifact stop` while a long-poll was waiting)
+        raise UserError(f"artifact server connection lost mid-request: {e}") from e
 
 
 @click.group("artifact")
@@ -160,9 +164,18 @@ def poll_cmd(ctx, project_path, timeout_s, agent_reply):
         key = session_key(canonical_file(project))
         _request(f"{base}/api/{key}/agent-reply", payload={"text": agent_reply})
     from urllib.parse import quote
-    result = _request(
-        f"{base}/api/poll?project={quote(project)}&timeout_s={timeout_s}",
-        timeout=timeout_s + 30)
+    try:
+        result = _request(
+            f"{base}/api/poll?project={quote(project)}&timeout_s={timeout_s}",
+            timeout=timeout_s + 30)
+    except UserError as e:
+        # a poll's stdout is read programmatically (see SKILL.md "Polling
+        # discipline") — a mid-poll server shutdown must come out as
+        # parseable JSON, not a traceback. Queued/unacked feedback is
+        # persisted by the session store and redelivered after restart.
+        result = {"status": "server-lost", "detail": str(e),
+                  "hint": "restart with 'artifact open'; queued feedback "
+                          "is preserved and will be redelivered"}
     emit(ctx, result)
 
 

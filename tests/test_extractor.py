@@ -219,6 +219,78 @@ class TestValidateDropdownParams:
         assert validate_param(schema, "x", "anything") == "anything"
 
 
+class TestComboOptionMining:
+    """combo params (fill_method, stroke_method) store ParamOption id
+    STRINGS — the engine reads them with plain get_param(), not
+    get_int_param() (lib/elements/fill_stitch.py fill_method, stroke.py
+    stroke_method). The decorator references a class attr
+    (`options=_fill_methods`), which the extractor must resolve; and
+    meander_pattern's options come from the bundled tiles directory
+    (dynamic `sorted(tiles.all_tiles())` — mined from tile.json files)."""
+
+    def test_fill_method_options_are_value_strings(self, schema):
+        fm = schema["stitch_types"]["auto_fill"]["params"]["fill_method"]
+        assert "contour_fill" in fm["options"]
+        assert "meander_fill" in fm["options"]
+        assert fm["default"] == "auto_fill"
+
+    def test_fill_method_labels_parallel_options(self, schema):
+        fm = schema["stitch_types"]["auto_fill"]["params"]["fill_method"]
+        labels = fm["option_labels"]
+        assert len(labels) == len(fm["options"])
+        assert labels[fm["options"].index("contour_fill")] == "Contour Fill"
+
+    def test_stroke_method_options_mined(self, schema):
+        sm = schema["stitch_types"]["running_stitch"]["params"]["stroke_method"]
+        assert "ripple_stitch" in sm["options"]
+
+    def test_meander_pattern_options_from_tiles_dir(self, schema, source_root):
+        if not (source_root / "tiles").is_dir():
+            pytest.skip("engine checkout has no bundled tiles directory")
+        mp = schema["stitch_types"]["meander_fill"]["params"]["meander_pattern"]
+        assert mp["options"], "tile ids should be mined from tiles/*/tile.json"
+        # engine default is min(all_tiles()).id — first tile sorted by name
+        assert mp["default"] == mp["options"][0]
+
+
+class TestValidateComboParams:
+    """combo values are stored verbatim and silently ignored by the engine
+    when unknown (get_param falls back to the getter default), so the
+    validator accepts a known id or GUI label and rejects everything else —
+    including indexes, which are the DROPDOWN convention, not combo's."""
+
+    SCHEMA = {"params": {"fill_method": {
+        "type": "combo",
+        "options": ["auto_fill", "contour_fill", "meander_fill"],
+        "option_labels": ["Auto Fill", "Contour Fill", "Meander Fill"]}}}
+
+    def _validate(self, value):
+        from cli_anything_inkstitch.schema.validate import validate_param
+        return validate_param(self.SCHEMA, "fill_method", value)
+
+    def test_id_accepted_verbatim(self):
+        assert self._validate("contour_fill") == "contour_fill"
+
+    def test_label_normalized_to_id(self):
+        assert self._validate("Contour Fill") == "contour_fill"
+        assert self._validate("meander fill") == "meander_fill"
+
+    def test_index_rejected(self):
+        from cli_anything_inkstitch.errors import UserError
+        with pytest.raises(UserError):
+            self._validate("1")     # index-writing: the dropdown bug's twin
+
+    def test_unknown_value_rejected(self):
+        from cli_anything_inkstitch.errors import UserError
+        with pytest.raises(UserError):
+            self._validate("contour")
+
+    def test_no_options_passthrough(self):
+        from cli_anything_inkstitch.schema.validate import validate_param
+        schema = {"params": {"x": {"type": "combo"}}}
+        assert validate_param(schema, "x", "anything") == "anything"
+
+
 class TestEngineReadContract:
     """Cross-check every extracted param against the getter the engine
     actually reads it with (mined from the same inkstitch source). This is

@@ -112,7 +112,33 @@ def validate_param(stitch_type_schema: dict, param_name: str, raw_value) -> str:
             f"or one of {options}, got {s!r}"
         )
 
-    # Unknown type (e.g. combo, random_seed) — pass through as string
+    if ptype == "combo":
+        # Ink/Stitch reads combo params with plain get_param(): the stored
+        # value is the ParamOption id string, NOT an index (fill_stitch.py
+        # fill_method → get_param('fill_method', 'auto_fill'); stroke.py
+        # stroke_method likewise). An unknown value is silently ignored at
+        # stitch time (the getter falls back to its default), so reject
+        # anything outside the mined ids. Accept an id verbatim or a GUI
+        # label ("Contour Fill" → contour_fill).
+        options = [str(o) for o in (spec.get("options") or spec.get("enum") or [])]
+        s = str(raw_value).strip()
+        if not options:
+            return s     # options the extractor couldn't mine — pass through
+        if s in options:
+            return s
+        token = s.lower().replace(" ", "_")
+        labels = [str(x) for x in (spec.get("option_labels") or [])]
+        for i, lab in enumerate(labels):
+            if token == lab.lower().replace(" ", "_"):
+                return options[i]
+        for o in options:
+            if token == o.lower():
+                return o
+        raise UserError(
+            f"{param_name}: must be one of {options}, got {s!r}"
+        )
+
+    # Unknown type (e.g. random_seed) — pass through as string
     return str(raw_value)
 
 

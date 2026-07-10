@@ -123,6 +123,37 @@ class TestDropdownIndexDifferential:
         assert plan_hash(p) == default_plan
 
 
+class TestComboValueDifferential:
+    """fill_method is a combo: the engine stores the ParamOption id STRING
+    (fill_stitch.py: get_param('fill_method', 'auto_fill')) and branches on
+    it in to_stitch_groups; anything unrecognized falls through the elif
+    chain into the auto-fill else — silently."""
+
+    def test_fill_method_value_string_changes_plan(self, tmp_path):
+        p = make_project(tmp_path, FILL_SQUARE)
+        auto = plan_hash(p)
+        set_param(p, "fill_method", "contour_fill")
+        assert plan_hash(p) != auto
+
+    def test_index_value_is_ignored(self, tmp_path):
+        # writing '2' (the dropdown index convention) matches no method —
+        # plan comes out byte-identical to the default, proving the engine
+        # ignored it; this is why the validator rejects indexes for combos
+        p = make_project(tmp_path, FILL_SQUARE)
+        default_plan = plan_hash(p)
+        write_raw_attr(p, "fill_method", "2")
+        assert plan_hash(p) == default_plan
+
+    def test_validated_write_stores_id_not_label(self, tmp_path):
+        p = make_project(tmp_path, FILL_SQUARE)
+        set_param(p, "fill_method", "Contour Fill")   # GUI label in
+        proj = ProjectFile.load(p)
+        tree = etree.parse(proj.svg_path)
+        elem = tree.getroot().find(".//*[@id='e']")
+        stored = elem.get("{http://inkstitch.org/namespace}fill_method")
+        assert stored == "contour_fill"               # id string out
+
+
 class TestMultiValueDifferential:
     def test_per_side_pull_compensation_differs(self, tmp_path):
         # engine reads a space-separated per-side list (get_split_float_param)

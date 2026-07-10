@@ -544,3 +544,46 @@ class TestReorderElement:
         apply_history_step(project)   # undo remove
         ids = [o["id"] for o in read_design(project)["objects"]]
         assert ids == ["elem_fill", "elem_satin", "elem_run"]
+
+
+class TestAvailableParams:
+    """Unset-but-applicable params ship to the editor with schema defaults so
+    the inspector can offer every param the engine would read for the current
+    stitch method; fill_method/stroke_method are flagged primary (they're the
+    method selector the per-type schema filtering keys off)."""
+
+    def _schema(self, monkeypatch):
+        from cli_anything_inkstitch.schema import cache
+        canned = {"stitch_types": {"auto_fill": {"params": {
+            "angle": {"type": "float", "default": 0},
+            "fill_method": {"type": "combo", "default": "auto_fill",
+                            "options": ["auto_fill", "contour_fill"],
+                            "option_labels": ["Auto Fill", "Contour Fill"]},
+            "row_spacing_mm": {"type": "float", "default": 0.25, "sort_index": 5},
+        }}}}
+        monkeypatch.setattr(cache, "load_schema", lambda *a, **k: canned)
+
+    def test_unset_params_offered_with_meta(self, project, monkeypatch):
+        self._schema(monkeypatch)
+        # the fixture sets fill_method explicitly — clear it to exercise the
+        # unset path (classify() still yields auto_fill for a plain fill)
+        apply_edits(project, [{"op": "del_attr", "id": "elem_fill",
+                               "name": "fill_method"}])
+        design = read_design(project)
+        fill = next(o for o in design["objects"] if o["id"] == "elem_fill")
+        avail = fill["available_params"]
+        assert avail["fill_method"]["primary"] is True
+        assert avail["fill_method"]["default"] == "auto_fill"
+        assert {"value": "contour_fill", "label": "Contour Fill"} \
+            in avail["fill_method"]["options"]
+        assert "row_spacing_mm" in avail
+        assert "primary" not in avail["row_spacing_mm"]
+
+    def test_set_params_not_duplicated(self, project, monkeypatch):
+        self._schema(monkeypatch)
+        design = read_design(project)
+        fill = next(o for o in design["objects"] if o["id"] == "elem_fill")
+        # angle and fill_method are set in the fixture SVG — offered nowhere
+        assert "angle" in fill["params"]
+        assert "angle" not in fill["available_params"]
+        assert "fill_method" not in fill["available_params"]

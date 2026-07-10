@@ -170,31 +170,86 @@ def _param_meta_for(stitch_type: str, param_names) -> dict[str, dict]:
         spec = lookup(name)
         if not isinstance(spec, dict):
             continue
-        m: dict[str, Any] = {"type": spec.get("type", "string")}
-        for k in ("min", "max", "default", "tooltip", "gui_text", "value_kind"):
-            if spec.get(k) is not None:
-                m[k] = spec[k]
-        # honor the engine's read contract when it disagrees with the GUI type:
-        # multi-value/list params must stay free-text (a number input would
-        # reject "10 20"); int-declared-float-read params widen to float
-        kind = m.get("value_kind")
-        if kind in ("multi_float", "multi_int", "json"):
-            m["type"] = "string"
-        elif kind == "string" and m["type"] in ("float", "int"):
-            m["type"] = "string"
-        elif kind == "float" and m["type"] == "int":
-            m["type"] = "float"
-        options = spec.get("options") or spec.get("enum")
-        if options:
-            if m["type"] == "dropdown":
-                # Ink/Stitch reads every dropdown param via get_int_param():
-                # the stored value is the option's INDEX, the label is GUI-only
-                m["options"] = [{"value": str(i), "label": str(o)}
-                                for i, o in enumerate(options)]
-            elif m["type"] in ("string", "str"):
-                m["options"] = [{"value": str(o), "label": str(o)} for o in options]
-        meta[name] = m
+        meta[name] = _meta_from_spec(spec)
     return meta
+
+
+def _meta_from_spec(spec: dict) -> dict[str, Any]:
+    m: dict[str, Any] = {"type": spec.get("type", "string")}
+    for k in ("min", "max", "default", "tooltip", "gui_text", "value_kind",
+              "sort_index", "group"):
+        if spec.get(k) is not None:
+            m[k] = spec[k]
+    # honor the engine's read contract when it disagrees with the GUI type:
+    # multi-value/list params must stay free-text (a number input would
+    # reject "10 20"); int-declared-float-read params widen to float
+    kind = m.get("value_kind")
+    if kind in ("multi_float", "multi_int", "json"):
+        m["type"] = "string"
+    elif kind == "string" and m["type"] in ("float", "int"):
+        m["type"] = "string"
+    elif kind == "float" and m["type"] == "int":
+        m["type"] = "float"
+    options = spec.get("options") or spec.get("enum")
+    if options:
+        if m["type"] == "dropdown":
+            # Ink/Stitch reads every dropdown param via get_int_param():
+            # the stored value is the option's INDEX, the label is GUI-only
+            m["options"] = [{"value": str(i), "label": str(o)}
+                            for i, o in enumerate(options)]
+        elif m["type"] == "combo":
+            # combo params store the ParamOption id string verbatim —
+            # engine reads plain get_param() (fill_stitch.py fill_method,
+            # stroke.py stroke_method); option_labels are GUI-only
+            labels = spec.get("option_labels") or options
+            m["options"] = [{"value": str(o), "label": str(lb)}
+                            for o, lb in zip(options, labels)]
+        elif m["type"] in ("string", "str"):
+            m["options"] = [{"value": str(o), "label": str(o)} for o in options]
+    # normalize default to the STORED-value form the control commits
+    # (the extractor renders dropdown defaults as labels for readability;
+    # the editor select's option values are indexes/ids)
+    if m.get("options") and m.get("default") is not None:
+        d = str(m["default"])
+        vals = [opt["value"] for opt in m["options"]]
+        if d not in vals:
+            labs = [opt["label"] for opt in m["options"]]
+            if d in labs:
+                m["default"] = vals[labs.index(d)]
+        else:
+            m["default"] = d
+    return m
+
+
+# The stitch-method selectors: the discriminator params the schema filters
+# per-method params by. The editor promotes these inline even when unset.
+_PRIMARY_PARAMS = frozenset({"fill_method", "stroke_method"})
+
+
+def _available_params(stitch_type: str, set_names) -> dict[str, dict]:
+    """Schema params applicable to this stitch type but NOT set on the element.
+
+    Lets the editor offer every parameter the engine would read for the
+    current stitch method (with schema defaults) instead of requiring the
+    user to know inkstitch attr names. Changing fill_method/stroke_method
+    reclassifies the element (svg/elements.py classify returns the method
+    value as the stitch_type), so the applicable set follows automatically
+    on the next design read.
+    """
+    try:
+        from cli_anything_inkstitch.schema.cache import load_schema
+        params = load_schema()["stitch_types"].get(stitch_type, {}).get("params", {})
+    except Exception:  # noqa: BLE001 — schema cache problems must never break /design
+        return {}
+    out: dict[str, dict] = {}
+    for name, spec in params.items():
+        if name in set_names or not isinstance(spec, dict):
+            continue
+        m = _meta_from_spec(spec)
+        if name in _PRIMARY_PARAMS:
+            m["primary"] = True
+        out[name] = m
+    return out
 
 
 def read_design(project_file: str) -> dict[str, Any]:
@@ -228,6 +283,7 @@ def read_design(project_file: str) -> dict[str, Any]:
                 "commands": _command_uses(tree, elem),
             }
             obj["param_meta"] = _param_meta_for(stitch_type, obj["params"])
+            obj["available_params"] = _available_params(stitch_type, obj["params"])
             if kind == "satin" and elem.get("d"):
                 subpaths = split_subpaths(elem.get("d"))
                 obj["rails"] = subpaths[:2]

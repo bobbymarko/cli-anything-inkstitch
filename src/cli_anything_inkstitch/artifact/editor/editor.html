@@ -196,6 +196,10 @@
   #inspectBody .pname.hasTip:hover { color: var(--text); }
   #inspectBody .pctrl { display: inline-flex; align-items: center; gap: 5px; }
   #inspectBody .punit { color: var(--muted); font-size: 11px; }
+  #inspectBody .moreHead { margin: 8px 0 2px; font-size: 11px; color: var(--muted);
+          cursor: pointer; user-select: none; }
+  #inspectBody .moreHead::before { content: "▸ "; }
+  #inspectBody .moreHead.open::before { content: "▾ "; }
   #inspectBody .pval { text-align: right; word-break: break-all; }
   .pvalEdit { background: transparent; border: 1px solid transparent;
               color: var(--text); text-align: right; width: 90px; font: inherit;
@@ -991,8 +995,8 @@ async function commitParam(id, name, value) {
    param_meta): booleans → checkbox, dropdown/enum → select, int/float →
    number input with the schema's min/max. Unknown params fall back to free
    text — the server and the stitch engine remain the final validators. */
-function paramControl(o, k, v) {
-  const meta = (o.param_meta || {})[k] || {};
+function paramControl(o, k, v, metaOverride) {
+  const meta = metaOverride || (o.param_meta || {})[k] || {};
   const t = meta.type;
   if (t === "boolean" || (!t && (v === "True" || v === "False"))) {
     const box = document.createElement("input");
@@ -1123,33 +1127,72 @@ function renderInspect(objs) {
   kind.className = "objKind";
   kind.textContent = `${o.kind} · ${humanizeType(o.stitch_type)}`;
   body.append(title, kind);
-  for (const [k, v] of Object.entries(o.params)) {
-    const row = document.createElement("div");
-    row.className = "prow";
-    const name = document.createElement("span");
-    name.className = "pname";
-    const meta = (o.param_meta || {})[k] || {};
-    const { label, unit } = humanizeParam(k);
-    name.textContent = label;
-    const tip = [meta.gui_text, meta.tooltip]
-      .filter(Boolean).filter((t, i, a) => a.indexOf(t) === i).join(" — ");
-    if (tip) {
-      name.title = tip;
-      name.classList.add("hasTip");
-    }
-    const ctrl = document.createElement("span");
-    ctrl.className = "pctrl";
-    ctrl.appendChild(paramControl(o, k, v));
-    const u = meta.unit || unit;
-    if (u) {
-      const tag = document.createElement("span");
-      tag.className = "punit";
-      tag.textContent = u;
-      ctrl.appendChild(tag);
-    }
-    row.append(name, ctrl);
-    body.appendChild(row);
+  for (const [k, v] of Object.entries(o.params))
+    body.appendChild(paramRow(o, k, v, (o.param_meta || {})[k] || {}));
+  renderAvailableParams(o, body);
+}
+function paramRow(o, k, v, meta) {
+  const row = document.createElement("div");
+  row.className = "prow";
+  const name = document.createElement("span");
+  name.className = "pname";
+  const { label, unit } = humanizeParam(k);
+  name.textContent = label;
+  const tip = [meta.gui_text, meta.tooltip]
+    .filter(Boolean).filter((t, i, a) => a.indexOf(t) === i).join(" — ");
+  if (tip) {
+    name.title = tip;
+    name.classList.add("hasTip");
   }
+  const ctrl = document.createElement("span");
+  ctrl.className = "pctrl";
+  ctrl.appendChild(paramControl(o, k, v, meta));
+  const u = meta.unit || unit;
+  if (u) {
+    const tag = document.createElement("span");
+    tag.className = "punit";
+    tag.textContent = u;
+    ctrl.appendChild(tag);
+  }
+  row.append(name, ctrl);
+  return row;
+}
+/* Params the engine reads for this stitch method but not yet set on the
+   element, shown with their schema defaults; editing one writes it for real.
+   fill_method / stroke_method are promoted inline — picking a method
+   reclassifies the element server-side, so the applicable set (contour
+   params, meander tiles, ...) follows on the next design reload. */
+let moreParamsOpen = false;
+function defaultValueFor(meta) {
+  if (meta.type === "boolean")
+    return meta.default === true || meta.default === "True" ? "True" : "False";
+  return meta.default === undefined || meta.default === null ? "" : String(meta.default);
+}
+function renderAvailableParams(o, body) {
+  const avail = Object.entries(o.available_params || {});
+  if (!avail.length) return;
+  avail.sort((a, b) => ((a[1].sort_index ?? 1e9) - (b[1].sort_index ?? 1e9)) ||
+                       a[0].localeCompare(b[0]));
+  const primary = avail.filter(([, m]) => m.primary);
+  const rest = avail.filter(([, m]) => !m.primary);
+  for (const [k, m] of primary)
+    body.appendChild(paramRow(o, k, defaultValueFor(m), m));
+  if (!rest.length) return;
+  const head = document.createElement("div");
+  head.className = "moreHead";
+  head.textContent = `More parameters (${rest.length})`;
+  head.classList.toggle("open", moreParamsOpen);
+  const wrap = document.createElement("div");
+  wrap.className = "moreBody";
+  wrap.style.display = moreParamsOpen ? "" : "none";
+  head.onclick = () => {
+    moreParamsOpen = !moreParamsOpen;
+    head.classList.toggle("open", moreParamsOpen);
+    wrap.style.display = moreParamsOpen ? "" : "none";
+  };
+  for (const [k, m] of rest)
+    wrap.appendChild(paramRow(o, k, defaultValueFor(m), m));
+  body.append(head, wrap);
 }
 function renderEditLayer() {
   if (!editLayer) return;

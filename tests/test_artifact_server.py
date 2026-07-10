@@ -332,3 +332,58 @@ class TestAgentStatus:
     def test_status_unknown_session_404(self, server):
         status, body = _post(server, "/api/nope/agent-status", {"text": "x"})
         assert status == 404
+
+
+class TestPollTransportRobustness:
+    """A poll's stdout is read programmatically (SKILL.md 'Polling
+    discipline') — transport failures must come out as parseable JSON, not
+    tracebacks. The real incident: `artifact stop` during a long-poll made
+    the server return an empty body and the CLI died on JSONDecodeError."""
+
+    def test_request_turns_empty_body_into_usererror(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from cli_anything_inkstitch.commands.artifact import _request
+        from cli_anything_inkstitch.errors import UserError
+
+        class EmptyHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), EmptyHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with pytest.raises(UserError, match="connection lost mid-request"):
+                _request(f"http://127.0.0.1:{srv.server_address[1]}/api/poll")
+        finally:
+            srv.shutdown()
+
+    def test_poll_cmd_emits_server_lost_json(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+        from cli_anything_inkstitch.cli import root
+        from cli_anything_inkstitch.commands import artifact as artifact_cmds
+        from cli_anything_inkstitch.errors import UserError
+        from cli_anything_inkstitch.project import ProjectFile
+
+        proj_path = tmp_path / "p.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.save()
+
+        monkeypatch.setattr(artifact_cmds, "_ensure_server",
+                            lambda state_dir: "http://127.0.0.1:1")
+
+        def dying_request(url, **kw):
+            raise UserError("artifact server connection lost mid-request: boom")
+
+        monkeypatch.setattr(artifact_cmds, "_request", dying_request)
+        result = CliRunner().invoke(root, [
+            "--json", "artifact", "poll",
+            "--project", str(proj_path), "--timeout-s", "1"])
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["status"] == "server-lost"
+        assert "redelivered" in out["hint"]
