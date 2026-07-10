@@ -44,17 +44,35 @@ _TOKEN = re.compile(r"[MmLlCcZzHhVvSsQqTtAa]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]
 
 
 def flatten_path(d: str, per_curve: int = 12) -> list[tuple[float, float]]:
-    """Flatten one subpath's d into a polyline (M/L/C/H/V/Z; S/Q/T/A endpoints)."""
+    """Flatten one subpath's d into a polyline.
+
+    M/L/C/H/V/Z handled directly; S reflects the previous cubic control and
+    Q/T degree-elevate to cubics (exact — Illustrator exports lean on s, and
+    endpoint-flattening them misstated satin widths). A still flattens to
+    its endpoint (rare in this domain).
+    """
     tokens = _TOKEN.findall(d or "")
     pts: list[tuple[float, float]] = []
     i = 0
     cx = cy = sx = sy = 0.0
     cmd = None
+    last_c: tuple[float, float] | None = None   # trailing cubic control (for S)
+    last_q: tuple[float, float] | None = None   # trailing quadratic control (for T)
 
     def num() -> float:
         nonlocal i
         v = float(tokens[i]); i += 1
         return v
+
+    def cubic(x1: float, y1: float, x2: float, y2: float, x: float, y: float) -> None:
+        nonlocal cx, cy
+        for k in range(1, per_curve + 1):
+            t = k / per_curve; u = 1 - t
+            pts.append((
+                u*u*u*cx + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x,
+                u*u*u*cy + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y,
+            ))
+        cx, cy = x, y
 
     while i < len(tokens):
         if re.match(r"[A-Za-z]", tokens[i]):
@@ -66,33 +84,50 @@ def flatten_path(d: str, per_curve: int = 12) -> list[tuple[float, float]]:
             cx, cy, sx, sy = x, y, x, y
             pts.append((x, y))
             cmd = "l" if rel else "L"
+            last_c = last_q = None
         elif c == "L":
             x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
             cx, cy = x, y
             pts.append((x, y))
+            last_c = last_q = None
         elif c == "H":
             cx = num() + (cx if rel else 0)
             pts.append((cx, cy))
+            last_c = last_q = None
         elif c == "V":
             cy = num() + (cy if rel else 0)
             pts.append((cx, cy))
+            last_c = last_q = None
         elif c == "C":
             x1 = num() + (cx if rel else 0); y1 = num() + (cy if rel else 0)
             x2 = num() + (cx if rel else 0); y2 = num() + (cy if rel else 0)
             x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
-            for k in range(1, per_curve + 1):
-                t = k / per_curve; u = 1 - t
-                pts.append((
-                    u*u*u*cx + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x,
-                    u*u*u*cy + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y,
-                ))
-            cx, cy = x, y
-        elif c in ("S", "Q", "T", "A"):
-            n = {"S": 4, "Q": 4, "T": 2, "A": 7}[c]
-            vals = [num() for _ in range(n)]
-            x = vals[-2] + (cx if rel else 0); y = vals[-1] + (cy if rel else 0)
+            cubic(x1, y1, x2, y2, x, y)
+            last_c = (x2, y2); last_q = None
+        elif c == "S":
+            x2 = num() + (cx if rel else 0); y2 = num() + (cy if rel else 0)
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
+            x1 = 2 * cx - last_c[0] if last_c else cx
+            y1 = 2 * cy - last_c[1] if last_c else cy
+            cubic(x1, y1, x2, y2, x, y)
+            last_c = (x2, y2); last_q = None
+        elif c in ("Q", "T"):
+            if c == "Q":
+                qx = num() + (cx if rel else 0); qy = num() + (cy if rel else 0)
+            else:
+                qx = 2 * cx - last_q[0] if last_q else cx
+                qy = 2 * cy - last_q[1] if last_q else cy
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
+            cubic(cx + 2 / 3 * (qx - cx), cy + 2 / 3 * (qy - cy),
+                  x + 2 / 3 * (qx - x), y + 2 / 3 * (qy - y), x, y)
+            last_q = (qx, qy); last_c = None
+        elif c == "A":
+            for _ in range(5):
+                num()
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
             cx, cy = x, y
             pts.append((x, y))
+            last_c = last_q = None
         elif c == "Z":
             cx, cy = sx, sy
             pts.append((sx, sy))

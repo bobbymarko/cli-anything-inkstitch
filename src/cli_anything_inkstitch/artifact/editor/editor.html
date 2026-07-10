@@ -282,6 +282,10 @@
                vector-effect: non-scaling-stroke; cursor: grab; }
   .angleLabel { fill: var(--text); pointer-events: none;
                 font-family: ui-monospace, monospace; }
+  .bezArm { stroke: var(--accent); opacity: .7; stroke-width: 1;
+            vector-effect: non-scaling-stroke; pointer-events: none; }
+  .bezHandle { fill: #fff; stroke: var(--accent); stroke-width: 1.5;
+               vector-effect: non-scaling-stroke; cursor: grab; }
 </style>
 </head>
 <body>
@@ -425,6 +429,7 @@ function tokenizePath(d) {
   const tokens = d.match(/[MmLlCcZzHhVvSsQqTtAa]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/g) || [];
   const segs = [];
   let i = 0, cx = 0, cy = 0, sx = 0, sy = 0, cmd = null;
+  let lastC = null, lastQ = null;   // trailing control points for S/T reflection
   const num = () => parseFloat(tokens[i++]);
   while (i < tokens.length) {
     const t = tokens[i];
@@ -435,29 +440,53 @@ function tokenizePath(d) {
       const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
       segs.push({ c: "M", p: [x, y] }); cx = sx = x; cy = sy = y;
       cmd = rel ? "l" : "L";           // subsequent pairs are implicit linetos
+      lastC = lastQ = null;
     } else if (C === "L") {
       const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
       segs.push({ c: "L", p: [x, y] }); cx = x; cy = y;
+      lastC = lastQ = null;
     } else if (C === "H") {
       const x = num() + (rel ? cx : 0);
       segs.push({ c: "L", p: [x, cy] }); cx = x;
+      lastC = lastQ = null;
     } else if (C === "V") {
       const y = num() + (rel ? cy : 0);
       segs.push({ c: "L", p: [cx, y] }); cy = y;
+      lastC = lastQ = null;
     } else if (C === "C") {
       const x1 = num() + (rel ? cx : 0), y1 = num() + (rel ? cy : 0);
       const x2 = num() + (rel ? cx : 0), y2 = num() + (rel ? cy : 0);
       const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
       segs.push({ c: "C", p: [x1, y1, x2, y2, x, y] }); cx = x; cy = y;
-    } else if (C === "S" || C === "Q" || C === "T" || C === "A") {
-      // rare in this domain — flatten conservatively to a lineto at the endpoint
-      const n = { S: 4, Q: 4, T: 2, A: 7 }[C];
-      const vals = [];
-      for (let k = 0; k < n; k++) vals.push(num());
-      const x = vals[n - 2] + (rel ? cx : 0), y = vals[n - 1] + (rel ? cy : 0);
+      lastC = [x2, y2]; lastQ = null;
+    } else if (C === "S") {
+      // smooth cubic: first control reflects the previous C/S's second —
+      // exact conversion, no shape loss (Illustrator exports lean on s)
+      const x2 = num() + (rel ? cx : 0), y2 = num() + (rel ? cy : 0);
+      const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
+      const x1 = lastC ? 2 * cx - lastC[0] : cx;
+      const y1 = lastC ? 2 * cy - lastC[1] : cy;
+      segs.push({ c: "C", p: [x1, y1, x2, y2, x, y] }); cx = x; cy = y;
+      lastC = [x2, y2]; lastQ = null;
+    } else if (C === "Q" || C === "T") {
+      // quadratic → cubic by exact degree elevation (T reflects prior control)
+      let qx, qy;
+      if (C === "Q") { qx = num() + (rel ? cx : 0); qy = num() + (rel ? cy : 0); }
+      else { qx = lastQ ? 2 * cx - lastQ[0] : cx; qy = lastQ ? 2 * cy - lastQ[1] : cy; }
+      const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
+      const x1 = cx + 2 / 3 * (qx - cx), y1 = cy + 2 / 3 * (qy - cy);
+      const x2 = x + 2 / 3 * (qx - x), y2 = y + 2 / 3 * (qy - y);
+      segs.push({ c: "C", p: [x1, y1, x2, y2, x, y] }); cx = x; cy = y;
+      lastQ = [qx, qy]; lastC = null;
+    } else if (C === "A") {
+      // arcs are rare in this domain — flatten conservatively to a lineto
+      for (let k = 0; k < 5; k++) num();
+      const x = num() + (rel ? cx : 0), y = num() + (rel ? cy : 0);
       segs.push({ c: "L", p: [x, y] }); cx = x; cy = y;
+      lastC = lastQ = null;
     } else if (C === "Z") {
       segs.push({ c: "Z", p: [] }); cx = sx; cy = sy;
+      lastC = lastQ = null;
     } else { i++; }
   }
   return segs;
@@ -486,15 +515,16 @@ function subpathRanges(segs) {
   return ranges;
 }
 /* remove anchor ai, rejoining its neighbours (Illustrator delete-anchor:
-   the path stays closed). Refuses when the subpath would drop below 3
-   anchors. Returns true if the segs were changed. */
-function deleteAnchor(segs, ai) {
+   the path stays closed). Refuses when the subpath would drop below
+   `minAnchors` (3 for closed fill boundaries, 2 for open satin rails).
+   Returns true if the segs were changed. */
+function deleteAnchor(segs, ai, minAnchors = 3) {
   const as = anchors(segs);
   const a = as[ai];
   if (!a) return false;
   const r = subpathRanges(segs).find(rr => a.si >= rr.start && a.si <= rr.end);
   const inSub = as.filter(x => x.si >= r.start && x.si <= r.end).length;
-  if (inSub <= 3) return false;
+  if (inSub <= minAnchors) return false;
   const seg = segs[a.si];
   if (seg.c === "M") {
     // subpath start: promote the first segment's endpoint to be the new M
@@ -565,6 +595,83 @@ function moveAnchor(segs, ai, dx, dy) {
   else { s.p[0] += dx; s.p[1] += dy; }
   const next = segs[a.si + 1];
   if (next && next.c === "C") { next.p[0] += dx; next.p[1] += dy; }
+}
+/* bezier control handles of anchor `ai`: the incoming control (arriving C's
+   second control point) and outgoing control (departing C's first). Either
+   may be absent (straight L neighbours, or the subpath seam at M). */
+function bezHandlesOf(segs, ai) {
+  const as = anchors(segs);
+  const a = as[ai];
+  if (!a) return null;
+  const seg = segs[a.si], next = segs[a.si + 1];
+  const out = { a, in: null, out: null };
+  if (seg.c === "C") out.in = { x: seg.p[2], y: seg.p[3] };
+  if (next && next.c === "C") out.out = { x: next.p[0], y: next.p[1] };
+  return out;
+}
+function setBezHandle(segs, ai, end, x, y) {
+  const as = anchors(segs);
+  const a = as[ai];
+  const seg = segs[a.si], next = segs[a.si + 1];
+  if (end === "in" && seg.c === "C") { seg.p[2] = x; seg.p[3] = y; }
+  if (end === "out" && next && next.c === "C") { next.p[0] = x; next.p[1] = y; }
+}
+/* drag one handle; unless `broken` (alt held), the opposite handle rotates
+   to stay collinear through the anchor, keeping its own length — the
+   Illustrator smooth-point default */
+function dragBezHandle(segs, ai, end, dx, dy, broken) {
+  const h = bezHandlesOf(segs, ai);
+  if (!h || !h[end]) return;
+  setBezHandle(segs, ai, end, h[end].x + dx, h[end].y + dy);
+  const other = end === "in" ? "out" : "in";
+  if (broken || !h[other]) return;
+  const moved = bezHandlesOf(segs, ai)[end];
+  const ang = Math.atan2(moved.y - h.a.y, moved.x - h.a.x);
+  const olen = Math.hypot(h[other].x - h.a.x, h[other].y - h.a.y);
+  setBezHandle(segs, ai, other,
+               h.a.x - olen * Math.cos(ang), h.a.y - olen * Math.sin(ang));
+}
+/* smooth anchor `ai` (double-click): straight neighbours upgrade L→C and
+   both handles align to the Catmull-Rom tangent (direction prev→next
+   anchor, length ⅓ of each chord) — pulls editable handles out of corners */
+function smoothAnchor(segs, ai) {
+  const as = anchors(segs);
+  const a = as[ai];
+  if (!a) return false;
+  const seg = segs[a.si], next = segs[a.si + 1];
+  const start = segStart(segs, a.si);
+  const prevPt = { x: start[0], y: start[1] };
+  const nextPt = (next && (next.c === "L" || next.c === "C"))
+    ? { x: next.p[next.p.length - 2], y: next.p[next.p.length - 1] } : null;
+  if (seg.c === "M" || (!nextPt && seg.c !== "C")) return false;
+  let tx = nextPt ? nextPt.x - prevPt.x : a.x - prevPt.x;
+  let ty = nextPt ? nextPt.y - prevPt.y : a.y - prevPt.y;
+  const tl = Math.hypot(tx, ty) || 1;
+  tx /= tl; ty /= tl;
+  if (seg.c === "L") {
+    const c1 = [prevPt.x + (a.x - prevPt.x) / 3, prevPt.y + (a.y - prevPt.y) / 3];
+    segs[a.si] = { c: "C", p: [...c1, a.x, a.y, a.x, a.y] };
+  }
+  const inLen = Math.hypot(a.x - prevPt.x, a.y - prevPt.y) / 3;
+  setBezHandle(segs, ai, "in", a.x - tx * inLen, a.y - ty * inLen);
+  if (next && next.c === "L") {
+    const c2 = [nextPt.x - (nextPt.x - a.x) / 3, nextPt.y - (nextPt.y - a.y) / 3];
+    segs[a.si + 1] = { c: "C", p: [a.x, a.y, ...c2, nextPt.x, nextPt.y] };
+  }
+  if (nextPt) {
+    const outLen = Math.hypot(nextPt.x - a.x, nextPt.y - a.y) / 3;
+    setBezHandle(segs, ai, "out", a.x + tx * outLen, a.y + ty * outLen);
+  }
+  return true;
+}
+/* retract anchor `ai`'s handles (alt-double-click): collapse both control
+   points onto the anchor — a sharp corner, segments stay cubic */
+function retractAnchor(segs, ai) {
+  const h = bezHandlesOf(segs, ai);
+  if (!h || (!h.in && !h.out)) return false;
+  if (h.in) setBezHandle(segs, ai, "in", h.a.x, h.a.y);
+  if (h.out) setBezHandle(segs, ai, "out", h.a.x, h.a.y);
+  return true;
 }
 /* flatten a subpath to a polyline for tier-1 + rung snapping */
 function flatten(segs, per = 12) {
@@ -1320,6 +1427,21 @@ function renderTransformGizmo(objs) {
     });
   });
 }
+/* bezier arms + draggable control knobs for the targeted anchor.
+   ctxDesc carries {rail: ri} for satin rails so serialization and the
+   set_path commit rebuild the right d. */
+function renderBezControls(o, segs, ai, ctxDesc) {
+  const h = bezHandlesOf(segs, ai);
+  if (!h) return;
+  for (const end of ["in", "out"]) {
+    const c = h[end];
+    if (!c) continue;
+    el("line", { x1: h.a.x, y1: h.a.y, x2: c.x, y2: c.y, class: "bezArm" }, editLayer);
+    const knob = el("circle", { cx: c.x, cy: c.y, r: px(3.5), class: "bezHandle" }, editLayer);
+    knob.addEventListener("pointerdown", (ev) =>
+      startDrag(ev, { type: "bez", obj: o, anchor: ai, end, segs, ...ctxDesc }));
+  }
+}
 function renderSatin(o) {
   const railSegs = o.rails.map(tokenizePath);
   const flats = railSegs.map(s => flatten(s));
@@ -1344,14 +1466,29 @@ function renderSatin(o) {
     });
     el("path", { d: dz, class: "zig" }, editLayer);
   }
-  // rails + draggable anchor nodes
+  // rails + draggable anchor nodes (click targets; dblclick smooths corners)
   o.rails.forEach((d, ri) => {
     el("path", { d, class: "rail" }, editLayer);
     anchors(railSegs[ri]).forEach((a, ai) => {
-      const c = el("circle", { cx: a.x, cy: a.y, r: px(4.5), class: "node" }, editLayer);
+      const isActive = activeNode && activeNode.objId === o.id &&
+                       activeNode.rail === ri && activeNode.index === ai;
+      const c = el("circle", { cx: a.x, cy: a.y, r: px(isActive ? 6 : 4.5),
+                               class: "node" + (isActive ? " nodeActive" : "") }, editLayer);
       c.addEventListener("pointerdown", (ev) =>
         startDrag(ev, { type: "rail-node", obj: o, rail: ri, anchor: ai, segs: railSegs }));
+      c.addEventListener("dblclick", (ev) => {
+        ev.stopPropagation();
+        const changed = ev.altKey ? retractAnchor(railSegs[ri], ai)
+                                  : smoothAnchor(railSegs[ri], ai);
+        if (!changed) return;
+        o.rails[ri] = serializePath(railSegs[ri]);
+        activeNode = { objId: o.id, index: ai, rail: ri };
+        renderEditLayer();
+        postEdit([{ op: "set_path", id: o.id, d: satinD(o) }]).catch(() => refresh());
+      });
     });
+    if (activeNode && activeNode.objId === o.id && activeNode.rail === ri)
+      renderBezControls(o, railSegs[ri], activeNode.index, { rail: ri });
   });
   // rungs + endpoints
   o.rungs.forEach((d, ri) => {
@@ -1376,12 +1513,25 @@ function renderFill(o) {
   // boundary anchor nodes — drag to reshape, click + Delete to remove
   const boundarySegs = tokenizePath(o.d);
   anchors(boundarySegs).forEach((a, ai) => {
-    const isActive = activeNode && activeNode.objId === o.id && activeNode.index === ai;
+    const isActive = activeNode && activeNode.objId === o.id &&
+                     activeNode.rail === undefined && activeNode.index === ai;
     const c = el("circle", { cx: a.x, cy: a.y, r: px(isActive ? 6 : 4.5),
                              class: "node" + (isActive ? " nodeActive" : "") }, editLayer);
     c.addEventListener("pointerdown", (ev) =>
       startDrag(ev, { type: "fill-node", obj: o, anchor: ai, segs: boundarySegs }));
+    c.addEventListener("dblclick", (ev) => {
+      ev.stopPropagation();
+      const changed = ev.altKey ? retractAnchor(boundarySegs, ai)
+                                : smoothAnchor(boundarySegs, ai);
+      if (!changed) return;
+      o.d = serializePath(boundarySegs);
+      activeNode = { objId: o.id, index: ai };
+      renderEditLayer();
+      postEdit([{ op: "set_path", id: o.id, d: o.d }]).catch(() => refresh());
+    });
   });
+  if (activeNode && activeNode.objId === o.id && activeNode.rail === undefined)
+    renderBezControls(o, boundarySegs, activeNode.index, {});
   // fill-angle handle: dashed line through the bbox centre with a knob —
   // drag the knob around the centre to rotate the fill angle
   const flatsAll = flatten(boundarySegs);
@@ -1508,6 +1658,12 @@ function startDrag(ev, desc) {
     } else if (desc.type === "rung-node") {
       moveAnchor(desc.segs[0], desc.anchor, dx, dy);
       desc.obj.rungs[desc.rung] = serializePath(desc.segs[0]);
+    } else if (desc.type === "bez") {
+      // alt = break the pair (Illustrator): move only the dragged handle
+      dragBezHandle(desc.segs, desc.anchor, desc.end, dx, dy, e.altKey);
+      if (desc.rail !== undefined)
+        desc.obj.rails[desc.rail] = serializePath(desc.segs);
+      else desc.obj.d = serializePath(desc.segs);
     }
     renderEditLayer();
   };
@@ -1516,11 +1672,19 @@ function startDrag(ev, desc) {
     window.removeEventListener("pointerup", up);
     dragging = null;
     if (!movedAny) {
-      // click, not a drag — for fill nodes this targets the node for Delete
+      // click, not a drag — node clicks target the anchor: Delete removes
+      // it, and its bezier handles (if any) become visible and draggable
       if (desc.type === "fill-node") {
         const same = activeNode && activeNode.objId === desc.obj.id &&
+                     activeNode.rail === undefined &&
                      activeNode.index === desc.anchor;
         activeNode = same ? null : { objId: desc.obj.id, index: desc.anchor };
+      } else if (desc.type === "rail-node") {
+        const same = activeNode && activeNode.objId === desc.obj.id &&
+                     activeNode.rail === desc.rail &&
+                     activeNode.index === desc.anchor;
+        activeNode = same ? null
+          : { objId: desc.obj.id, index: desc.anchor, rail: desc.rail };
       }
       renderEditLayer();
       return;
@@ -1546,6 +1710,10 @@ function startDrag(ev, desc) {
         await postEdit(ops);
       } else if (desc.type === "fill-node") {
         await postEdit([{ op: "set_path", id: desc.obj.id, d: desc.obj.d }]);
+      } else if (desc.type === "bez") {
+        await postEdit([{ op: "set_path", id: desc.obj.id,
+                          d: desc.rail !== undefined ? satinD(desc.obj)
+                                                     : desc.obj.d }]);
       } else {
         await postEdit([{ op: "set_path", id: desc.obj.id, d: satinD(desc.obj) }]);
       }
@@ -1565,6 +1733,17 @@ async function deleteFillNode(o, ai) {
   o.d = serializePath(segs);
   renderEditLayer();
   await postEdit([{ op: "set_path", id: o.id, d: o.d }]);
+}
+async function deleteRailNode(o, ri, ai) {
+  const segs = tokenizePath(o.rails[ri]);
+  if (!deleteAnchor(segs, ai, 2)) {   // a rail is still a rail with 2 nodes
+    showToast("can't remove — the rail needs at least 2 nodes", true);
+    renderEditLayer();
+    return;
+  }
+  o.rails[ri] = serializePath(segs);
+  renderEditLayer();
+  await postEdit([{ op: "set_path", id: o.id, d: satinD(o) }]);
 }
 async function addFillNode(o, ev) {
   const p = clientToSvg(ev);
@@ -1635,9 +1814,10 @@ document.addEventListener("keydown", (ev) => {
     if (o) deleteRung(o, idx);
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeNode) {
     const o = byId(activeNode.objId);
-    const idx = activeNode.index;
+    const idx = activeNode.index, rail = activeNode.rail;
     activeNode = null;
-    if (o) deleteFillNode(o, idx);
+    if (o) (rail !== undefined ? deleteRailNode(o, rail, idx)
+                               : deleteFillNode(o, idx));
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && selection.length) {
     // no rung/node targeted → delete the selected object(s); Cmd+Z restores
     const ids = [...selection];
@@ -2033,6 +2213,9 @@ const HELP = [
   ]],
   ["Editing", [
     ["Drag nodes, rungs, handles", "reshape rails and fill boundaries, move fill start/end"],
+    ["Click a node", "show its bezier handles — drag to bend the curve"],
+    [`Drag a bezier handle`, `smooth by default; hold ${ALT} to break the pair`],
+    ["Double-click a node", `smooth the corner (pulls handles out); ${ALT}+double-click retracts them`],
     ["Double-click a satin", "add a rung at that spot"],
     ["Double-click a fill", "add a boundary node at the nearest point"],
     [`Click a rung or node, then ${DEL}`, "delete it (boundaries stay closed)"],

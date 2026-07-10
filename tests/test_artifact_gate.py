@@ -225,3 +225,24 @@ class TestTaperedColumnEnds:
                 'M20,17.5 L20,22.5 M40,17.5 L40,22.5"/>')
         result = run_gate(make_project(tmp_path, body))
         assert not any(f["check"] == "width_min" for f in result["errors"])
+
+
+class TestFlattenSmoothSegments:
+    """S reflects the previous cubic control; Q/T degree-elevate — exact,
+    not endpoint-flattened (Illustrator leans on s; flattening it misstated
+    satin widths and faceted the satin→fill band)."""
+
+    def test_s_shorthand_matches_explicit_cubic(self):
+        # S's first control = reflection of the prior C's second control:
+        # 2*(40,0) - (30,20) = (50,-20)
+        explicit = "M0,0 C10,20 30,20 40,0 C50,-20 70,-20 80,0"
+        shorthand = "M0,0 C10,20 30,20 40,0 S70,-20 80,0"
+        a = flatten_path(explicit)
+        b = flatten_path(shorthand)
+        assert len(a) == len(b)
+        assert all(abs(p[0] - q[0]) < 1e-9 and abs(p[1] - q[1]) < 1e-9
+                   for p, q in zip(a, b))
+
+    def test_quadratic_is_curved_not_chorded(self):
+        pts = flatten_path("M0,0 Q10,20 20,0")
+        assert max(p[1] for p in pts) > 5    # apex of the quad is y=10
