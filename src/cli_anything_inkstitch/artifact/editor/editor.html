@@ -18,7 +18,7 @@
   #bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
          background: var(--panel); border-bottom: 1px solid var(--line); }
   #bar .brand { font-weight: 700; }
-  #bar .brand span { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  #bar #helpBtn { margin-left: 8px; }
   #bar .spacer { flex: 1; }
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
           border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
@@ -133,11 +133,11 @@
   .panel { border-bottom: 1px solid var(--line); }
   .panelHead { padding: 8px 4px; font-size: 11px; text-transform: uppercase;
                letter-spacing: .07em; color: var(--text); cursor: pointer;
-               user-select: none; }
-  .panelHead::before { content: "▾"; color: var(--muted); margin-right: 6px;
-                       font-size: 9px; }
+               user-select: none; display: flex; justify-content: space-between;
+               align-items: center; }
+  .panelHead::after { content: "▾"; color: var(--muted); font-size: 9px; }
   .panel.closed .panelHead { color: var(--muted); }
-  .panel.closed .panelHead::before { content: "▸"; }
+  .panel.closed .panelHead::after { content: "▸"; }
   .panel.closed .panelBody { display: none; }
   .panelBody { padding: 2px 4px 10px; }
   .ovRow { display: flex; justify-content: space-between; gap: 8px;
@@ -164,16 +164,15 @@
   .histRow:hover { background: rgba(110,168,254,.08); color: var(--text); }
   .histRow.cur { color: var(--accent); }
   .histRow.future { opacity: .45; }
-  .sideHead { display: flex; align-items: center; padding: 10px 10px 6px 14px; }
-  .sideHead h2 { flex: 1; font-size: 12px; text-transform: uppercase;
-                 letter-spacing: .08em; color: var(--muted); }
+  .sideHead { display: flex; align-items: center; justify-content: flex-end;
+              padding: 6px 10px 0 14px; }
   .collapseBtn { all: unset; cursor: pointer; color: var(--muted); padding: 0 4px;
                  font-size: 14px; line-height: 1; }
   .collapseBtn:hover { color: var(--text); }
   /* id-qualified: must outrank the #inspect/#panel width rules above */
   #inspect.collapsed, #panel.collapsed { width: 26px; cursor: pointer; }
   .side.collapsed .sideHead { padding: 10px 0 0; justify-content: center; }
-  .side.collapsed h2, .side.collapsed .sideBody, .side.collapsed #composer,
+  .side.collapsed .sideBody, .side.collapsed #composer,
   .side.collapsed #inspectBody { display: none; }
   #inspectBody { flex: 1; overflow-y: auto; padding: 4px 14px 14px; }
   #inspectBody .noSel { color: var(--muted); }
@@ -302,7 +301,9 @@
 </head>
 <body>
 <div id="bar">
-  <div class="brand">Digitizing Artifact<span>editor</span></div>
+  <div class="brand">Digitizing Artifact</div>
+  <button class="chip" id="helpBtn" type="button" title="How to use"
+          aria-label="How to use">?</button>
   <div class="spacer"></div>
   <div id="viewModes" role="group" aria-label="View mode">
     <button data-mode="outline" class="on" type="button" title="Object outlines only">Outline</button>
@@ -310,13 +311,11 @@
     <button data-mode="realistic" type="button" title="Thread thickness with shading">Realistic</button>
   </div>
   <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
-  <button class="chip" id="helpBtn" type="button" title="How to use"
-          aria-label="How to use">?</button>
   <button class="chip" id="endBtn" type="button">End session</button>
 </div>
 <div id="main">
   <aside id="panel" class="side">
-    <div class="sideHead"><h2>Conversation</h2>
+    <div class="sideHead">
       <button class="collapseBtn" id="panelToggle" type="button"
               title="Collapse conversation">«</button></div>
     <div id="chat" class="sideBody"></div>
@@ -381,7 +380,7 @@
     </div>
   </div>
   <aside id="inspect" class="side">
-    <div class="sideHead"><h2>Panels</h2>
+    <div class="sideHead">
       <button class="collapseBtn" id="inspectToggle" type="button"
               title="Collapse panels">»</button></div>
     <div id="panelStack" class="sideBody">
