@@ -854,13 +854,26 @@ function renderAll() {
   renderPlanLayer();
   for (const o of design.objects) {
     if (!o.d) continue;
-    // satins draw rails only in the artwork layer — rungs are editing
-    // scaffolding (shown in the edit layer when selected), not shape outline
-    const displayD = (o.kind === "satin" && o.rails) ? o.rails.join(" ") : o.d;
-    el("path", { d: displayD, fill: o.fill || "none",
-      stroke: o.stroke || "none", "stroke-width": .4 }, artworkLayer);
+    // satins preview as the FILLED column between the rails — the thread
+    // mass they become — not as hairline rail strokes (and never with the
+    // rungs, which are editing scaffolding). Rail A + rail B reversed forms
+    // the closed band polygon; works for open columns and closed rings.
+    let displayD = o.d, displayFill = o.fill, displayStroke = o.stroke;
+    if (o.kind === "satin" && o.rails && o.rails.length === 2) {
+      const a = flatten(tokenizePath(o.rails[0]));
+      const b = flatten(tokenizePath(o.rails[1])).reverse();
+      if (a.length > 1 && b.length > 1) {
+        displayD = "M" + [...a, ...b].map(p => fmt(p[0]) + "," + fmt(p[1])).join(" ") + "Z";
+        displayFill = o.stroke || o.fill || "#888";
+        displayStroke = null;
+      } else {
+        displayD = o.rails.join(" ");
+      }
+    }
+    el("path", { d: displayD, fill: displayFill || "none",
+      stroke: displayStroke || "none", "stroke-width": .4 }, artworkLayer);
     const hit = el("path", { d: displayD, class: "obj-hit",
-      fill: o.fill ? "rgba(0,0,0,0)" : "none" }, artworkLayer);
+      fill: displayFill ? "rgba(0,0,0,0)" : "none" }, artworkLayer);
     hit.addEventListener("pointerdown", (ev) => {
       if (spaceHeld) return;                      // hand tool wins
       ev.stopPropagation();
