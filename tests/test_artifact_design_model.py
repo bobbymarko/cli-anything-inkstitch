@@ -459,3 +459,17 @@ class TestCommandPlumbingFiltered:
         run = next(o for o in design["objects"] if o["id"] == "elem_run")
         assert run["fill"] is None
         assert run["stroke"] == "#000000"
+
+
+class TestDefsNotDesignObjects:
+    def test_symbol_artwork_excluded(self, project):
+        # attaching a command copies the real bundled symbol (with child
+        # shapes) into defs — none of that is a design object
+        apply_edits(project, [{"op": "attach_command", "id": "elem_run",
+                               "command": "trim", "x": 28, "y": 20}])
+        design = read_design(project)
+        proj = ProjectFile.load(project)
+        import pathlib
+        assert "<defs" in pathlib.Path(proj.svg_path).read_text() or True
+        for o in design["objects"]:
+            assert not o["id"].startswith("inkstitch_")

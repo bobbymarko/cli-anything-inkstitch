@@ -120,14 +120,18 @@ def _is_command_use(elem) -> bool:
 
 
 def _is_command_plumbing(elem) -> bool:
-    """Command connectors and anything inside a command group are marker
-    infrastructure (svg/commands.py structure), not design objects — they
-    must not render, list, or count as stitchable elements."""
+    """Command connectors, anything inside a command group, and anything
+    inside <defs>/<symbol> (e.g. the command symbols' own artwork) are
+    infrastructure, not design objects — they must not render, list, or
+    count as stitchable elements."""
     from cli_anything_inkstitch.svg.commands import CONNECTION_END, CONNECTION_START
     if elem.get(CONNECTION_START) or elem.get(CONNECTION_END):
         return True
     parent = elem.getparent()
     while parent is not None:
+        if isinstance(parent.tag, str) and \
+                etree.QName(parent.tag).localname in ("defs", "symbol"):
+            return True
         if (parent.get("id") or "").startswith("command_group_"):
             return True
         parent = parent.getparent()
