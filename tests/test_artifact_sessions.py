@@ -90,7 +90,9 @@ class TestFeedbackQueue:
         assert result["status"] == "feedback"
         assert result["items"][0]["objects"] == ["elem_11"]
         assert result["items"][0]["text"] == "narrower at the top"
-        # drained
+        # at-least-once: drained but unacknowledged until an agent reply;
+        # only after the reply does the queue read as empty
+        store.add_agent_reply(s["key"], "done")
         assert store.take_feedback(s["key"]) == {"status": "waiting"}
 
     def test_multiple_batches_drain_together(self, store, project):
@@ -115,7 +117,12 @@ class TestFeedbackQueue:
         assert result["status"] == "feedback"
         assert result["ended"] is True
         assert result["ended_by"] == "user"
-        # next take reports plain ended
+        # at-least-once: the final note redelivers until the agent replies —
+        # a send-and-end payload must never be lost to a dead poll
+        again = store.take_feedback(s["key"])
+        assert again["status"] == "feedback"
+        assert again["items"][0]["redelivered"] is True
+        store.add_agent_reply(s["key"], "got it")
         assert store.take_feedback(s["key"]) == {"status": "ended", "ended_by": "user"}
 
     def test_feedback_mirrored_to_chat(self, store, project):
@@ -165,10 +172,15 @@ class TestConcurrency:
             done.set()
 
         def consumer():
-            while not (done.is_set() and store.take_feedback(s["key"])["status"] == "waiting"):
+            # a well-behaved agent: ack (reply) after every take — without
+            # the ack, at-least-once delivery redelivers on purpose
+            while True:
                 result = store.take_feedback(s["key"])
                 if result["status"] == "feedback":
                     taken.extend(result["items"])
+                    store.add_agent_reply(s["key"], "ack")
+                elif done.is_set():
+                    break
 
         t1 = threading.Thread(target=producer)
         t2 = threading.Thread(target=consumer)
@@ -179,3 +191,44 @@ class TestConcurrency:
         if result["status"] == "feedback":
             taken.extend(result["items"])
         assert sorted(i["text"] for i in taken) == sorted(f"m{i}" for i in range(n))
+
+
+class TestAtLeastOnceDelivery:
+    """Reply-as-ack: feedback drained by a poll that never replies gets
+    REDELIVERED to the next poll (the lost-question incident, 2026-07-10)."""
+
+    def _store(self, tmp_path):
+        from cli_anything_inkstitch.artifact.sessions import SessionStore, canonical_file
+        import json as _json
+        proj = tmp_path / "p.inkstitch-cli.json"
+        proj.write_text(_json.dumps({"schema_version": 1}))
+        store = SessionStore(str(tmp_path / "state.json"))
+        s = store.upsert_session(canonical_file(str(proj)), "u")
+        return store, s["key"]
+
+    def test_unreplied_feedback_redelivers(self, tmp_path):
+        store, key = self._store(tmp_path)
+        store.queue_feedback(key, {"text": "important question"})
+        first = store.take_feedback(key)
+        assert first["status"] == "feedback"
+        # poll died without a reply → next take redelivers, flagged
+        second = store.take_feedback(key)
+        assert second["status"] == "feedback"
+        assert second["items"][0]["text"] == "important question"
+        assert second["items"][0]["redelivered"] is True
+
+    def test_reply_acknowledges(self, tmp_path):
+        store, key = self._store(tmp_path)
+        store.queue_feedback(key, {"text": "q"})
+        store.take_feedback(key)
+        store.add_agent_reply(key, "answered")
+        assert store.take_feedback(key)["status"] == "waiting"
+
+    def test_new_feedback_appends_after_unacked(self, tmp_path):
+        store, key = self._store(tmp_path)
+        store.queue_feedback(key, {"text": "first"})
+        store.take_feedback(key)                  # delivered, never acked
+        store.queue_feedback(key, {"text": "second"})
+        result = store.take_feedback(key)
+        texts = [i["text"] for i in result["items"]]
+        assert texts == ["first", "second"]

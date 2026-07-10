@@ -154,7 +154,7 @@ class SessionStore:
             return dict(session)
 
     def take_feedback(self, key: str) -> dict[str, Any]:
-        """Atomically drain queued feedback.
+        """Atomically drain queued feedback — AT-LEAST-ONCE delivery.
 
         Returns one of:
           {"status": "feedback", "items": [...]}    — batches, now removed from the queue
@@ -163,14 +163,24 @@ class SessionStore:
           {"status": "unknown"}                     — no such session
         An ended session with queued feedback still returns it (flagged with
         "ended": True) so a final send-and-end never loses the payload.
+
+        Delivered items are held unacknowledged until an agent REPLY arrives
+        (reply == ack). A poll that consumes feedback and dies without
+        replying leaves the items to be REDELIVERED (flagged
+        "redelivered": True) to the next poll — feedback can't be lost to a
+        crashed or mislaunched poll.
         """
         with self._lock:
             session = self._sessions.get(key)
             if not session:
                 return {"status": "unknown"}
-            if session["pending_feedback"]:
-                items = session["pending_feedback"]
+            unacked = session.get("unacked_feedback") or []
+            for item in unacked:
+                item["redelivered"] = True
+            if session["pending_feedback"] or unacked:
+                items = unacked + session["pending_feedback"]
                 session["pending_feedback"] = []
+                session["unacked_feedback"] = items
                 session["updated_at"] = _now_iso()
                 self._save()
                 result: dict[str, Any] = {"status": "feedback", "items": items}
@@ -188,6 +198,7 @@ class SessionStore:
             if not session:
                 return None
             session["chat"].append({"role": "agent", "text": text, "at": _now_iso()})
+            session["unacked_feedback"] = []      # reply acknowledges delivery
             session["updated_at"] = _now_iso()
             self._save()
             return dict(session)
