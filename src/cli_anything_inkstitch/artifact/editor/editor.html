@@ -304,6 +304,9 @@
   .penDraft { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
               vector-effect: non-scaling-stroke; pointer-events: none; }
   .node.penFirst { fill: var(--start); }
+  .zoomMarquee { fill: rgba(110,168,254,.08); stroke: var(--accent);
+                 stroke-dasharray: 5 4; vector-effect: non-scaling-stroke;
+                 pointer-events: none; }
 </style>
 </head>
 <body>
@@ -1150,12 +1153,60 @@ function actualSize() {                       // Cmd+1: 1 svg unit = 1 css px
          w: rect.width, h: rect.height };
   setViewBox();
 }
+/* Z (held) = zoom tool: click steps the zoom at the cursor (alt = out),
+   dragging draws a marquee that the view zooms to fit on release */
+let zHeld = false;
+function startZoomDrag(ev0) {
+  const from = clientToSvg(ev0);
+  const out = ev0.altKey;
+  let rect = null, moved = false;
+  const move = (e) => {
+    if (Math.hypot(e.clientX - ev0.clientX, e.clientY - ev0.clientY) > 4) moved = true;
+    if (!moved) return;
+    const p = clientToSvg(e);
+    if (!rect) rect = el("rect", { class: "zoomMarquee" }, canvas);
+    rect.setAttribute("x", Math.min(from.x, p.x));
+    rect.setAttribute("y", Math.min(from.y, p.y));
+    rect.setAttribute("width", Math.abs(p.x - from.x) || 0.001);
+    rect.setAttribute("height", Math.abs(p.y - from.y) || 0.001);
+  };
+  const up = (e) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (rect) rect.remove();
+    if (moved && !out) {
+      const p = clientToSvg(e);
+      let bx = Math.min(from.x, p.x), by = Math.min(from.y, p.y);
+      let bw = Math.abs(p.x - from.x) || 0.01, bh = Math.abs(p.y - from.y) || 0.01;
+      // grow the box to the canvas aspect so the whole marquee stays visible
+      const crect = canvas.getBoundingClientRect();
+      const ar = crect.width / crect.height;
+      if (bw / bh > ar) { const nh = bw / ar; by -= (nh - bh) / 2; bh = nh; }
+      else { const nw = bh * ar; bx -= (nw - bw) / 2; bw = nw; }
+      vb = { x: bx, y: by, w: bw, h: bh };
+    } else {
+      const f = out ? 1.5 : 1 / 1.5;    // click (or alt-drag): step at cursor
+      vb = { x: from.x - (from.x - vb.x) * f, y: from.y - (from.y - vb.y) * f,
+             w: vb.w * f, h: vb.h * f };
+    }
+    setViewBox();
+    if (typeof drawRealistic === "function") drawRealistic();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
 /* spacebar = hand tool: while held, any drag on the canvas pans */
 canvas.addEventListener("pointerdown", (ev) => {
   if (spaceHeld) {
     ev.stopPropagation();
     ev.preventDefault();
     startPan(ev);
+    return;
+  }
+  if (zHeld && ev.button === 0) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    startZoomDrag(ev);
     return;
   }
   if (activeTool === "pen" && ev.button === 0) {
@@ -2039,6 +2090,12 @@ document.addEventListener("keydown", (ev) => {
     if (!spaceHeld) { spaceHeld = true; canvas.style.cursor = "grab"; }
     return;
   }
+  if (!inText && ev.key.toLowerCase() === "z" && !(IS_MAC ? ev.metaKey : ev.ctrlKey)) {
+    ev.preventDefault();
+    if (!zHeld) { zHeld = true; canvas.style.cursor = ev.altKey ? "zoom-out" : "zoom-in"; }
+    return;
+  }
+  if (zHeld && ev.key === "Alt") { canvas.style.cursor = "zoom-out"; }
   if (inText) return;
   const mod = IS_MAC ? ev.metaKey : ev.ctrlKey;
   const k = ev.key.toLowerCase();
@@ -2093,10 +2150,16 @@ document.addEventListener("keydown", (ev) => {
     ev.preventDefault(); actualSize();
   }
 });
+const restoreCursor = () =>
+  canvas.style.cursor = activeTool === "pen" ? "crosshair" : "";
 document.addEventListener("keyup", (ev) => {
-  if (ev.key === " ") { spaceHeld = false; canvas.style.cursor = ""; }
+  if (ev.key === " ") { spaceHeld = false; restoreCursor(); }
+  if (ev.key.toLowerCase() === "z") { zHeld = false; restoreCursor(); }
+  if (zHeld && ev.key === "Alt") { canvas.style.cursor = "zoom-in"; }
 });
-window.addEventListener("blur", () => { spaceHeld = false; canvas.style.cursor = ""; });
+window.addEventListener("blur", () => {
+  spaceHeld = false; zHeld = false; restoreCursor();
+});
 
 /* ---------- chat / feedback ---------- */
 /* pills mirror the canvas selection — removing a pill deselects the object */
@@ -2515,6 +2578,7 @@ const HELP = [
     ["Scroll / Shift-scroll", "pan vertically / horizontally"],
     [`${ALT}+scroll or pinch`, "zoom at cursor"],
     ["Hold Space + drag", "hand tool (pan)"],
+    ["Hold Z + click / drag", `zoom in at the cursor / zoom to the drawn box (${ALT} = zoom out)`],
     [`${MOD_LABEL}= / ${MOD_LABEL}−`, "zoom in / out"],
     [`${MOD_LABEL}0 / ${MOD_LABEL}1`, "fit in window / actual size"],
   ]],
