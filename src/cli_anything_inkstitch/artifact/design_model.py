@@ -97,7 +97,9 @@ def split_subpaths(d: str) -> list[str]:
 def _kind_for(stitch_type: str) -> str:
     if stitch_type == "satin_column":
         return "satin"
-    if stitch_type.endswith("_fill") or stitch_type == "auto_fill":
+    # cross_stitch is the one fill method whose id doesn't end in _fill
+    # (engine fill_stitch.py _fill_methods)
+    if stitch_type.endswith("_fill") or stitch_type in ("auto_fill", "cross_stitch"):
         return "fill"
     if stitch_type in ("running_stitch", "ripple_stitch", "zigzag_stitch", "bean_stitch",
                        "manual_stitch"):

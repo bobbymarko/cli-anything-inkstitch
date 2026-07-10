@@ -705,3 +705,16 @@ class TestSatinStartEnd:
         assert satin["start"]["use_id"] == r["results"][0]["use_id"]
         assert satin["start"]["x"] == 16
         assert "end" not in satin or satin.get("end") is None
+
+
+class TestCrossStitchKind:
+    def test_cross_stitch_is_a_fill(self, project):
+        # cross_stitch is a fill_method ParamOption (engine fill_stitch.py
+        # _fill_methods) — the only one not ending in _fill; it must keep
+        # fill-kind editing (handles, boundary nodes, Colors grouping)
+        apply_edits(project, [{"op": "set_attr", "id": "elem_fill",
+                               "name": "fill_method", "value": "cross_stitch"}])
+        fill = next(o for o in read_design(project)["objects"]
+                    if o["id"] == "elem_fill")
+        assert fill["stitch_type"] == "cross_stitch"
+        assert fill["kind"] == "fill"

@@ -24,13 +24,7 @@
           border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
           background: transparent; font: inherit; cursor: pointer; }
   .chip.on { color: var(--accent); border-color: var(--accent); }
-  #viewModes { display: inline-flex; border: 1px solid var(--line);
-               border-radius: 999px; overflow: hidden; }
-  #viewModes button { all: unset; padding: 3px 12px; color: var(--muted);
-                      cursor: pointer; font: inherit; }
-  #viewModes button + button { border-left: 1px solid var(--line); }
-  #viewModes button.on { color: var(--accent); background: rgba(110,168,254,.12); }
-  #viewModes button:hover:not(.on) { color: var(--text); }
+  #viewModes { display: flex; gap: 2px; }
   #presence { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
   #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
   #presence.listening .dot { background: var(--start); }
@@ -60,8 +54,13 @@
   #gateBanner li { margin-bottom: 3px; }
   #gateBanner li a { color: var(--accent); cursor: pointer; text-decoration: underline; }
   #gateBanner .row { display: flex; gap: 8px; }
-  #timelineBar { display: none; align-items: center; gap: 8px; }
-  #timelineBar #timeline { width: 190px; }
+  /* timeline floats centered ABOVE the toolbar so the tool buttons never
+     shift when a stitch view toggles it on and off */
+  #timelineBar { position: absolute; left: 50%; transform: translateX(-50%);
+                 bottom: 60px; display: none; align-items: center; gap: 10px;
+                 background: rgba(28,31,38,.95); border: 1px solid var(--line);
+                 border-radius: 10px; padding: 6px 12px; z-index: 3; }
+  #timelineBar #timeline { width: 230px; }
   #toolbar { position: absolute; left: 50%; transform: translateX(-50%);
              bottom: 12px; display: flex; gap: 2px; align-items: center;
              background: rgba(28,31,38,.95);
@@ -69,7 +68,6 @@
              z-index: 3; }
   .tbSep { width: 1px; height: 22px; background: var(--line); margin: 0 6px;
            flex: none; }
-  #toolbar #viewModes button { padding: 3px 10px; font-size: 12px; }
   #toolbar .tool { all: unset; width: 34px; height: 34px; border-radius: 7px;
                    display: flex; align-items: center; justify-content: center;
                    color: var(--muted); cursor: pointer; position: relative; }
@@ -420,9 +418,27 @@
       </button>
       <span class="tbSep"></span>
       <div id="viewModes" role="group" aria-label="View mode">
-        <button data-mode="outline" class="on" type="button" title="Object outlines only">Outline</button>
-        <button data-mode="stitches" type="button" title="Thin strokes — read stitch directions">Stitches</button>
-        <button data-mode="realistic" type="button" title="Thread thickness with shading">Realistic</button>
+        <button data-mode="outline" class="tool on" type="button"
+                title="Outline — artwork and edit handles only">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+               stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+            <path d="M8 1.8 L9.9 5.7 L14.2 6.3 L11.1 9.3 L11.8 13.6 L8 11.6 L4.2 13.6 L4.9 9.3 L1.8 6.3 L6.1 5.7 Z"/>
+          </svg>
+        </button>
+        <button data-mode="stitches" class="tool" type="button"
+                title="Stitches — thin strokes, read stitch directions">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+               stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+            <path d="M2 11.5 L5 4.5 L8 11.5 L11 4.5 L14 11.5"/>
+          </svg>
+        </button>
+        <button data-mode="realistic" class="tool" type="button"
+                title="Realistic — thread thickness with shading">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+               stroke="currentColor" stroke-linecap="round" aria-hidden="true">
+            <path d="M4 3.5 V12.5 M8 3.5 V12.5 M12 3.5 V12.5" stroke-width="2.6"/>
+          </svg>
+        </button>
       </div>
       <span class="tbSep"></span>
       <button class="tool" id="toggleRulers" type="button"
@@ -439,13 +455,12 @@
           <path d="M1.5 5.8 H14.5 M1.5 10.2 H14.5 M5.8 1.5 V14.5 M10.2 1.5 V14.5"/>
         </svg>
       </button>
-      <div id="timelineBar">
-        <span class="tbSep"></span>
-        <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
-        <button id="tlSpeed" type="button" title="Playback speed">1×</button>
-        <input id="timeline" type="range" min="0" max="100" value="100">
-        <span id="tlLabel">0 / 0</span>
-      </div>
+    </div>
+    <div id="timelineBar">
+      <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
+      <button id="tlSpeed" type="button" title="Playback speed">1×</button>
+      <input id="timeline" type="range" min="0" max="100" value="100">
+      <span id="tlLabel">0 / 0</span>
     </div>
     <div id="gateBanner">
       <h3>Stitchability check failed — this design may not stitch cleanly</h3>
