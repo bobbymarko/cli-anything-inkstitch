@@ -60,14 +60,16 @@
   #gateBanner li { margin-bottom: 3px; }
   #gateBanner li a { color: var(--accent); cursor: pointer; text-decoration: underline; }
   #gateBanner .row { display: flex; gap: 8px; }
-  #timelineBar { position: absolute; left: 50%; transform: translateX(-50%);
-                 bottom: 58px; display: none; align-items: center; gap: 10px;
-                 background: rgba(20,22,26,.92); border: 1px solid var(--line);
-                 border-radius: 8px; padding: 6px 12px; min-width: 340px; z-index: 2; }
+  #timelineBar { display: none; align-items: center; gap: 8px; }
+  #timelineBar #timeline { width: 190px; }
   #toolbar { position: absolute; left: 50%; transform: translateX(-50%);
-             bottom: 12px; display: flex; gap: 2px; background: rgba(28,31,38,.95);
-             border: 1px solid var(--line); border-radius: 10px; padding: 4px;
+             bottom: 12px; display: flex; gap: 2px; align-items: center;
+             background: rgba(28,31,38,.95);
+             border: 1px solid var(--line); border-radius: 10px; padding: 4px 8px;
              z-index: 3; }
+  .tbSep { width: 1px; height: 22px; background: var(--line); margin: 0 6px;
+           flex: none; }
+  #toolbar #viewModes button { padding: 3px 10px; font-size: 12px; }
   #toolbar .tool { all: unset; width: 34px; height: 34px; border-radius: 7px;
                    display: flex; align-items: center; justify-content: center;
                    color: var(--muted); cursor: pointer; position: relative; }
@@ -305,11 +307,6 @@
   <button class="chip" id="helpBtn" type="button" title="How to use"
           aria-label="How to use">?</button>
   <div class="spacer"></div>
-  <div id="viewModes" role="group" aria-label="View mode">
-    <button data-mode="outline" class="on" type="button" title="Object outlines only">Outline</button>
-    <button data-mode="stitches" type="button" title="Thin strokes — read stitch directions">Stitches</button>
-    <button data-mode="realistic" type="button" title="Thread thickness with shading">Realistic</button>
-  </div>
   <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
   <button class="chip" id="endBtn" type="button">End session</button>
 </div>
@@ -336,12 +333,6 @@
     <canvas id="realCanvas"></canvas>
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
     <div id="toast"></div>
-    <div id="timelineBar">
-      <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
-      <button id="tlSpeed" type="button" title="Playback speed">1×</button>
-      <input id="timeline" type="range" min="0" max="100" value="100">
-      <span id="tlLabel">0 / 0</span>
-    </div>
     <div id="toolbar" role="toolbar" aria-label="Tools">
       <button class="tool on" id="toolSelect" type="button"
               title="Select and transform (V) — drag to move, corners to scale">
@@ -369,6 +360,19 @@
         </svg>
         <span class="kbd">P</span>
       </button>
+      <span class="tbSep"></span>
+      <div id="viewModes" role="group" aria-label="View mode">
+        <button data-mode="outline" class="on" type="button" title="Object outlines only">Outline</button>
+        <button data-mode="stitches" type="button" title="Thin strokes — read stitch directions">Stitches</button>
+        <button data-mode="realistic" type="button" title="Thread thickness with shading">Realistic</button>
+      </div>
+      <div id="timelineBar">
+        <span class="tbSep"></span>
+        <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
+        <button id="tlSpeed" type="button" title="Playback speed">1×</button>
+        <input id="timeline" type="range" min="0" max="100" value="100">
+        <span id="tlLabel">0 / 0</span>
+      </div>
     </div>
     <div id="gateBanner">
       <h3>Stitchability check failed — this design may not stitch cleanly</h3>
