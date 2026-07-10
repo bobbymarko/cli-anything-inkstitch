@@ -387,3 +387,22 @@ class TestPollTransportRobustness:
         out = json.loads(result.output)
         assert out["status"] == "server-lost"
         assert "redelivered" in out["hint"]
+
+
+class TestPalettesEndpoint:
+    def test_list_read_and_unknown(self, server, monkeypatch):
+        from cli_anything_inkstitch.embroidery import palettes as P
+        canned = {"name": "Testco",
+                  "threads": [{"hex": "#112233", "name": "Navy", "number": "12"}]}
+        monkeypatch.setattr(P, "list_palettes", lambda: ["Testco"])
+        monkeypatch.setattr(P, "read_palette",
+                            lambda n: canned if n == "Testco" else None)
+        status, body = _get(server, "/api/x/palettes")
+        assert status == 200
+        assert json.loads(body) == {"palettes": ["Testco"]}
+        status, body = _get(server, "/api/x/palettes?name=Testco")
+        assert json.loads(body)["threads"][0]["hex"] == "#112233"
+        import urllib.error
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _get(server, "/api/x/palettes?name=Nope")
+        assert ei.value.code == 404

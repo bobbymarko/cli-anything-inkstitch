@@ -236,6 +236,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                 self._handle_history(parts[1])
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "gate":
                 self._handle_gate(parts[1])
+            elif len(parts) == 3 and parts[0] == "api" and parts[2] == "palettes":
+                self._handle_palettes(parse_qs(parsed.query))
             else:
                 self._json({"error": "not found"}, 404)
         except BrokenPipeError:
@@ -515,6 +517,23 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(svg)))
         self.end_headers()
         self.wfile.write(svg)
+
+    def _handle_palettes(self, query: dict) -> None:
+        """Manufacturer thread palettes mined from the engine's .gpl files
+        (embroidery/palettes.py mirrors lib/threads/palette.py parsing)."""
+        from cli_anything_inkstitch.embroidery.palettes import (
+            list_palettes,
+            read_palette,
+        )
+        name = (query.get("name") or [None])[0]
+        if name:
+            pal = read_palette(name)
+            if pal is None:
+                self._json({"error": f"unknown palette: {name}"}, 404)
+            else:
+                self._json(pal)
+        else:
+            self._json({"palettes": list_palettes()})
 
     def _handle_history(self, key: str) -> None:
         session = self.state.store.find_by_key(key)
