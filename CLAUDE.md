@@ -61,7 +61,9 @@ src/cli_anything_inkstitch/
         session.py
         font.py             # Font command group (Click orchestration; pure logic lives in
                             # embroidery/ and font_format/, re-exported here for back-compat)
-        artifact.py         # Artifact command group: open/poll/reply/gate/end/stop
+        artifact.py         # Artifact command group: open/poll/reply/gate/end/stop.
+                            # `poll` stdout IS the human's message — run it tracked,
+                            # never `>/dev/null &` (see SKILL.md "Polling discipline")
     artifact/               # Digitizing-artifact correction loop (docs/digitizing-artifact-spec.md)
         sessions.py         # session store: project-path identity, queued feedback, end semantics
         server.py           # stdlib HTTP server: long-poll, SSE, presence, live reload

@@ -242,6 +242,29 @@ The digitizing-artifact correction loop (see `docs/digitizing-artifact-spec.md`)
 
 Loop shape: `open` → repeat (`poll` → `status --text "working on it…"` → apply requested edits via `element`/`params`/`commands` or the server edit API, sending `status` updates per step → `poll --agent-reply "what changed"`) → `gate` → `end`. The editor live-reloads whenever the design changes on disk, and its "Stitch plan" toggle overlays the binary's authoritative render (~1.5s after each edit).
 
+#### Polling discipline (message-loss hazard)
+
+The poll's **stdout IS the human's message**. A poll launched fire-and-forget
+(`artifact poll ... >/dev/null &`) that happens to win the feedback batch
+**discards what the human typed** — they watch "agent is working…" forever
+while nobody has their message. This happened in practice; treat it as the
+loop's number-one operational hazard.
+
+- **Always run `poll` as a tracked process you will read the output of** — an
+  awaited foreground call, or your harness's tracked background task that
+  returns stdout on completion. Never `&` + `/dev/null`.
+- **To speak without listening, use `reply` or `status`** — never a throwaway
+  poll just to carry `--agent-reply`.
+- **Reply == acknowledgment.** Delivery is at-least-once: a delivered batch is
+  held unacknowledged until the agent sends a reply (`reply` or the next
+  `poll --agent-reply`). If a poll consumes feedback and dies without
+  replying, the next poll receives the same items again flagged
+  `"redelivered": true` — so always reply after handling a batch, and treat a
+  `redelivered` item you've already acted on as a duplicate, not new intent.
+- **One poll at a time** (see the `poll` row above): a newer poll supersedes
+  the older one, which returns `{"status": "superseded"}` — exit that one
+  quietly; the newer poll owns the queue.
+
 
 ## Examples
 
