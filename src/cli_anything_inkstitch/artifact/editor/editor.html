@@ -1374,7 +1374,35 @@ $("toggleGrid").onclick = () => {
   $("toggleGrid").classList.toggle("on", gridOn);
   renderGrid();
 };
-window.addEventListener("resize", () => { drawRulers(); renderGrid(); });
+window.addEventListener("resize", () => { preserveScaleOnResize(); drawRulers(); renderGrid(); });
+/* the canvas box changes when sidebars resize/collapse or the window
+   resizes — hold the ART's on-screen scale constant by growing/shrinking
+   the viewBox to match, anchored at whichever edge stayed put (so the art
+   sits still while a sidebar slides over it, instead of rescaling to fit).
+   Called directly from every layout-mutating site: ResizeObserver only
+   delivers in the rendering pipeline, which backgrounded tabs skip. */
+let _lastCanvasRect = null;
+function preserveScaleOnResize() {
+  const rect = canvas.getBoundingClientRect();
+  const prev = _lastCanvasRect;
+  _lastCanvasRect = rect;
+  if (!prev || !vb || !rect.width || !rect.height) return;
+  if (Math.abs(rect.width - prev.width) < 0.5 &&
+      Math.abs(rect.height - prev.height) < 0.5) return;
+  const s = Math.min(prev.width / vb.w, prev.height / vb.h);   // px per unit
+  const w = rect.width / s, h = rect.height / s;
+  let x = vb.x + (vb.w - w) / 2, y = vb.y + (vb.h - h) / 2;    // center default
+  if (Math.abs(rect.x - prev.x) > 0.5 &&
+      Math.abs((rect.x + rect.width) - (prev.x + prev.width)) < 0.5)
+    x = vb.x + vb.w - w;          // left edge moved, right stayed → anchor right
+  else if (Math.abs(rect.x - prev.x) < 0.5)
+    x = vb.x;                     // left stayed → anchor left
+  if (Math.abs(rect.y - prev.y) < 0.5) y = vb.y;
+  vb = { x, y, w, h };
+  setViewBox();
+}
+if (window.ResizeObserver)
+  new ResizeObserver(preserveScaleOnResize).observe($("canvasWrap"));
 /* draggable sidebar widths — the canvas-facing edge of each side resizes it */
 for (const [rid, sideId, fromLeft] of [["panelResizer", "panel", true],
                                        ["inspectResizer", "inspect", false]]) {
@@ -1393,9 +1421,9 @@ for (const [rid, sideId, fromLeft] of [["panelResizer", "panel", true],
       const w = Math.max(180, Math.min(640,
         w0 + (fromLeft ? e.clientX - x0 : x0 - e.clientX)));
       side.style.width = w + "px";
+      preserveScaleOnResize();   // art keeps its size; setViewBox redraws all
       drawRulers();
       renderGrid();
-      if (typeof drawRealistic === "function") drawRealistic();
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -2718,6 +2746,7 @@ $("gateDismiss").onclick = () => $("gateBanner").classList.remove("show");
 const CHEVRONS = { panel: ["«", "»"], inspect: ["»", "«"] };  // [expanded, collapsed]
 function setCollapsed(id, collapsed) {
   const side = $(id);
+  if (!_lastCanvasRect) preserveScaleOnResize();   // baseline before the jump
   side.classList.toggle("collapsed", collapsed);
   // a resized sidebar carries an inline width that would beat the
   // .collapsed CSS rule — park it while collapsed, restore on expand
@@ -2735,6 +2764,7 @@ function setCollapsed(id, collapsed) {
   try { localStorage.setItem("artifact-collapse-" + id, collapsed ? "1" : ""); }
   catch (e) { /* private mode */ }
   renderEditLayer();  // marker sizes depend on canvas width
+  if (typeof preserveScaleOnResize === "function") preserveScaleOnResize();
   if (typeof drawRulers === "function") { drawRulers(); renderGrid(); }
 }
 for (const id of ["inspect", "panel"]) {
@@ -3184,6 +3214,7 @@ async function refresh() {
   renderColors();
   renderHistory();
   scheduleTier2();
+  preserveScaleOnResize();   // seed the rect baseline once vb exists
 }
 refresh().then(connectSSE).catch((e) => {
   $("inspectBody").textContent = "failed to load design: " + e.message;
