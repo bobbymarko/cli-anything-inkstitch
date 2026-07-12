@@ -62,6 +62,10 @@ class SessionStore:
 
     # -- session lifecycle -------------------------------------------------
 
+    def keys(self) -> list[str]:
+        with self._lock:
+            return list(self._sessions)
+
     def upsert_session(self, file: str, url: str, *, reopen: bool = False) -> dict[str, Any]:
         """Open or revive the session for `file`.
 

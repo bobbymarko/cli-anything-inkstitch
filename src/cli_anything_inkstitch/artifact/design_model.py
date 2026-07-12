@@ -344,6 +344,15 @@ def _engine_versions() -> dict[str, Any]:
         out["schema"] = load_schema().get("inkstitch_version")
     except Exception:  # noqa: BLE001
         out["schema"] = None
+    try:
+        # measured per-binary verdicts (schema/probe.py) — populated in the
+        # background by the artifact server; absent until the probe has run
+        from cli_anything_inkstitch.schema.probe import get_cached
+        probe = get_cached()
+        if probe is not None:
+            out["ignored_fill_methods"] = probe.get("no_effect", [])
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 

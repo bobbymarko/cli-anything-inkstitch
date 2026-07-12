@@ -242,6 +242,16 @@ The digitizing-artifact correction loop (see `docs/digitizing-artifact-spec.md`)
 
 Loop shape: `open` → repeat (`poll` → `status --text "working on it…"` → apply requested edits via `element`/`params`/`commands` or the server edit API, sending `status` updates per step → `poll --agent-reply "what changed"`) → `gate` → `end`. The editor live-reloads whenever the design changes on disk, and its "Stitch plan" toggle overlays the binary's authoritative render (~1.5s after each edit).
 
+#### Engine capability warnings
+
+The schema is mined from engine SOURCE, which can be newer than the
+installed binary — an option the binary doesn't know is silently stitched
+as plain auto fill. Support is MEASURED per binary version (a background
+probe renders each fill method vs auto fill; cached). Heed the warnings:
+`params set` returns `capability_warning` when a value provably has no
+effect on the installed engine, the editor badges those options, and the
+gate errors on elements using them (`ignored_fill_method`).
+
 #### Polling discipline (message-loss hazard)
 
 The poll's **stdout IS the human's message**. A poll launched fire-and-forget

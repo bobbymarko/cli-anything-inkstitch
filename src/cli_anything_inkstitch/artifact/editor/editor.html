@@ -262,6 +262,14 @@
   .gridLine { stroke: rgba(255,255,255,.05); vector-effect: non-scaling-stroke;
               pointer-events: none; }
   .gridLine.major { stroke: rgba(255,255,255,.11); }
+  .warnNote { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
+              color: #e0a434; border-radius: 7px; padding: 6px 9px;
+              font-size: 11.5px; margin: 2px 0 10px; }
+  .warnBadge { color: #e0a434; font-size: 11px; flex: none; cursor: help; }
+  .ovWarn { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
+            color: #e0a434; border-radius: 7px; padding: 5px 8px; font-size: 11.5px;
+            margin-top: 6px; cursor: pointer; }
+  .ovWarn:hover { background: rgba(224,164,52,.2); }
   .layerRow .swInput::-webkit-color-swatch-wrapper { padding: 0; }
   .layerRow .swInput::-webkit-color-swatch { border: 1px solid var(--line);
                                              border-radius: 3px; }
@@ -1688,6 +1696,12 @@ function paramControl(o, k, v, metaOverride) {
       const el2 = document.createElement("option");
       el2.value = opt.value;
       el2.textContent = opt.label;
+      // measured no-effect options (engine older than the schema source)
+      // stay selectable but can't be picked unknowingly
+      if (k === "fill_method" && ignoredMethods().includes(opt.value)) {
+        el2.textContent = opt.label + " ⚠";
+        el2.title = ignoredMethodNote();
+      }
       sel.appendChild(el2);
     }
     sel.value = v;
@@ -1726,6 +1740,17 @@ function paramControl(o, k, v, metaOverride) {
   });
   return input;
 }
+/* measured engine capability (design.engine.ignored_fill_methods, probed
+   per binary version server-side): options the installed binary provably
+   stitches as plain auto fill */
+const ignoredMethods = () =>
+  (design && design.engine && design.engine.ignored_fill_methods) || [];
+const ignoredMethodNote = () =>
+  "No effect in your Ink/Stitch " +
+  ((design.engine && design.engine.binary) || "") +
+  " — stitches as plain auto fill. Upgrade Ink/Stitch to use it.";
+const usesIgnoredMethod = (o) =>
+  o.kind === "fill" && ignoredMethods().includes(o.params.fill_method);
 /* "fill_underlay_row_spacing_mm" → label "Fill underlay row spacing" + unit
    "mm" (sentence case; units read as a tag beside the value, not label noise) */
 const sentenceCase = (s) => s ? s[0].toUpperCase() + s.slice(1) : s;
@@ -1794,6 +1819,12 @@ function renderInspect(objs) {
   kind.className = "objKind";
   kind.textContent = `${o.kind} · ${humanizeType(o.stitch_type)}`;
   body.append(title, kind);
+  if (usesIgnoredMethod(o)) {
+    const warn = document.createElement("div");
+    warn.className = "warnNote";
+    warn.textContent = "⚠ " + ignoredMethodNote();
+    body.appendChild(warn);
+  }
   // stitch-type conversion (fill → satin isn't offered: the engine's
   // fill_to_satin needs user-drawn rung guides — the server explains if asked)
   const targets = CONVERT_TARGETS[o.kind] || [];
@@ -2891,11 +2922,16 @@ function renderOverview() {
   }
   const sess = design.session || {};
   const eng = design.engine || {};
-  if (eng.binary) {
-    const mismatch = eng.schema && !String(eng.schema).includes(
-      String(eng.binary).replace(/^v/, "").split(" ")[0]);
-    row("Engine", String(eng.binary).split(" ")[0] +
-        (mismatch ? " · options from newer source" : ""));
+  if (eng.binary) row("Engine", String(eng.binary).split(" ")[0]);
+  const affected = design.objects.filter(usesIgnoredMethod);
+  if (affected.length) {
+    const w = document.createElement("div");
+    w.className = "ovWarn";
+    w.textContent = `⚠ ${affected.length} element${affected.length > 1 ? "s use" : " uses"} ` +
+      "features your engine ignores — click to select";
+    w.title = ignoredMethodNote();
+    w.addEventListener("click", () => setSelection(affected.map(o => o.id)));
+    body.appendChild(w);
   }
   if (sess.hoop) row("Hoop", sess.hoop.name ||
                      `${sess.hoop.width_mm}×${sess.hoop.height_mm} mm`);
@@ -2936,7 +2972,13 @@ function renderLayers() {
     const kd = document.createElement("span");
     kd.className = "kd";
     kd.textContent = o.kind;
-    r.append(num, sw, nm, kd);
+    if (usesIgnoredMethod(o)) {
+      const warn = document.createElement("span");
+      warn.className = "warnBadge";
+      warn.textContent = "⚠";
+      warn.title = ignoredMethodNote();
+      r.append(num, sw, nm, warn, kd);
+    } else r.append(num, sw, nm, kd);
     r.addEventListener("click", (ev) =>
       select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey));
     r.addEventListener("contextmenu", (ev) =>

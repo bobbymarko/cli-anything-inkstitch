@@ -150,6 +150,21 @@ def set_cmd(ctx, project_path, svg_id, stitch_type, force, refresh_schema):
         }
         if (w := schema_warning(schema, binary_version)):
             payload["schema_warning"] = w
+        # measured per-binary verdicts (schema/probe.py, cached by the
+        # artifact server): warn when the value just written provably has
+        # no effect on the installed engine
+        try:
+            from cli_anything_inkstitch.schema.probe import get_cached
+            probe = get_cached()
+            method = payload["changed"].get("fill_method")
+            if probe and method in probe.get("no_effect", []):
+                payload["capability_warning"] = (
+                    f"fill_method='{method}' has no effect on the installed "
+                    f"Ink/Stitch ({probe.get('binary_version')}) — it stitches "
+                    "as plain auto fill (measured; the option comes from newer "
+                    "engine source)")
+        except Exception:  # noqa: BLE001 — advisory only
+            pass
         emit(ctx, payload)
 
 

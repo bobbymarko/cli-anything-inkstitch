@@ -594,11 +594,13 @@ def serve(state_dir: str, *, port: int = 0, idle_timeout_s: float | None = DEFAU
                                         ArtifactState(store),
                                         idle_timeout_s=idle_timeout_s)
                 _write_server_json(state_path, server)
+                _warm_capability_probe(server)
                 return server
             except OSError:
                 pass                      # someone else owns it — go ephemeral
     server = ArtifactServer(("127.0.0.1", port), ArtifactState(store), idle_timeout_s=idle_timeout_s)
     _write_server_json(state_path, server)
+    _warm_capability_probe(server)
     return server
 
 
@@ -607,3 +609,21 @@ def _write_server_json(state_path: Path, server: ArtifactServer) -> None:
     (state_path / "server.json").write_text(
         json.dumps({"port": server.server_address[1], "pid": os.getpid()})
     )
+
+
+def _warm_capability_probe(server: ArtifactServer) -> None:
+    """Measure which fill methods the installed binary acts on (~30s of
+    renders, cached per binary version) so the editor can flag no-effect
+    options. Runs once in the background; live sessions get a reload when
+    fresh verdicts land so the warnings appear without user action."""
+    def work() -> None:
+        try:
+            from cli_anything_inkstitch.schema.probe import compute_and_cache, get_cached
+            if get_cached() is not None:
+                return
+            compute_and_cache()
+            for key in server.state.store.keys():
+                server.state.hub.publish(key, {"event": "reload"})
+        except Exception:  # noqa: BLE001 — a probe failure must never hurt the server
+            pass
+    threading.Thread(target=work, daemon=True, name="capability-probe").start()
