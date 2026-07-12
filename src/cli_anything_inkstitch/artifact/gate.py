@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import re
+from pathlib import Path
 from typing import Any
 
 # stitchable satin width, mm (zigzag physics: too narrow = perforation,
@@ -365,6 +366,97 @@ def check_fill(obj: dict[str, Any], scale: float) -> list[dict]:
     return out
 
 
+def check_ignored_fill_methods(project_file: str, design: dict) -> list[dict]:
+    """Fill methods the INSTALLED binary silently ignores.
+
+    The schema (and the editor's method dropdown) is mined from engine
+    SOURCE, which can be newer than the installed binary: an unknown
+    fill_method falls through the engine's elif chain into plain auto fill
+    with no error (fill_stitch.py to_stitch_groups) — found live with
+    cross_stitch on an Ink/Stitch v3.2.2 binary. No version→feature table
+    exists to mine, so we MEASURE: render the element with its method and
+    with auto_fill; identical plans mean the method never reached the
+    stitches (engine too old for the option, or the method's requirements
+    aren't met — e.g. guided fill without a guide line).
+    """
+    import hashlib
+    import json as _json
+    import tempfile
+
+    from lxml import etree
+
+    from cli_anything_inkstitch.binary import detect_binary_version, discover
+
+    binary = discover()
+    if not binary:
+        return []      # measurement needs the engine; static checks still ran
+    from cli_anything_inkstitch.artifact.design_model import (
+        _PREVIEW_ARGS,
+        extract_stitch_blocks,
+    )
+    from cli_anything_inkstitch.binary import run_extension
+    from cli_anything_inkstitch.project import ProjectFile
+
+    targets = [o for o in design["objects"]
+               if o["kind"] == "fill"
+               and (o["params"].get("fill_method") or "auto_fill") != "auto_fill"]
+    if not targets:
+        return []
+    proj = ProjectFile.load(project_file)
+    tree = etree.parse(proj.svg_path)
+    version = detect_binary_version(binary) or "unknown version"
+    fm_attr = "{http://inkstitch.org/namespace}fill_method"
+
+    def plan_hash(svg_id: str) -> str | None:
+        with tempfile.NamedTemporaryFile("wb", suffix=".svg", delete=False) as f:
+            tree.write(f)
+            path = f.name
+        try:
+            out = run_extension(binary, "stitch_plan_preview", path,
+                                args=_PREVIEW_ARGS, ids=[svg_id],
+                                capture_stdout=True)
+        except Exception:  # noqa: BLE001 — a render failure isn't this check's finding
+            return None
+        finally:
+            Path(path).unlink(missing_ok=True)
+        if not out:
+            return None
+        blocks = extract_stitch_blocks(out)
+        return hashlib.sha256(_json.dumps(blocks).encode()).hexdigest()
+
+    findings: list[dict] = []
+    for obj in targets:
+        elem = tree.getroot().find(f".//*[@id='{obj['id']}']")
+        if elem is None:
+            continue
+        method = elem.get(fm_attr)
+        # the binary caches stitch plans per element content — a stale entry
+        # for the design's current XML would poison one side of the
+        # comparison (observed live). Append the same microscopic no-op
+        # lineto to BOTH variants: novel XML forces fresh renders, and the
+        # shared nudge keeps the pair apples-to-apples.
+        d0 = elem.get("d") or ""
+        elem.set("d", d0 + " l0.0013,0")
+        with_method = plan_hash(obj["id"])
+        elem.set(fm_attr, "auto_fill")
+        as_auto = plan_hash(obj["id"])
+        elem.set(fm_attr, method)
+        elem.set("d", d0)
+        if with_method is None or as_auto is None:
+            continue
+        if with_method == as_auto:
+            findings.append(_finding(
+                "error", obj["id"], "ignored_fill_method",
+                f"fill_method='{method}' has no effect — the installed "
+                f"Ink/Stitch ({version}) stitches this element identically "
+                "to plain auto fill. Either the engine predates this method "
+                "(the option list comes from newer engine source; upgrade "
+                "Ink/Stitch) or the method's requirements aren't met (e.g. "
+                "guided fill needs a guide line).",
+                fill_method=method, binary_version=version))
+    return findings
+
+
 def run_gate(project_file: str) -> dict[str, Any]:
     """Audit the design. `ok` is False only on error-severity findings."""
     from cli_anything_inkstitch.artifact.design_model import read_design
@@ -372,6 +464,7 @@ def run_gate(project_file: str) -> dict[str, Any]:
     design = read_design(project_file)
     scale = mm_per_unit(design.get("width"), design.get("viewBox"))
     findings: list[dict] = []
+    findings.extend(check_ignored_fill_methods(project_file, design))
     for obj in design["objects"]:
         if obj["kind"] == "satin":
             findings.extend(check_satin(obj, scale))

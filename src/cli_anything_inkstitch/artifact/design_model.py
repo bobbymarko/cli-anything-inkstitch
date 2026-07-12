@@ -94,15 +94,20 @@ def split_subpaths(d: str) -> list[str]:
     return [s.strip() for s in _SUBPATH_SPLIT.split(d or "") if s.strip()]
 
 
-def _kind_for(stitch_type: str) -> str:
+def _kind_of(elem, stitch_type: str) -> str:
+    """Element kind the way the ENGINE classes elements
+    (lib/elements/utils/nodes.py node_to_elements): satin_column param on a
+    stroked path → SatinColumn, any fill paint → FillStitch, any stroke →
+    Stroke. Method params (fill_method / stroke_method) are sub-parameters
+    of the class, never the class — deriving kind from paint keeps unknown
+    or newer-than-binary method values from orphaning an element as
+    'other' (bit us live with cross_stitch)."""
+    from cli_anything_inkstitch.svg.elements import has_fill, has_stroke
     if stitch_type == "satin_column":
         return "satin"
-    # cross_stitch is the one fill method whose id doesn't end in _fill
-    # (engine fill_stitch.py _fill_methods)
-    if stitch_type.endswith("_fill") or stitch_type in ("auto_fill", "cross_stitch"):
+    if has_fill(elem):
         return "fill"
-    if stitch_type in ("running_stitch", "ripple_stitch", "zigzag_stitch", "bean_stitch",
-                       "manual_stitch"):
+    if has_stroke(elem):
         return "run"
     return "other"
 
@@ -270,7 +275,7 @@ def read_design(project_file: str) -> dict[str, Any]:
                 continue
             summary = element_summary(elem)
             stitch_type = summary["stitch_type"]
-            kind = _kind_for(stitch_type)
+            kind = _kind_of(elem, stitch_type)
             from cli_anything_inkstitch.svg.commands import INKSCAPE_LABEL
             obj: dict[str, Any] = {
                 "id": elem.get("id"),
@@ -320,7 +325,26 @@ def read_design(project_file: str) -> dict[str, Any]:
             "session": {k: proj.session.get(k)
                         for k in ("hoop", "thread_palette", "machine_target")
                         if proj.session.get(k)},
+            # installed binary vs the source the schema was mined from — a
+            # NEWER schema offers options an older binary silently ignores
+            # (the gate's ignored_fill_method check measures actual cases)
+            "engine": _engine_versions(),
         }
+
+
+def _engine_versions() -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    try:
+        from cli_anything_inkstitch.binary import detect_binary_version, discover
+        out["binary"] = detect_binary_version(discover())
+    except Exception:  # noqa: BLE001
+        out["binary"] = None
+    try:
+        from cli_anything_inkstitch.schema.cache import load_schema
+        out["schema"] = load_schema().get("inkstitch_version")
+    except Exception:  # noqa: BLE001
+        out["schema"] = None
+    return out
 
 
 def history_entries(project_file: str, limit: int = 50) -> dict[str, Any]:
@@ -686,7 +710,7 @@ def _convert_element(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, A
     elem = find_by_id(tree, op["id"])
     if elem is None:
         raise UserError(f"no element with id={op['id']!r}")
-    kind = _kind_for(classify(elem))
+    kind = _kind_of(elem, classify(elem))
     to = str(op.get("to") or "")
     if to not in ("satin", "fill", "run"):
         raise UserError("convert_element: 'to' must be one of satin, fill, run")

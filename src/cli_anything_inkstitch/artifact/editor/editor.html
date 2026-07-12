@@ -176,6 +176,13 @@
   .collapseBtn:hover { color: var(--text); }
   /* id-qualified: must outrank the #inspect/#panel width rules above */
   #inspect.collapsed, #panel.collapsed { width: 26px; cursor: pointer; }
+  .sideResizer { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 6;
+                 cursor: col-resize; }
+  .sideResizer:hover, .sideResizer.active { background: rgba(110,168,254,.25); }
+  #panelResizer { right: -3px; }
+  #inspectResizer { left: -3px; }
+  .side { position: relative; }
+  .side.collapsed .sideResizer { display: none; }
   .side.collapsed .sideHead { padding: 10px 0 0; justify-content: center; }
   .side.collapsed .sideBody, .side.collapsed #composer,
   .side.collapsed #inspectBody { display: none; }
@@ -365,6 +372,7 @@
 </div>
 <div id="main">
   <aside id="panel" class="side">
+    <div class="sideResizer" id="panelResizer" title="Drag to resize"></div>
     <div class="sideHead">
       <button class="collapseBtn" id="panelToggle" type="button"
               title="Collapse conversation">«</button></div>
@@ -472,6 +480,7 @@
     </div>
   </div>
   <aside id="inspect" class="side">
+    <div class="sideResizer" id="inspectResizer" title="Drag to resize"></div>
     <div class="sideHead">
       <button class="collapseBtn" id="inspectToggle" type="button"
               title="Collapse panels">»</button></div>
@@ -1366,6 +1375,41 @@ $("toggleGrid").onclick = () => {
   renderGrid();
 };
 window.addEventListener("resize", () => { drawRulers(); renderGrid(); });
+/* draggable sidebar widths — the canvas-facing edge of each side resizes it */
+for (const [rid, sideId, fromLeft] of [["panelResizer", "panel", true],
+                                       ["inspectResizer", "inspect", false]]) {
+  const side = $(sideId);
+  try {
+    const saved = parseInt(localStorage.getItem("artifact-width-" + sideId), 10);
+    if (saved >= 180 && saved <= 640) side.style.width = saved + "px";
+  } catch (e) { /* private mode */ }
+  $(rid).addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    $(rid).classList.add("active");
+    const w0 = side.getBoundingClientRect().width;
+    const x0 = ev.clientX;
+    const move = (e) => {
+      const w = Math.max(180, Math.min(640,
+        w0 + (fromLeft ? e.clientX - x0 : x0 - e.clientX)));
+      side.style.width = w + "px";
+      drawRulers();
+      renderGrid();
+      if (typeof drawRealistic === "function") drawRealistic();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      $(rid).classList.remove("active");
+      try {
+        localStorage.setItem("artifact-width-" + sideId,
+                             String(Math.round(side.getBoundingClientRect().width)));
+      } catch (e) { /* private mode */ }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  });
+}
 function clientToSvg(ev) {
   const pt = new DOMPoint(ev.clientX, ev.clientY);
   return pt.matrixTransform(canvas.getScreenCTM().inverse());
@@ -2675,6 +2719,15 @@ const CHEVRONS = { panel: ["«", "»"], inspect: ["»", "«"] };  // [expanded, 
 function setCollapsed(id, collapsed) {
   const side = $(id);
   side.classList.toggle("collapsed", collapsed);
+  // a resized sidebar carries an inline width that would beat the
+  // .collapsed CSS rule — park it while collapsed, restore on expand
+  if (collapsed && side.style.width) {
+    side.dataset.width = side.style.width;
+    side.style.width = "";
+  } else if (!collapsed && side.dataset.width) {
+    side.style.width = side.dataset.width;
+    delete side.dataset.width;
+  }
   const btn = $(id + "Toggle");
   btn.textContent = CHEVRONS[id][collapsed ? 1 : 0];
   btn.title = (collapsed ? "Expand " : "Collapse ") +
@@ -2682,6 +2735,7 @@ function setCollapsed(id, collapsed) {
   try { localStorage.setItem("artifact-collapse-" + id, collapsed ? "1" : ""); }
   catch (e) { /* private mode */ }
   renderEditLayer();  // marker sizes depend on canvas width
+  if (typeof drawRulers === "function") { drawRulers(); renderGrid(); }
 }
 for (const id of ["inspect", "panel"]) {
   $(id + "Toggle").addEventListener("click", (ev) => {
@@ -2806,6 +2860,13 @@ function renderOverview() {
     body.appendChild(sw);
   }
   const sess = design.session || {};
+  const eng = design.engine || {};
+  if (eng.binary) {
+    const mismatch = eng.schema && !String(eng.schema).includes(
+      String(eng.binary).replace(/^v/, "").split(" ")[0]);
+    row("Engine", String(eng.binary).split(" ")[0] +
+        (mismatch ? " · options from newer source" : ""));
+  }
   if (sess.hoop) row("Hoop", sess.hoop.name ||
                      `${sess.hoop.width_mm}×${sess.hoop.height_mm} mm`);
   if (sess.thread_palette) row("Palette", sess.thread_palette);

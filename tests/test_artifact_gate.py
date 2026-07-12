@@ -13,6 +13,7 @@ from cli_anything_inkstitch.artifact.gate import (
     sample_poly,
     segments_intersect,
 )
+from cli_anything_inkstitch.binary import discover
 from cli_anything_inkstitch.project import ProjectFile
 from cli_anything_inkstitch.svg.document import sha256_of
 
@@ -246,3 +247,44 @@ class TestFlattenSmoothSegments:
     def test_quadratic_is_curved_not_chorded(self):
         pts = flatten_path("M0,0 Q10,20 20,0")
         assert max(p[1] for p in pts) > 5    # apex of the quad is y=10
+
+
+@pytest.mark.skipif(discover() is None, reason="Ink/Stitch binary not installed")
+class TestIgnoredFillMethods:
+    """The gate measures whether a set fill_method actually reached the
+    stitches: identical plan to auto_fill = silently ignored (engine older
+    than the option, or requirements unmet). Version-independent probe: an
+    unknown method value falls through the engine's elif chain in EVERY
+    release (fill_stitch.py to_stitch_groups)."""
+
+    SVG = """<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:inkstitch="http://inkstitch.org/namespace"
+     width="40mm" height="40mm" viewBox="0 0 40 40">
+  <metadata><inkstitch_svg_version>3</inkstitch_svg_version></metadata>
+  <path id="e" d="M5,5 L35,5 L35,35 L5,35 Z" fill="#cc2244"
+        inkstitch:fill_method="{m}"/>
+</svg>"""
+
+    def _project(self, tmp_path, method):
+        svg = tmp_path / "d.svg"
+        svg.write_text(self.SVG.format(m=method))
+        proj_path = tmp_path / "d.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        return str(proj_path)
+
+    def test_unknown_method_flagged(self, tmp_path):
+        # planted raw (the validator would reject it) — mimics an option
+        # from engine source the installed binary predates
+        project = self._project(tmp_path, "method_from_the_future")
+        result = run_gate(project)
+        checks = [f["check"] for f in result["errors"]]
+        assert "ignored_fill_method" in checks
+
+    def test_working_method_not_flagged(self, tmp_path):
+        project = self._project(tmp_path, "contour_fill")
+        result = run_gate(project)
+        checks = [f["check"] for f in result["errors"]]
+        assert "ignored_fill_method" not in checks
