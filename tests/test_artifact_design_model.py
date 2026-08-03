@@ -718,3 +718,26 @@ class TestCrossStitchKind:
                     if o["id"] == "elem_fill")
         assert fill["stitch_type"] == "cross_stitch"
         assert fill["kind"] == "fill"
+
+
+class TestAddElementIntoGroupedDocument:
+    def test_add_next_to_grouped_elements(self, tmp_path):
+        # engine tools wrap output in <g>; add_element must insert beside
+        # the last design element inside that group, not crash detaching
+        svg = tmp_path / "d.svg"
+        svg.write_text("""<svg xmlns="http://www.w3.org/2000/svg"
+ xmlns:inkstitch="http://inkstitch.org/namespace"
+ width="30mm" height="30mm" viewBox="0 0 30 30">
+<metadata><inkstitch_svg_version>3</inkstitch_svg_version></metadata>
+<g id="wrap"><path id="elem_a" d="M2,20 L28,20" fill="none" stroke="#000"/></g>
+</svg>""")
+        proj_path = tmp_path / "d.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        r = apply_edits(str(proj_path), [{"op": "add_element", "kind": "run",
+                                          "d": "M2,25 L28,25"}])
+        new_id = r["results"][0]["id"]
+        objs = read_design(str(proj_path))["objects"]
+        assert objs[-1]["id"] == new_id

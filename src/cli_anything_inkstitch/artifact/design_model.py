@@ -691,8 +691,11 @@ def _add_element(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
             last = e
     parent = tree.getroot()
     if last is not None:
+        # re-home next to the last design element — which may live inside a
+        # group (engine tools wrap their output in <g>s), so detach from
+        # OUR parent (the root), not the destination's
         parent = last.getparent()
-        parent.remove(elem)
+        elem.getparent().remove(elem)
         parent.insert(list(parent).index(last) + 1, elem)
     _ensure_id(parent)
     push(proj.history, make_entry(

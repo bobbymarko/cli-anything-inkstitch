@@ -220,8 +220,8 @@ def stitch_sim(ctx, dst_path, out, img_width, img_height,
     stitch_rgb = (220, 80, 80)   # default warm red
     if thread_color:
         stitch_rgb = _hex_to_rgb(thread_color)
-    elif pattern.threads:
-        t = pattern.threads[0]
+    elif pattern.threadlist:
+        t = pattern.threadlist[0]
         r = getattr(t, "color", None)
         if r and isinstance(r, int):
             stitch_rgb = ((r >> 16) & 0xFF, (r >> 8) & 0xFF, r & 0xFF)
