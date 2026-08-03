@@ -229,10 +229,23 @@ class TestComboOptionMining:
     (dynamic `sorted(tiles.all_tiles())` — mined from tile.json files)."""
 
     def test_fill_method_options_are_value_strings(self, schema):
-        fm = schema["stitch_types"]["auto_fill"]["params"]["fill_method"]
+        fm = schema["stitch_types"]["contour_fill"]["params"]["fill_method"]
         assert "contour_fill" in fm["options"]
         assert "meander_fill" in fm["options"]
-        assert fm["default"] == "auto_fill"
+        # the default is version-dependent (auto_fill → tatami_fill rename
+        # in v3.3.0) but always normalizes to one of the mined option ids
+        assert fm["default"] in fm["options"]
+
+    def test_fill_types_generated_from_options(self, schema):
+        # one stitch type per mined fill_method option, plus the legacy
+        # auto_fill alias when the engine no longer lists that id
+        fm = schema["stitch_types"]["contour_fill"]["params"]["fill_method"]
+        for opt in fm["options"]:
+            assert opt in schema["stitch_types"], f"no stitch type for {opt}"
+        assert "auto_fill" in schema["stitch_types"]
+        if "auto_fill" not in fm["options"]:
+            alias = schema["stitch_types"]["auto_fill"]
+            assert alias["legacy_alias_of"] == fm["default"]
 
     def test_fill_method_labels_parallel_options(self, schema):
         fm = schema["stitch_types"]["auto_fill"]["params"]["fill_method"]

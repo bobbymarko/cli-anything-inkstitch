@@ -113,16 +113,18 @@ def compute_and_cache(methods: list[str] | None = None) -> dict:
                 "binary_version": None, "skipped": "no Ink/Stitch binary found"}
     if methods is None:
         methods = _mined_methods()
+    baseline_method = default_fill_method()
+    aliases = fill_method_aliases()
     baselines: dict[str, str | None] = {}
     no_effect: list[str] = []
     supported: list[str] = []
     errors: list[str] = []
     for m in methods:
-        if m == "auto_fill":
-            continue
+        if m in aliases:
+            continue        # the default (and its legacy alias) IS the fallback
         paint = _paint_for(m)
         if paint not in baselines:
-            baselines[paint] = _plan_hash(binary, "auto_fill", paint)
+            baselines[paint] = _plan_hash(binary, baseline_method, paint)
         h = _plan_hash(binary, m, paint)
         if h is None or baselines[paint] is None:
             errors.append(m)
@@ -144,7 +146,34 @@ def compute_and_cache(methods: list[str] | None = None) -> dict:
 def _mined_methods() -> list[str]:
     try:
         from cli_anything_inkstitch.schema.cache import load_schema
-        params = load_schema()["stitch_types"]["auto_fill"]["params"]
-        return list(params["fill_method"].get("options") or [])
+        for st in load_schema()["stitch_types"].values():
+            spec = (st.get("params") or {}).get("fill_method")
+            if spec and spec.get("options"):
+                return list(spec["options"])
     except Exception:  # noqa: BLE001 — no mined options, nothing to probe
-        return []
+        pass
+    return []
+
+
+def default_fill_method() -> str:
+    """The engine's fallback fill method id, MINED at extraction time
+    (schema top-level fill_method_default). v3.3.0 renamed the default
+    auto_fill→tatami_fill — hardcoding either name breaks on the other
+    side of that release. Bootstrap-era schemas predate the key and were
+    auto_fill engines."""
+    try:
+        from cli_anything_inkstitch.schema.cache import load_schema
+        d = load_schema().get("fill_method_default")
+        if isinstance(d, str) and d:
+            return d
+    except Exception:  # noqa: BLE001
+        pass
+    return "auto_fill"
+
+
+def fill_method_aliases() -> set[str]:
+    """Values the installed engine stitches as the default: the default id
+    itself plus the pre-rename 'auto_fill' (unknown values fall through the
+    engine's dispatch chain into the default — fill_stitch.py
+    to_stitch_groups)."""
+    return {default_fill_method(), "auto_fill"}

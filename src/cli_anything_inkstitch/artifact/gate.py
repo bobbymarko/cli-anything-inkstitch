@@ -397,9 +397,16 @@ def check_ignored_fill_methods(project_file: str, design: dict) -> list[dict]:
     from cli_anything_inkstitch.binary import run_extension
     from cli_anything_inkstitch.project import ProjectFile
 
+    from cli_anything_inkstitch.schema.probe import (
+        default_fill_method,
+        fill_method_aliases,
+    )
+    aliases = fill_method_aliases()
+    baseline_method = default_fill_method()
     targets = [o for o in design["objects"]
                if o["kind"] == "fill"
-               and (o["params"].get("fill_method") or "auto_fill") != "auto_fill"]
+               and o["params"].get("fill_method")
+               and o["params"]["fill_method"] not in aliases]
     if not targets:
         return []
     proj = ProjectFile.load(project_file)
@@ -438,7 +445,7 @@ def check_ignored_fill_methods(project_file: str, design: dict) -> list[dict]:
         d0 = elem.get("d") or ""
         elem.set("d", d0 + " l0.0013,0")
         with_method = plan_hash(obj["id"])
-        elem.set(fm_attr, "auto_fill")
+        elem.set(fm_attr, baseline_method)
         as_auto = plan_hash(obj["id"])
         elem.set(fm_attr, method)
         elem.set("d", d0)

@@ -42,60 +42,10 @@ ELEMENT_FILES = ["element.py", "fill_stitch.py", "satin_column.py", "stroke.py",
 # When `discriminator_param` is None the stitch type is selected by a defining
 # attribute (e.g. `manual_stitch=True`) rather than a method enum.
 STITCH_MAP: dict[str, dict[str, Any]] = {
-    "auto_fill": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "auto_fill"),
-        "defining_attribute": {"name": "auto_fill", "value": "True"},
-        "geometry_requirements": ["closed_filled_path"],
-    },
-    "legacy_fill": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "legacy_fill"),
-        "defining_attribute": {"name": "auto_fill", "value": "False"},
-        "geometry_requirements": ["closed_filled_path"],
-    },
-    "contour_fill": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "contour_fill"),
-        "defining_attribute": {"name": "fill_method", "value": "contour_fill"},
-        "geometry_requirements": ["closed_filled_path"],
-    },
-    "guided_fill": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "guided_fill"),
-        "defining_attribute": {"name": "fill_method", "value": "guided_fill"},
-        "geometry_requirements": ["closed_filled_path", "guide_line"],
-    },
-    "meander_fill": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "meander_fill"),
-        "defining_attribute": {"name": "fill_method", "value": "meander_fill"},
-        "geometry_requirements": ["closed_filled_path"],
-    },
-    "circular_fill": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "circular_fill"),
-        "defining_attribute": {"name": "fill_method", "value": "circular_fill"},
-        "geometry_requirements": ["closed_filled_path"],
-    },
-    "tartan_fill": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "tartan_fill"),
-        "defining_attribute": {"name": "fill_method", "value": "tartan_fill"},
-        "geometry_requirements": ["closed_filled_path"],
-    },
-    "linear_gradient_fill": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "linear_gradient_fill"),
-        "defining_attribute": {"name": "fill_method", "value": "linear_gradient_fill"},
-        "geometry_requirements": ["closed_filled_path", "linear_gradient"],
-    },
-    "cross_stitch": {
-        "host_class": "FillStitch",
-        "discriminator": ("fill_method", "cross_stitch"),
-        "defining_attribute": {"name": "fill_method", "value": "cross_stitch"},
-        "geometry_requirements": ["closed_filled_path"],
-    },
+    # NON-FILL types only: fill stitch types are GENERATED from the mined
+    # fill_method options (_fill_stitch_types) — the engine renamed
+    # auto_fill→tatami_fill in v3.3.0 and a hand-kept list went stale the
+    # day it happened.
     "satin_column": {
         "host_class": "SatinColumn",
         "discriminator": ("satin_method", "satin_column"),
@@ -187,10 +137,26 @@ def find_inkstitch_source(explicit: str | None = None) -> Path | None:
 
 
 def detect_inkstitch_version(source_root: Path) -> str:
-    """Best-effort version string from inkstitch source."""
+    """Best-effort version string from inkstitch source.
+
+    An exact git tag wins (release checkouts): the repo's VERSION file is
+    an unstamped '0.1.0' placeholder until the build stamps it, and trusting
+    it would fake version mismatches against the installed binary."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(source_root), "describe", "--tags", "--exact-match"],
+            capture_output=True, text=True, timeout=10)
+        tag = r.stdout.strip()
+        if r.returncode == 0 and tag:
+            return tag.lstrip("v")
+    except (OSError, subprocess.SubprocessError):
+        pass
     version_file = source_root / "VERSION"
     if version_file.exists():
-        return version_file.read_text().strip()
+        v = version_file.read_text().strip()
+        if v and v != "0.1.0":
+            return v
     pyproject = source_root / "pyproject.toml"
     if pyproject.exists():
         m = re.search(r'version\s*=\s*"([^"]+)"', pyproject.read_text())
@@ -442,10 +408,57 @@ def _params_for_stitch_type(
     return out
 
 
+def _fill_stitch_types(classes: dict[str, dict]) -> dict[str, dict[str, Any]]:
+    """One stitch type per MINED fill_method option.
+
+    The engine's own list is the source of truth — v3.3.0 renamed
+    auto_fill→tatami_fill and made it the default, which instantly staled
+    the hand-kept entries this replaces. Method-specific geometry needs
+    stay declared here (guided fill's guide line, gradient fill's SVG
+    gradient). 'auto_fill' is kept as an ALIAS of the default method when
+    the engine no longer lists it: older designs carry the attr, and the
+    engine's dispatch chain stitches unknown values as the default
+    (fill_stitch.py to_stitch_groups)."""
+    extra_reqs = {"guided_fill": ["guide_line"],
+                  "linear_gradient_fill": ["linear_gradient"]}
+    fill_params = {p["name"]: p
+                   for p in classes.get("FillStitch", {}).get("params", [])}
+    fm = fill_params.get("fill_method") or {}
+    options = [o for o in (fm.get("options") or []) if isinstance(o, str)]
+    if not options:
+        return {}, None
+    default = fm.get("default")
+    if isinstance(default, int) and 0 <= default < len(options):
+        default_id = options[default]
+    elif default in options:
+        default_id = default
+    else:
+        default_id = options[0]
+    out: dict[str, dict[str, Any]] = {}
+    for opt in options:
+        out[opt] = {
+            "host_class": "FillStitch",
+            "discriminator": ("fill_method", opt),
+            "defining_attribute": {"name": "fill_method", "value": opt},
+            "geometry_requirements": ["closed_filled_path", *extra_reqs.get(opt, [])],
+        }
+    if "auto_fill" not in options:
+        out["auto_fill"] = {
+            "host_class": "FillStitch",
+            "discriminator": ("fill_method", default_id),
+            "defining_attribute": {"name": "fill_method", "value": default_id},
+            "geometry_requirements": ["closed_filled_path"],
+            "legacy_alias_of": default_id,
+        }
+    return out, default_id
+
+
 def assemble_schema(classes: dict[str, dict], version: str) -> dict:
     """Build the schema dict (same shape as bootstrap_schema) from extracted classes."""
     stitch_types: dict[str, dict] = {}
-    for st_name, mapping in STITCH_MAP.items():
+    fill_types, fill_default = _fill_stitch_types(classes)
+    all_types = {**fill_types, **STITCH_MAP}
+    for st_name, mapping in all_types.items():
         host = mapping["host_class"]
         disc = mapping.get("discriminator")
         params = _params_for_stitch_type(classes, host, disc)
@@ -470,10 +483,15 @@ def assemble_schema(classes: dict[str, dict], version: str) -> dict:
             "host_class": host,
             "params": params,
         }
+        if mapping.get("legacy_alias_of"):
+            stitch_types[st_name]["legacy_alias_of"] = mapping["legacy_alias_of"]
     return {
         "inkstitch_version": version,
         "extracted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "namespace": "http://inkstitch.org/namespace",
+        # the engine's fallback method id (options[0] of the mined combo) —
+        # consumers must never hardcode auto_fill/tatami_fill (renamed v3.3.0)
+        "fill_method_default": fill_default,
         "stitch_types": stitch_types,
         "extensions": {},
         "commands": VISUAL_COMMANDS,
