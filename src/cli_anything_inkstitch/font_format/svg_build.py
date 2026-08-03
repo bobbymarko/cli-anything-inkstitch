@@ -19,11 +19,29 @@ from cli_anything_inkstitch.svg.document import (
 
 SODIPODI_NS = "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
 
-# Ink/Stitch fonts are directories whose SVG is literally named "→.svg"
-# (matching the bundled fonts that ship with Ink/Stitch). Never inline this
-# string — Windows shells and zip tools mangle non-ASCII names, so keeping it
-# in one place makes any future migration tractable.
-FONT_SVG_FILENAME = "→.svg"
+# Ink/Stitch v3.3.0 renamed the variant files: "ltr.svg" (rtl/ttb/btt) is
+# canonical and the old arrow names ("→.svg") are legacy — the engine reads
+# new-then-legacy (lib/lettering/font_variant.py _get_variant_file_paths,
+# VARIANT_TYPES vs LEGACY_VARIANT_TYPES). We mirror that: new fonts are
+# written with the modern name; existing arrow-named fonts keep their
+# filename on save so a directory is never half-migrated. Never inline
+# these strings — keeping them in one place made THIS migration tractable.
+FONT_SVG_FILENAME = "ltr.svg"
+LEGACY_FONT_SVG_FILENAME = "→.svg"
+
+
+def font_svg_path(font_dir) -> Path:
+    """The font's left-to-right variant file.
+
+    An existing file wins, modern name first (the engine's own lookup
+    order); a fresh font gets the modern name. Pre-v3.3.0 engines only
+    know the arrow names, so fonts created here need Ink/Stitch ≥ 3.3.0
+    (or a manual rename back)."""
+    for name in (FONT_SVG_FILENAME, LEGACY_FONT_SVG_FILENAME):
+        p = Path(font_dir) / name
+        if p.exists():
+            return p
+    return Path(font_dir) / FONT_SVG_FILENAME
 
 FONT_NSMAP = {
     None: SVG_NS,
@@ -251,17 +269,18 @@ def _build_font_svg(
 
 
 def _load_font_svg(font_dir: Path) -> etree._ElementTree:
+    path = font_svg_path(font_dir)
     try:
-        return parse_svg(font_dir / FONT_SVG_FILENAME)
+        return parse_svg(path)
     except ProjectError as e:
         # font dirs are standalone assets, not projects → user-level error
-        raise UserError(f"{FONT_SVG_FILENAME} not loadable from {font_dir}: {e}") from e
+        raise UserError(f"{path.name} not loadable from {font_dir}: {e}") from e
 
 
 def _save_font_svg(tree: etree._ElementTree, font_dir: Path) -> None:
     # pretty=True: font SVGs are meant to be hand-opened in Inkscape and
     # diffed against the bundled fonts, which are pretty-printed.
-    write_svg_atomic(tree, font_dir / FONT_SVG_FILENAME, pretty=True)
+    write_svg_atomic(tree, font_svg_path(font_dir), pretty=True)
 
 
 def _get_font_baseline_y(tree: etree._ElementTree) -> float:

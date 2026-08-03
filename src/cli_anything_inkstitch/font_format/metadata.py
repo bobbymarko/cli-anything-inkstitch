@@ -31,7 +31,9 @@ def _default_font_json(name: str, units_per_em: float, size_mm: float,
         "horiz_adv_x_space": round(units_per_em * 0.3, 1),
         "horiz_adv_x": {},
         "glyphs": [],
-        "default_variant": "→",
+        # modern id since v3.3.0 (engine's json_default_variant converts
+        # legacy arrows, so old fonts keep working; new fonts write modern)
+        "default_variant": "ltr",
         "text_direction": "ltr",
         "baseline_y": 0,
     }

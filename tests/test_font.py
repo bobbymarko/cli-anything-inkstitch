@@ -1179,7 +1179,7 @@ class TestFontSetBaseline:
         return tmp_path / "font"
 
     def test_shift_updates_svg_transform(self, runner, tmp_path):
-        """set-baseline shifts the glyph's translate(ty) in →.svg."""
+        """set-baseline shifts the glyph's translate(ty) in the font SVG."""
         import re
         fdir = self._make_imported_font(runner, tmp_path)
 
@@ -1187,7 +1187,8 @@ class TestFontSetBaseline:
         from lxml import etree as _etree
         SVG_NS_URI = "http://www.w3.org/2000/svg"
         INKSCAPE_URI = "http://www.inkscape.org/namespaces/inkscape"
-        tree_before = _etree.parse(str(fdir / "→.svg"))
+        from cli_anything_inkstitch.font_format.svg_build import font_svg_path
+        tree_before = _etree.parse(str(font_svg_path(fdir)))
         root_el = tree_before.getroot()
         layer_before = next(
             el for el in root_el.iter(f"{{{SVG_NS_URI}}}g")
@@ -1211,7 +1212,7 @@ class TestFontSetBaseline:
         assert data["char"] == "A"
 
         # SVG should reflect new transform
-        tree_after = _etree.parse(str(fdir / "→.svg"))
+        tree_after = _etree.parse(str(font_svg_path(fdir)))
         root_after = tree_after.getroot()
         layer_after = next(
             el for el in root_after.iter(f"{{{SVG_NS_URI}}}g")
@@ -1285,3 +1286,30 @@ class TestFontSetBaseline:
              "--shift-mm", "1.0"],
         )
         assert result.exit_code != 0
+
+
+class TestVariantFileNaming:
+    """v3.3.0 renamed variant files →.svg → ltr.svg; the engine reads
+    new-then-legacy (font_variant.py _get_variant_file_paths) and we mirror
+    it: new fonts write the modern name, legacy dirs keep theirs on save."""
+
+    def test_new_fonts_write_modern_name(self, tmp_path):
+        from cli_anything_inkstitch.font_format.svg_build import font_svg_path
+        p = font_svg_path(tmp_path)          # empty dir = a new font
+        assert p.name == "ltr.svg"
+
+    def test_legacy_dir_keeps_its_name(self, tmp_path):
+        from cli_anything_inkstitch.font_format.svg_build import font_svg_path
+        (tmp_path / "→.svg").write_text("<svg/>")
+        assert font_svg_path(tmp_path).name == "→.svg"
+
+    def test_modern_name_wins_when_both_exist(self, tmp_path):
+        from cli_anything_inkstitch.font_format.svg_build import font_svg_path
+        (tmp_path / "→.svg").write_text("<svg/>")
+        (tmp_path / "ltr.svg").write_text("<svg/>")
+        # engine lookup order: modern first
+        assert font_svg_path(tmp_path).name == "ltr.svg"
+
+    def test_new_font_json_uses_modern_default_variant(self):
+        from cli_anything_inkstitch.font_format.metadata import _default_font_json
+        assert _default_font_json("t", 100, 10, 12)["default_variant"] == "ltr"

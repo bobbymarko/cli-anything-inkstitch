@@ -1,6 +1,6 @@
 """`font` command group — create and edit Inkstitch embroidery fonts.
 
-Design note: font commands operate on standalone font *directories* (→.svg +
+Design note: font commands operate on standalone font *directories* (ltr.svg or legacy →.svg +
 font.json + preview.png), not on project-attached SVGs, so they deliberately
 bypass the project/history system (no --project, no undo/redo, no project
 lock). Fonts are portable assets meant to be versioned with git or copied
@@ -59,7 +59,8 @@ from cli_anything_inkstitch.font_format.metadata import (
 from cli_anything_inkstitch.font_format.svg_build import (
     FONT_NSMAP,  # noqa: F401  (re-exported for back-compat)
     FONT_SVG_FILENAME,
-    FONT_SVG_VERSION,  # noqa: F401  (re-exported for back-compat)
+    FONT_SVG_VERSION,  # noqa: F401
+    font_svg_path,
     SODIPODI_NS,  # noqa: F401  (re-exported for back-compat)
     _DOC_HEIGHT,  # noqa: F401  (re-exported for back-compat)
     _DOC_WIDTH,  # noqa: F401  (re-exported for back-compat)
@@ -156,7 +157,7 @@ def font_init(ctx, name, font_dir, units_per_em, size_mm, baseline_y,
 
 @font.command("add-glyph")
 @click.option("--font-dir", "font_dir", required=True, type=click.Path(),
-              help="Font directory (must contain →.svg and font.json).")
+              help="Font directory (must contain ltr.svg — or legacy →.svg — and font.json).")
 @click.option("--source-svg", "source_svg", required=True, type=click.Path(),
               help="SVG file containing the glyph artwork.")
 @click.option("--char", "chars_csv", default=None,
@@ -974,7 +975,7 @@ def font_import(ctx, name, source_dirs, output_dir, pick_ext, size_mm, stitch_le
 
 @font.command("set-baseline")
 @click.option("--font-dir", "font_dir", required=True, type=click.Path(exists=True),
-              help="Font directory (must contain →.svg and font.json).")
+              help="Font directory (must contain ltr.svg — or legacy →.svg — and font.json).")
 @click.option("--char", "char", required=True,
               help="The glyph to adjust (single character, e.g. 'g').")
 @click.option("--shift-mm", "shift_mm", required=True, type=float,
@@ -1021,7 +1022,7 @@ def font_set_baseline(ctx, font_dir, char, shift_mm):
 
     if target_layer is None:
         raise UserError(
-            f"Glyph layer '{layer_label}' not found in →.svg.  "
+            f"Glyph layer '{layer_label}' not found in the font SVG.  "
             f"Available glyphs: {font_data.get('glyphs', [])}"
         )
 
@@ -1068,7 +1069,7 @@ def font_set_baseline(ctx, font_dir, char, shift_mm):
 
 @font.command("preview")
 @click.option("--font-dir", "font_dir", required=True, type=click.Path(),
-              help="Font directory (must contain →.svg and font.json).")
+              help="Font directory (must contain ltr.svg — or legacy →.svg — and font.json).")
 @click.option("--chars", "chars", default=None,
               help="Characters to include in preview (default: first 7 uppercase letters).")
 @click.pass_context
@@ -1231,14 +1232,15 @@ def _validate_font(font_dir: Path) -> dict:
     warnings = []
     fdir = font_dir
 
-    svg_path = fdir / FONT_SVG_FILENAME
+    svg_path = font_svg_path(fdir)
     json_path = fdir / "font.json"
     preview_path = fdir / "preview.png"
     license_path = fdir / "LICENSE"
 
     # Check required files
     if not svg_path.exists():
-        errors.append({"code": "missing_svg", "message": "→.svg not found"})
+        errors.append({"code": "missing_svg",
+                       "message": "no variant SVG found (ltr.svg, or legacy →.svg)"})
     if not json_path.exists():
         errors.append({"code": "missing_json", "message": "font.json not found"})
 
@@ -1282,7 +1284,8 @@ def _validate_font(font_dir: Path) -> dict:
         tree = etree.parse(str(svg_path), parser)
         svg_root = tree.getroot()
     except Exception as e:
-        errors.append({"code": "missing_svg", "message": f"→.svg parse error: {e}"})
+        errors.append({"code": "missing_svg",
+                       "message": f"{svg_path.name} parse error: {e}"})
         return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
 
     # Build set of GlyphLayer chars present in SVG
@@ -1304,7 +1307,7 @@ def _validate_font(font_dir: Path) -> dict:
         if char not in svg_glyph_chars:
             errors.append({
                 "code": "glyph_layer_missing",
-                "message": f"GlyphLayer-{char!r} not found in →.svg",
+                "message": f"GlyphLayer-{char!r} not found in the font SVG",
             })
 
     # Check orphan_layer: layer exists but char not in glyphs[]
