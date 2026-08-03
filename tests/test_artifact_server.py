@@ -463,3 +463,20 @@ class TestCheckpointEndpoints:
         assert body == {"deleted": cp["id"]}
         status, raw = _get(server, f"/api/{key}/checkpoints")
         assert json.loads(raw)["checkpoints"] == []
+
+
+class TestExportEndpoint:
+    def test_streams_machine_file_as_download(self, server, tmp_path, monkeypatch):
+        from cli_anything_inkstitch import binary as B
+        monkeypatch.setattr(B, "require", lambda *a, **k: "/fake")
+        monkeypatch.setattr(B, "run_extension",
+                            lambda *a, **k: b"FAKE-DST-BYTES")
+        helper = TestCheckpointEndpoints()
+        proj_path, _svg = helper._svg_project(tmp_path)
+        key = _open_session(server, proj_path)["key"]
+        import urllib.request
+        with urllib.request.urlopen(_url(server, f"/api/{key}/export"),
+                                    timeout=10) as r:
+            assert r.headers["Content-Type"] == "application/octet-stream"
+            assert 'filename="cpd.dst"' in r.headers["Content-Disposition"]
+            assert r.read() == b"FAKE-DST-BYTES"

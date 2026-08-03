@@ -391,6 +391,8 @@
           aria-label="How to use">?</button>
   <div class="spacer"></div>
   <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
+  <button class="chip" id="exportBtn" type="button"
+          title="Download the machine file (project's target format)">Export</button>
   <button class="chip" id="endBtn" type="button">End session</button>
 </div>
 <div id="main">
@@ -1125,6 +1127,22 @@ function drawRealistic() {
   const tw = Math.max(1.4, threadWidth() * s);
   let remaining = timelinePos == null ? Infinity : timelinePos;
   let si = 0;                             // running stitch index (variation)
+  // bean/triple stitches backtrack over identical coordinates — invisible
+  // if drawn in place. Real thread piles up beside the previous pass, so
+  // fan repeated segments perpendicular by a fraction of thread width
+  // (pass 1 → one side, pass 2 → other side, then further out).
+  const segSeen = new Map();
+  const beanOffset = (x1, y1, x2, y2) => {
+    const key = x1 < x2 || (x1 === x2 && y1 <= y2)
+      ? `${x1.toFixed(1)},${y1.toFixed(1)}|${x2.toFixed(1)},${y2.toFixed(1)}`
+      : `${x2.toFixed(1)},${y2.toFixed(1)}|${x1.toFixed(1)},${y1.toFixed(1)}`;
+    const n = segSeen.get(key) || 0;
+    segSeen.set(key, n + 1);
+    if (!n) return [0, 0];
+    const len = Math.hypot(x2 - x1, y2 - y1) || 1;
+    const mag = tw * 0.38 * Math.ceil(n / 2) * (n % 2 ? 1 : -1);
+    return [(-(y2 - y1) / len) * mag, ((x2 - x1) / len) * mag];
+  };
   for (const block of stitchData.blocks) {
     const sp = threadSprites(block.color, tw);
     for (let pi = 0; pi < block.paths.length; pi++) {
@@ -1148,8 +1166,10 @@ function drawRealistic() {
       remaining -= take;
       if (take < 2) continue;
       for (let i = 1; i < take; i++, si++) {
-        const x1 = pts[i - 1][0] * s + ox, y1 = pts[i - 1][1] * s + oy;
-        const x2 = pts[i][0] * s + ox, y2 = pts[i][1] * s + oy;
+        let x1 = pts[i - 1][0] * s + ox, y1 = pts[i - 1][1] * s + oy;
+        let x2 = pts[i][0] * s + ox, y2 = pts[i][1] * s + oy;
+        const [bdx, bdy] = beanOffset(x1, y1, x2, y2);
+        x1 += bdx; y1 += bdy; x2 += bdx; y2 += bdy;
         stampSprite(ctx, sp.sh, sp,
                     x1 + tw * 0.14, y1 + tw * 0.24,
                     x2 + tw * 0.14, y2 + tw * 0.24, tw);
@@ -2779,6 +2799,11 @@ function showGateBanner(gate) {
   }
   $("gateBanner").classList.add("show");
 }
+$("exportBtn").onclick = () => {
+  // navigation (not fetch) so the browser handles it as a download
+  window.location.href = api("/export");
+  showToast("Exporting machine file…");
+};
 $("endBtn").onclick = async () => {
   let gate = null;
   try { gate = await (await fetch(api("/gate"))).json(); } catch (e) { /* gate unreachable — don't block */ }

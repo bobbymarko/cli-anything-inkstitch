@@ -238,6 +238,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                 self._handle_gate(parts[1])
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "palettes":
                 self._handle_palettes(parse_qs(parsed.query))
+            elif len(parts) == 3 and parts[0] == "api" and parts[2] == "export":
+                self._handle_export(parts[1], parse_qs(parsed.query))
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "checkpoints":
                 self._handle_checkpoints_list(parts[1])
             elif (len(parts) == 5 and parts[0] == "api"
@@ -553,6 +555,36 @@ class ArtifactHandler(BaseHTTPRequestHandler):
             return
         from cli_anything_inkstitch.artifact.design_model import history_entries
         self._json(history_entries(session["file"]))
+
+    def _handle_export(self, key: str, query: dict) -> None:
+        """Stream the machine file as a browser download (editor Export
+        button).  Same engine invocation as `export file`: the binary's
+        `output` extension (engine reader lib/output.py / lib/extensions);
+        format defaults to the project's machine target."""
+        session = self.state.store.find_by_key(key)
+        if not session:
+            self._json({"error": "session not found"}, 404)
+            return
+        import json as _json
+        from pathlib import Path as _Path
+        from cli_anything_inkstitch.binary import require, run_extension
+        data = _json.loads(_Path(session["file"]).read_text())
+        fmt = (query.get("format") or [None])[0] \
+            or (data.get("session") or {}).get("machine_target") or "dst"
+        binary = require(None, data.get("session") or {})
+        payload = run_extension(binary, "output", data["svg_path"],
+                                args={"format": fmt}, ids=[],
+                                capture_stdout=True)
+        if not payload:
+            self._json({"error": "engine produced no output"}, 500)
+            return
+        name = _Path(data["svg_path"]).stem + "." + fmt
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     # -- checkpoints (durable flagged states; checkpoints.py) --------------------
 
