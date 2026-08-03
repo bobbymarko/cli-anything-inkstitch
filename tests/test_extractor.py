@@ -379,3 +379,13 @@ class TestValidateMultiValueParams:
         # staggers: declared int, engine reads float
         spec = {"type": "int", "value_kind": "float"}
         assert self._validate(spec, "2.5") == "2.5"
+
+
+def test_integer_type_spelling_normalized():
+    # newer engine source declares some int params as type='integer'
+    # (smoothness_mm) — both spellings must normalize to 'int' so the
+    # int-declared/float-read validator handling applies
+    from cli_anything_inkstitch.schema.extract import _normalize_param
+    out = _normalize_param({"name": "smoothness_mm", "type": "integer",
+                            "value_kind": "float"})
+    assert out["type"] == "int"

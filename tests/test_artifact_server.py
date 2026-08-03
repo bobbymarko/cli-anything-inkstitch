@@ -226,49 +226,62 @@ class TestGateEndpoint:
         assert body["applied"] is None
 
 
-class TestSSE:
-    def _read_sse_events(self, server, key, n_events, timeout=10):
-        """Collect the first n SSE events (name, data) from /events/<key>."""
-        events = []
-        done = threading.Event()
+def _read_sse_until(server, key, want, timeout=15):
+    """Collect SSE events until `want` matches one (or timeout).
 
-        def reader():
-            req = urllib.request.Request(_url(server, f"/events/{key}"))
+    `want` is an event name or a predicate over (name, data). Never count
+    events by position: the initial burst can include extras (a spurious
+    reload on slow Windows runners displaced fixed-count readers and made
+    these tests flaky)."""
+    match = want if callable(want) else (lambda e: e[0] == want)
+    events = []
+    done = threading.Event()
+
+    def reader():
+        req = urllib.request.Request(_url(server, f"/events/{key}"))
+        try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 name = None
-                while len(events) < n_events:
+                while not done.is_set():
                     line = r.readline().decode("utf-8").rstrip("\n")
                     if line.startswith("event: "):
                         name = line[len("event: "):]
                     elif line.startswith("data: ") and name:
                         events.append((name, json.loads(line[len("data: "):])))
+                        if match(events[-1]):
+                            done.set()
                         name = None
-            done.set()
+        except OSError:
+            pass
 
-        threading.Thread(target=reader, daemon=True).start()
-        return events, done
+    threading.Thread(target=reader, daemon=True).start()
+    return events, done
 
+
+class TestSSE:
     def test_sse_initial_sync_and_agent_reply(self, server, project):
         opened = _open_session(server, project)
-        events, done = self._read_sse_events(server, opened["key"], 3)
+        events, done = _read_sse_until(server, opened["key"], "agent-reply")
         time.sleep(0.3)  # let the reader connect and take the initial pair
         _post(server, f"/api/{opened['key']}/agent-reply", {"text": "hello"})
-        assert done.wait(10)
+        assert done.wait(15)
         names = [name for name, _ in events]
         assert names[0] == "chat-sync"
-        assert names[1] == "agent-presence"
+        assert "agent-presence" in names
         assert ("agent-reply", {"text": "hello"}) in events
 
     def test_sse_presence_flips_to_listening_on_poll(self, server, project):
         opened = _open_session(server, project)
-        events, done = self._read_sse_events(server, opened["key"], 3)
+        events, done = _read_sse_until(
+            server, opened["key"],
+            lambda e: e == ("agent-presence", {"state": "listening"}))
         time.sleep(0.3)
 
         def poll():
             _get(server, f"/api/poll?project={project}&timeout_s=1.5")
 
         threading.Thread(target=poll, daemon=True).start()
-        assert done.wait(10)
+        assert done.wait(15)
         assert ("agent-presence", {"state": "listening"}) in events
 
 
@@ -305,28 +318,12 @@ class TestPollSupersede:
 class TestAgentStatus:
     def test_status_reaches_sse(self, server, project):
         opened = _open_session(server, project)
-        events = []
-        done = threading.Event()
-
-        def reader():
-            req = urllib.request.Request(_url(server, f"/events/{opened['key']}"))
-            with urllib.request.urlopen(req, timeout=10) as r:
-                name = None
-                while len(events) < 3:
-                    line = r.readline().decode("utf-8").rstrip("\n")
-                    if line.startswith("event: "):
-                        name = line[len("event: "):]
-                    elif line.startswith("data: ") and name:
-                        events.append((name, json.loads(line[len("data: "):])))
-                        name = None
-            done.set()
-
-        threading.Thread(target=reader, daemon=True).start()
+        events, done = _read_sse_until(server, opened["key"], "agent-status")
         time.sleep(0.3)
         status, body = _post(server, f"/api/{opened['key']}/agent-status",
                              {"text": "recomputing the stitch plan…"})
         assert body["status"] == "sent"
-        assert done.wait(10)
+        assert done.wait(15)
         assert ("agent-status", {"text": "recomputing the stitch plan…"}) in events
 
     def test_status_unknown_session_404(self, server):

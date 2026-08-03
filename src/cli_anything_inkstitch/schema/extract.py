@@ -158,6 +158,7 @@ TYPE_NORMALIZE = {
     "toggle": "boolean",
     "float": "float",
     "int": "int",
+    "integer": "int",       # newer engine source spells int params both ways
     "string": "string",
     "combo": "combo",
     "dropdown": "dropdown",
