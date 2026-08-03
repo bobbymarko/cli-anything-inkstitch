@@ -19,3 +19,6 @@ build/
 /sample-svgs/
 # Commercial BX font fixtures — licensed files, never commit
 tests/fixtures/bx/*.bx
+
+# Chroma .rde corpus: user design files, not committed
+tests/fixtures/rde/
