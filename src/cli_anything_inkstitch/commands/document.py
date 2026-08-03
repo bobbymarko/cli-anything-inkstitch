@@ -62,11 +62,18 @@ def open_cmd(ctx, project_path, svg_path, force):
         proj.svg_sha256 = save_svg(tree, svg_path)
         proj.svg_path = svg_path
         proj.save()
-    emit(ctx, {
+        # engine tools silently rescale geometry in non-px-unit documents
+        # (svg/units.py has the measured details) — surface that immediately
+        from cli_anything_inkstitch.svg.units import unit_scale_warning
+        unit_warning = unit_scale_warning(tree.getroot())
+    payload = {
         "project": project_path,
         "svg": svg_path,
         "created_project": created,
-    }, human=f"opened {svg_path} in {project_path}")
+    }
+    if unit_warning:
+        payload["unit_warning"] = unit_warning
+    emit(ctx, payload, human=f"opened {svg_path} in {project_path}")
 
 
 @document.command("save")
@@ -422,10 +429,13 @@ def prep(ctx, project_path, ring_action):
     are pre-converted to filled outline rings.
     """
     from cli_anything_inkstitch.svg.prep import prep_svg
+    from cli_anything_inkstitch.svg.units import unit_scale_warning
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
         if tree is None:
             raise ProjectError("project has no SVG attached")
         stats = prep_svg(tree, ring_action=ring_action)
+        if (w := unit_scale_warning(tree.getroot())):
+            stats["unit_warning"] = w
         emit(ctx, stats)
 
 

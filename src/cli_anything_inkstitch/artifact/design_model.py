@@ -761,6 +761,24 @@ def _convert_via_engine(proj: ProjectFile, tree, elem, svg_id: str,
             f"{ext}: engine made no changes — the element may not meet the "
             "tool's geometry requirements")
     new_root = etree.fromstring(stdout)
+    # fill_to_stroke leaves its px-space correction transform as an attribute
+    # (engine writer lib/extensions/fill_to_stroke.py _insert_elements;
+    # svg/units.py has the measured details) — bake it so raw path data
+    # equals effective geometry, then refuse output that still drifted.
+    # Same per-tool tolerances as commands/tools.py _SCALE_GUARD: span
+    # checks are meaningless for stroke_to_satin (a zigzag run legitimately
+    # collapses to the satin band around its spine).
+    from cli_anything_inkstitch.svg.units import (
+        art_bbox,
+        bake_transforms,
+        check_scale_drift,
+    )
+    new_tree = etree.ElementTree(new_root)
+    bake_transforms(new_tree)
+    tol = {"fill_to_stroke": 0.5, "satin_to_stroke": 0.5}.get(ext)
+    if tol is not None:
+        check_scale_drift(ext, art_bbox(tree), art_bbox(new_tree),
+                          tolerance=tol)
     tree._setroot(new_root)
     ensure_inkstitch_namespace(tree)
     push(proj.history, make_entry(

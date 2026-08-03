@@ -105,7 +105,7 @@ The core digitization group. Set stitch type and parameters on individual elemen
 
 | Command | Description |
 |---------|-------------|
-| `set` | Set `--stitch-type` and any `--<param>` values on an element. Validates against the schema before writing. |
+| `set` | Set `--stitch-type` and any `--<param>` values on element(s). Validates against the schema before writing. Bulk mode: `--ids a,b,c` applies the same assignments to every element in ONE process and ONE history entry (undo reverts the whole batch; per-element failures land in the payload's `errors` without aborting the rest). Always prefer `--ids` over looping `--id` — a 100-invocation loop once flooded the 50-entry undo ring and evicted the snapshot needed to recover from a bad routing pass. |
 | `unset` | Remove specific params from an element |
 | `get` | Dump current params for an element (with defaults and types) |
 | `copy` | Copy params from one element `--from` to one or more `--to` elements (with `--only`/`--except` allowlists) |
@@ -139,9 +139,24 @@ Binary-backed geometry rewrites — operations that require Ink/Stitch's stitch 
 | `convert-to-satin` | Convert a stroke to a satin column |
 | `convert-satin-to-stroke` | Convert a satin column back to a stroke |
 | `flip-satin` | Swap rails on a satin column |
-| `auto-run` | Auto-route running-stitch elements |
+| `auto-run` | Auto-route running-stitch elements. Stale `autorun-underpath` travel from a previous routing pass is dropped automatically (the engine would re-route travel as art, doubling the design); the payload reports `removed_stale_underpaths`, `--keep-underpaths` opts out |
 | `break-apart` | Split a compound path into individual subpaths |
 | `cleanup` | Remove empty `<path>` elements, fills below an area threshold, strokes/satins below a length threshold, and empty groups |
+| `digitize-lineart` | Raster line art → verified stroke-only design in one command: threshold → vtracer trace → px-unit document → engine centerlines → ink-fraction spur sweep (red/green overlay PNG rendered before anything is deleted) → reverse-coverage recovery of thin marks the trace dropped → auto-run + bean styling → gate. `--image`, one of `--width-mm`/`--height-mm`, `--spur-ink-threshold`, `--stitch-length-mm`, `--bean-repeats`, `--no-route`. Requires the `trace` extra (`pip install 'cli-anything-inkstitch[trace]'`). Inspect the overlay PNG after every run — it is the visual proof the sweep deleted spurs and not drawing |
+
+#### Geometry safety around binary tools
+
+Engine extensions write geometry in **px space** with a compensating
+`transform` when the document's user unit isn't 1 px (engine readers
+`lib/svg/path.py get_correction_transform`, `lib/svg/units.py
+get_viewbox_transform`; measured ×3.78 raw-coordinate offsets on v3.3.0
+mm-unit docs). The tool wrappers bake those transforms into the path data
+after every run (`baked_transforms` in the payload) and **refuse output
+whose art actually rescaled** — that error means a transform got dropped
+somewhere and the output cannot be trusted. `document open`/`prep` emit
+`unit_warning` for non-px-unit documents; prefer building SVGs with px
+user units (viewBox = width/height converted at 96 px/inch) so raw path
+data always equals effective geometry.
 
 
 ### Validate

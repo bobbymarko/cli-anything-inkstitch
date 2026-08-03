@@ -20,9 +20,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+trace = [
+    # raster→vector tracing for `tools digitize-lineart`
+    "vtracer>=0.6",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
+    "vtracer>=0.6",
 ]
 
 [project.scripts]

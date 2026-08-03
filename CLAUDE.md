@@ -35,6 +35,21 @@ stitch counts, and our own unit tests. The engine source is checked out at
    produced stitch geometry (segment-length distributions, rendered plan)
    or a screenshot — a plausible stitch count proved nothing when a satin's
    zigzag swept across the whole shape.
+5. **Engine tools write px space; never read raw `d` from their output.**
+   Extensions compute geometry in px and attach the inverse viewBox/ancestor
+   transform (`lib/svg/path.py get_correction_transform`); some carry it as a
+   `transform` attribute (fill_to_stroke), some bake it (auto_run). In a
+   non-px-unit document the raw coordinates are off by the document scale
+   (measured ×3.78) even though the SVG renders correctly — a transform-
+   ignoring reader silently mis-measures everything (this cost a full design
+   rebuild). All tool wrappers must go through `svg/units.py`:
+   `bake_transforms` after every engine invocation, `check_scale_drift` as
+   the backstop, `unit_scale_warning` at document open/prep. Prefer px-unit
+   documents (viewBox = width/height at 96 px/inch) so the correction is
+   identity. Related: never feed `autorun-underpath` elements back into
+   `auto_run` — the router treats every stroke as art
+   (`lib/stitches/auto_run.py autorun`) and re-routes travel, doubling the
+   design; `tools auto-run` strips them (`_strip_stale_underpaths`).
 
 ## Running tests
 

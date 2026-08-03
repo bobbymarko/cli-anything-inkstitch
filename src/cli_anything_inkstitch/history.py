@@ -85,14 +85,25 @@ def metadata_diff(before: dict, after: dict) -> dict:
     return {"type": "metadata_diff", "before": before, "after": after}
 
 
+def multi_patch(patches: list[dict]) -> dict:
+    """Bundle several patches into ONE history entry (applied in order,
+    reversed in reverse order).  Exists so bulk operations — e.g.
+    `params set --ids a,b,c` styling 100 elements — undo atomically and
+    occupy one slot of the ring buffer instead of flooding it (a 100-entry
+    styling batch once evicted the pre-route snapshot it would have taken
+    one undo to recover)."""
+    return {"type": "multi", "patches": patches}
+
+
 # ---- entry construction + ring buffer ----
 
 def _patch_xml_bytes(patch: dict) -> int:
-    return sum(
+    own = sum(
         len(v.encode("utf-8", "ignore"))
         for k, v in patch.items()
         if isinstance(v, str) and k.endswith("_xml")
     )
+    return own + sum(_patch_xml_bytes(p) for p in patch.get("patches", []))
 
 
 def make_entry(command: str, patch: dict, scope: str = "svg") -> dict:
@@ -168,6 +179,10 @@ def apply_patch(tree, patch: dict, *, reverse: bool = False) -> None:
         _apply_node_insert(tree, patch, reverse=reverse)
     elif ptype == "node_delete":
         _apply_node_delete(tree, patch, reverse=reverse)
+    elif ptype == "multi":
+        subs = patch["patches"]
+        for sub in (reversed(subs) if reverse else subs):
+            apply_patch(tree, sub, reverse=reverse)
     elif ptype == "metadata_diff":
         # metadata is on the project, not the SVG tree — caller handles
         pass

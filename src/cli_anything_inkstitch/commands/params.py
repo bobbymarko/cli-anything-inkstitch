@@ -15,7 +15,7 @@ from cli_anything_inkstitch.commands._helpers import (
     xpath_for_id,
 )
 from cli_anything_inkstitch.errors import UserError
-from cli_anything_inkstitch.history import attr_diff
+from cli_anything_inkstitch.history import attr_diff, multi_patch
 from cli_anything_inkstitch.output import emit
 from cli_anything_inkstitch.schema.cache import load_schema, schema_warning
 from cli_anything_inkstitch.schema.validate import validate_geometry, validate_param
@@ -71,17 +71,94 @@ def _strip_competing_definers(elem, target: str, schema: dict) -> dict[str, str 
     return before
 
 
+def _apply_params_to_element(elem, stitch_type, extra, schema, force):
+    """Apply --stitch-type/params to one element; returns (before, after).
+
+    Raises UserError on validation failure without mutating the element
+    beyond what already validated (defining-attr and each param write happen
+    only after their own validation).
+    """
+    effective = stitch_type or classify(elem)
+    st_schema = schema["stitch_types"].get(effective)
+    if not st_schema:
+        raise UserError(f"unknown stitch type: {effective}")
+
+    if stitch_type and not force:
+        issues = validate_geometry(stitch_type, schema, elem)
+        if issues:
+            raise UserError("; ".join(issues) + " (use --force to override)")
+
+    # validate every param BEFORE writing anything, so a failing element is
+    # left untouched (matters in bulk mode where we continue past failures)
+    normalized_params = {
+        raw_name.replace("-", "_"):
+            validate_param(st_schema, raw_name.replace("-", "_"), raw_value)
+        for raw_name, raw_value in extra.items()
+    }
+
+    before: dict[str, str | None] = {}
+    after: dict[str, str | None] = {}
+
+    if stitch_type:
+        before.update(_strip_competing_definers(elem, stitch_type, schema))
+        da = _defining(stitch_type, schema)
+        if da:
+            key = qname(da[0])
+            old = elem.get(key)
+            if old != da[1]:
+                before.setdefault(key, old)
+                after[key] = da[1]
+                elem.set(key, da[1])
+
+    for attr_local, normalized in normalized_params.items():
+        key = qname(attr_local)
+        old = elem.get(key)
+        if old != normalized:
+            before.setdefault(key, old)
+            after[key] = normalized
+            elem.set(key, normalized)
+
+    return before, after
+
+
+def _capability_warning(changed: dict) -> str | None:
+    """Measured per-binary verdict: warn when a fill_method just written
+    provably has no effect on the installed engine (schema/probe.py)."""
+    try:
+        from cli_anything_inkstitch.schema.probe import get_cached
+        probe = get_cached()
+        method = changed.get("fill_method")
+        if probe and method in probe.get("no_effect", []):
+            return (
+                f"fill_method='{method}' has no effect on the installed "
+                f"Ink/Stitch ({probe.get('binary_version')}) — it stitches "
+                "as plain auto fill (measured; the option comes from newer "
+                "engine source)")
+    except Exception:  # noqa: BLE001 — advisory only
+        pass
+    return None
+
+
 @params.command("set", context_settings=SET_CONTEXT)
 @click.option("--project", "project_path", type=click.Path(), default=None)
-@click.option("--id", "svg_id", required=True)
+@click.option("--id", "svg_id", default=None)
+@click.option("--ids", "ids_csv", default=None,
+              help="Comma-separated element ids: apply the same assignments "
+                   "to every one, recorded as ONE undoable history entry.")
 @click.option("--stitch-type", "stitch_type", default=None,
               help="Optional stitch type to assign (validates geometry).")
 @click.option("--force", is_flag=True, help="Skip geometry-compatibility check.")
 @click.option("--refresh-schema", is_flag=True,
               help="Re-extract the schema from inkstitch source before loading.")
 @click.pass_context
-def set_cmd(ctx, project_path, svg_id, stitch_type, force, refresh_schema):
-    """Set --stitch-type and any --<param>=<value> on an element."""
+def set_cmd(ctx, project_path, svg_id, ids_csv, stitch_type, force, refresh_schema):
+    """Set --stitch-type and any --<param>=<value> on element(s).
+
+    Bulk mode (--ids a,b,c) applies the same assignments to every element in
+    one process and one history entry (undo reverts the whole batch);
+    per-element validation failures are reported in the payload without
+    aborting the rest.
+    """
     from cli_anything_inkstitch.binary import installed_version
     binary_version = installed_version(ctx.obj.get("binary_override") if ctx.obj else None)
     schema = load_schema(refresh=refresh_schema, prefer_version=binary_version)
@@ -89,82 +166,59 @@ def set_cmd(ctx, project_path, svg_id, stitch_type, force, refresh_schema):
 
     if stitch_type is None and not extra:
         raise UserError("nothing to set: pass --stitch-type and/or one or more --<param>=<value>")
+    if bool(svg_id) == bool(ids_csv):
+        raise UserError("pass exactly one of --id or --ids")
+    ids = [svg_id] if svg_id else [s.strip() for s in ids_csv.split(",") if s.strip()]
+    bulk = ids_csv is not None
 
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
-        elem = require_id(tree, svg_id)
+        patches = []
+        applied = []
+        errors = []
+        changed_union: dict[str, str] = {}
+        for one_id in ids:
+            try:
+                elem = require_id(tree, one_id)
+                before, after = _apply_params_to_element(
+                    elem, stitch_type, extra, schema, force)
+            except UserError as exc:
+                if not bulk:
+                    raise
+                errors.append({"id": one_id, "error": str(exc)})
+                continue
+            if not after:
+                applied.append({"id": one_id, "no_op": True})
+                continue
+            patches.append(attr_diff(xpath_for_id(one_id), before, after))
+            proj.elements.setdefault(one_id, {})
+            proj.elements[one_id]["stitch_type"] = classify(elem)
+            proj.elements[one_id]["set_params"] = set_params_on(elem)
+            changed = {k.replace(INKSTITCH_PREFIX, ""): v for k, v in after.items()}
+            changed_union.update(changed)
+            applied.append({"id": one_id, "stitch_type": classify(elem),
+                            "changed": changed})
 
-        # determine effective stitch type for param validation:
-        effective = stitch_type or classify(elem)
-        st_schema = schema["stitch_types"].get(effective)
-        if not st_schema:
-            raise UserError(f"unknown stitch type: {effective}")
+        if patches:
+            if bulk:
+                record(proj.history, f"params set --ids {','.join(ids)}",
+                       multi_patch(patches))
+            else:
+                record(proj.history, f"params set --id {ids[0]}", patches[0])
 
-        # geometry check
-        if stitch_type and not force:
-            issues = validate_geometry(stitch_type, schema, elem)
-            if issues:
-                raise UserError("; ".join(issues) + " (use --force to override)")
-
-        before: dict[str, str | None] = {}
-        after: dict[str, str | None] = {}
-
-        # write defining attribute
-        if stitch_type:
-            before.update(_strip_competing_definers(elem, stitch_type, schema))
-            da = _defining(stitch_type, schema)
-            if da:
-                key = qname(da[0])
-                old = elem.get(key)
-                if old != da[1]:
-                    before.setdefault(key, old)
-                    after[key] = da[1]
-                    elem.set(key, da[1])
-
-        # write each user-supplied param
-        for raw_name, raw_value in extra.items():
-            attr_local = raw_name.replace("-", "_")
-            normalized = validate_param(st_schema, attr_local, raw_value)
-            key = qname(attr_local)
-            old = elem.get(key)
-            if old != normalized:
-                before.setdefault(key, old)
-                after[key] = normalized
-                elem.set(key, normalized)
-
-        if not after:
-            emit(ctx, {"id": svg_id, "no_op": True})
-            return
-
-        record(proj.history, f"params set --id {svg_id}",
-               attr_diff(xpath_for_id(svg_id), before, after))
-
-        # refresh denormalized state
-        proj.elements.setdefault(svg_id, {})
-        proj.elements[svg_id]["stitch_type"] = classify(elem)
-        proj.elements[svg_id]["set_params"] = set_params_on(elem)
-
-        payload = {
-            "id": svg_id,
-            "stitch_type": classify(elem),
-            "changed": {k.replace(INKSTITCH_PREFIX, ""): v for k, v in after.items()},
-        }
+        if not bulk:
+            result = applied[0] if applied else {"id": ids[0], "no_op": True}
+            payload = dict(result)
+        else:
+            payload = {
+                "ids": ids,
+                "applied": applied,
+                "errors": errors,
+                "history_entries": 1 if patches else 0,
+            }
         if (w := schema_warning(schema, binary_version)):
             payload["schema_warning"] = w
-        # measured per-binary verdicts (schema/probe.py, cached by the
-        # artifact server): warn when the value just written provably has
-        # no effect on the installed engine
-        try:
-            from cli_anything_inkstitch.schema.probe import get_cached
-            probe = get_cached()
-            method = payload["changed"].get("fill_method")
-            if probe and method in probe.get("no_effect", []):
-                payload["capability_warning"] = (
-                    f"fill_method='{method}' has no effect on the installed "
-                    f"Ink/Stitch ({probe.get('binary_version')}) — it stitches "
-                    "as plain auto fill (measured; the option comes from newer "
-                    "engine source)")
-        except Exception:  # noqa: BLE001 — advisory only
-            pass
+        if (cw := _capability_warning(changed_union)):
+            payload["capability_warning"] = cw
         emit(ctx, payload)
 
 
