@@ -2700,6 +2700,10 @@ function setWorking(on) {
     workingBubble.append(dots, workingText);
     $("chat").appendChild(workingBubble);
     $("chat").scrollTop = $("chat").scrollHeight;
+  } else if (on && workingBubble) {
+    // re-anchor: messages appended while the bubble exists would otherwise
+    // land below it, leaving "working…" stranded above the user's message
+    $("chat").appendChild(workingBubble);
   } else if (!on && workingBubble) {
     workingBubble.remove();
     workingBubble = null;
@@ -2722,6 +2726,8 @@ function addMsg(role, text, objects) {
     div.appendChild(o);
   }
   $("chat").appendChild(div);
+  // the working bubble always reads as "what happens next" — keep it last
+  if (workingBubble) $("chat").appendChild(workingBubble);
   $("chat").scrollTop = $("chat").scrollHeight;
 }
 $("send").onclick = async () => {
