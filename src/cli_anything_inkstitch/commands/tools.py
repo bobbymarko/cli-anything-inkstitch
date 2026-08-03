@@ -90,6 +90,15 @@ def run_tool_core(ctx, project_path, extension_name, ids, args, *,
         # so undo restores the document exactly as it was
         before_xml = etree.tostring(_tree.getroot()).decode("utf-8")
         before_bbox = art_bbox(_tree)
+        # routing rewrites the whole document; take a durable auto-checkpoint
+        # so a bad pass is one restore away even after the history ring
+        # forgets (checkpoints.py — a re-route once turned 129 elements into
+        # 320 with no undo path left)
+        if extension_name in ("auto_run", "auto_satin"):
+            from cli_anything_inkstitch.checkpoints import record_checkpoint
+            record_checkpoint(proj, _tree,
+                              f"auto: before {extension_name}", auto=True)
+            proj.save()
         unit_warning = unit_scale_warning(_tree.getroot())
         extra_payload = {}
         if pre_process is not None:

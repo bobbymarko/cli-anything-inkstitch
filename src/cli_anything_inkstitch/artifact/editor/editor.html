@@ -163,6 +163,21 @@
   .layerRow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis;
                   white-space: nowrap; }
   .layerRow .kd { color: var(--muted); font-size: 10px; }
+  .cpCard { display: flex; gap: 8px; align-items: center; padding: 5px;
+            border: 1px solid var(--line); border-radius: 7px; margin-bottom: 5px;
+            cursor: pointer; }
+  .cpCard:hover { background: rgba(110,168,254,.08); }
+  .cpCard img { width: 42px; height: 42px; border-radius: 5px;
+                background: #18181c; object-fit: cover; flex: none; }
+  .cpCard .cpAnno { font-size: 11px; color: var(--text);
+                    overflow: hidden; text-overflow: ellipsis;
+                    display: -webkit-box; -webkit-line-clamp: 2;
+                    -webkit-box-orient: vertical; }
+  .cpCard .cpTime { font-size: 10px; color: var(--muted); }
+  .cpCard.auto { opacity: .6; }
+  .cpHead { font-size: 10px; letter-spacing: .06em; color: var(--muted);
+            margin: 2px 0 5px; text-transform: uppercase; }
+  .histRow .flagged { color: var(--accent); margin-right: 3px; }
   .histRow { padding: 3px 5px; border-radius: 5px; font-size: 11px;
              color: var(--muted); cursor: pointer; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
@@ -3141,21 +3156,108 @@ async function renderHistory() {
   if (root.classList.contains("closed")) return;
   const body = $("historyBody");
   try {
-    const h = await (await fetch(api("/history"))).json();
+    const [h, cps] = await Promise.all([
+      (await fetch(api("/history"))).json(),
+      (await fetch(api("/checkpoints"))).json().catch(() => ({checkpoints: []})),
+    ]);
+    const checkpoints = (cps.checkpoints || []).slice().reverse();
+    const flaggedEntries = new Set(
+      checkpoints.map((c) => c.history_entry_id).filter(Boolean));
     body.textContent = "";
+
+    if (checkpoints.length) {
+      const head = document.createElement("div");
+      head.className = "cpHead";
+      head.textContent = "Flagged states";
+      body.appendChild(head);
+      checkpoints.forEach((c) => body.appendChild(checkpointCard(c)));
+      const sep = document.createElement("div");
+      sep.className = "cpHead";
+      sep.textContent = "History";
+      body.appendChild(sep);
+    }
+
     h.entries.slice().reverse().forEach((e2) => {
       const r = document.createElement("div");
       r.className = "histRow" + (e2.current ? " cur" : "")
                     + (e2.index > h.cursor ? " future" : "");
-      r.textContent = (e2.current ? "● " : "") +
-                      e2.command.replace("artifact edit ", "");
-      r.title = `${e2.command} — ${e2.ts} (click to jump here)`;
+      if (flaggedEntries.has(e2.id)) {
+        const f = document.createElement("span");
+        f.className = "flagged";
+        f.textContent = "⚑";
+        r.appendChild(f);
+      }
+      r.appendChild(document.createTextNode(
+        (e2.current ? "● " : "") + e2.command.replace("artifact edit ", "")));
+      r.title = `${e2.command} — ${e2.ts} (click to jump here; right-click to flag)`;
       r.addEventListener("click", () => jumpToHistory(e2.index, h.cursor));
+      r.addEventListener("contextmenu", (ev) => showContextMenu(ev, [
+        { label: "Flag this state…", run: () => flagState(e2) },
+      ]));
       body.appendChild(r);
     });
   } catch (err) {
     body.textContent = "history unavailable";
   }
+}
+function checkpointCard(c) {
+  const card = document.createElement("div");
+  card.className = "cpCard" + (c.auto ? " auto" : "");
+  if (c.thumbnail) {
+    const img = document.createElement("img");
+    img.src = api(`/checkpoints/${c.id}/thumbnail`);
+    img.alt = "";
+    card.appendChild(img);
+  }
+  const col = document.createElement("div");
+  const anno = document.createElement("div");
+  anno.className = "cpAnno";
+  anno.textContent = c.annotation || (c.auto ? "auto checkpoint" : "unnamed");
+  const time = document.createElement("div");
+  time.className = "cpTime";
+  time.textContent = new Date(c.created).toLocaleString();
+  col.appendChild(anno);
+  col.appendChild(time);
+  card.appendChild(col);
+  card.title = "Click to restore (undoable); right-click for more";
+  card.addEventListener("click", () => restoreCheckpoint(c));
+  card.addEventListener("contextmenu", (ev) => showContextMenu(ev, [
+    { label: "Restore this state", run: () => restoreCheckpoint(c) },
+    { label: "Edit annotation…", run: () => annotateCheckpoint(c) },
+    "-",
+    { label: "Delete checkpoint", danger: true, run: async () => {
+        await fetch(api(`/checkpoints/${c.id}/delete`), { method: "POST" });
+        renderHistory();
+      } },
+  ]));
+  return card;
+}
+async function flagState(entry) {
+  const annotation = window.prompt(
+    "Annotation for this flagged state:",
+    entry ? entry.command.replace("artifact edit ", "") : "");
+  if (annotation === null) return;
+  const body = { annotation };
+  if (entry && !entry.current) body.history_entry_id = entry.id;
+  const r = await (await fetch(api("/checkpoints"), {
+    method: "POST", body: JSON.stringify(body) })).json();
+  if (r.error) showToast(r.error, true);
+  else showToast("State flagged — it now survives history limits");
+  renderHistory();
+}
+async function restoreCheckpoint(c) {
+  const r = await (await fetch(api(`/checkpoints/${c.id}/restore`),
+                               { method: "POST" })).json();
+  if (r.error) showToast(r.error, true);
+  else showToast(`Restored “${c.annotation || c.id}” (undo to go back)`);
+  renderHistory();
+}
+async function annotateCheckpoint(c) {
+  const annotation = window.prompt("Annotation:", c.annotation || "");
+  if (annotation === null) return;
+  await fetch(api(`/checkpoints/${c.id}/annotate`), {
+    method: "POST", body: JSON.stringify({ annotation }) });
+  renderHistory();
 }
 async function jumpToHistory(index, cursor) {
   const dir = cursor > index ? "/undo" : "/redo";

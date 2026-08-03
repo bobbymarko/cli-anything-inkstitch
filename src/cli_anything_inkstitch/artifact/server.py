@@ -238,6 +238,11 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                 self._handle_gate(parts[1])
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "palettes":
                 self._handle_palettes(parse_qs(parsed.query))
+            elif len(parts) == 3 and parts[0] == "api" and parts[2] == "checkpoints":
+                self._handle_checkpoints_list(parts[1])
+            elif (len(parts) == 5 and parts[0] == "api"
+                    and parts[2] == "checkpoints" and parts[4] == "thumbnail"):
+                self._handle_checkpoint_thumbnail(parts[1], parts[3])
             else:
                 self._json({"error": "not found"}, 404)
         except BrokenPipeError:
@@ -277,8 +282,14 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                 elif action == "reload":
                     self.state.hub.publish(key, {"event": "reload"})
                     self._json({"status": "sent"})
+                elif action == "checkpoints":
+                    self._handle_checkpoint_create(key, self._read_body())
                 else:
                     self._json({"error": "not found"}, 404)
+            elif (len(parts) == 5 and parts[0] == "api"
+                    and parts[2] == "checkpoints"):
+                self._handle_checkpoint_action(parts[1], parts[3], parts[4],
+                                               self._read_body())
             else:
                 self._json({"error": "not found"}, 404)
         except BrokenPipeError:
@@ -542,6 +553,78 @@ class ArtifactHandler(BaseHTTPRequestHandler):
             return
         from cli_anything_inkstitch.artifact.design_model import history_entries
         self._json(history_entries(session["file"]))
+
+    # -- checkpoints (durable flagged states; checkpoints.py) --------------------
+
+    def _session_file(self, key: str) -> str | None:
+        session = self.state.store.find_by_key(key)
+        if not session:
+            self._json({"error": "session not found"}, 404)
+            return None
+        return session["file"]
+
+    def _handle_checkpoints_list(self, key: str) -> None:
+        file = self._session_file(key)
+        if file is None:
+            return
+        from cli_anything_inkstitch.checkpoints import list_checkpoints
+        self._json({"checkpoints": list_checkpoints(file)})
+
+    def _handle_checkpoint_create(self, key: str, body: dict) -> None:
+        file = self._session_file(key)
+        if file is None:
+            return
+        from cli_anything_inkstitch.checkpoints import create_checkpoint
+        record = create_checkpoint(
+            file,
+            str(body.get("annotation") or ""),
+            body.get("history_entry_id") or None)
+        self._json({"checkpoint": record})
+
+    def _handle_checkpoint_action(self, key: str, checkpoint_id: str,
+                                  action: str, body: dict) -> None:
+        file = self._session_file(key)
+        if file is None:
+            return
+        from cli_anything_inkstitch import checkpoints as cp
+        if action == "restore":
+            result = cp.restore_checkpoint(file, checkpoint_id)
+            self.state.hub.publish(key, {"event": "reload"})
+            self._json(result)
+        elif action == "annotate":
+            self._json({"checkpoint": cp.annotate_checkpoint(
+                file, checkpoint_id, str(body.get("annotation") or ""))})
+        elif action == "delete":
+            self._json(cp.delete_checkpoint(file, checkpoint_id))
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def _handle_checkpoint_thumbnail(self, key: str, checkpoint_id: str) -> None:
+        file = self._session_file(key)
+        if file is None:
+            return
+        from cli_anything_inkstitch.checkpoints import (
+            _snapshot_path,
+            _thumb_path,
+            find_checkpoint,
+            render_thumbnail,
+        )
+        from cli_anything_inkstitch.project import ProjectFile
+        record = find_checkpoint(ProjectFile.load(file), checkpoint_id)
+        thumb = _thumb_path(file, record["svg_sha256"])
+        if not thumb.exists():
+            snap = _snapshot_path(file, record["svg_sha256"])
+            if snap.exists():
+                render_thumbnail(snap.read_bytes(), thumb)
+        if not thumb.exists():
+            self._json({"error": "no thumbnail"}, 404)
+            return
+        data = thumb.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _handle_stitches(self, key: str) -> None:
         session = self.state.store.find_by_key(key)

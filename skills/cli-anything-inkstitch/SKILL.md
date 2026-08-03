@@ -219,6 +219,21 @@ Undo / redo / history. Up to 50 levels.
 | `redo` | Redo the last undone operation |
 | `history` | Show undo history (`--limit N`, `--json`) |
 | `reset` | Drop history; current SVG state is retained |
+| `checkpoint create` | Flag a durable state: `-m "why it matters"`, `--at <history-entry-id>` for an older state (default current). The state is materialized to a content-addressed SVG snapshot in `.checkpoints/` next to the project the moment it is flagged — after that it survives history-ring eviction, resets, everything short of deleting the folder |
+| `checkpoint list` | All flagged states with annotations and hashes |
+| `checkpoint restore` | Swap a flagged state back in (`--id`). Recorded as a NORMAL history entry — restore is itself undoable, so flagged states behave like branches to hop between, never rollbacks |
+| `checkpoint annotate` | Update a checkpoint's annotation (`--id`, `-m`) |
+| `checkpoint delete` | Remove a checkpoint (snapshot file is kept while other checkpoints share its content hash) |
+
+Checkpoints exist because undo history is a 50-entry ring of diff patches —
+old states become unreconstructable through eviction and structural drift.
+Flag states **while they're current** (or still recent); `--at` on an evicted
+entry fails with a clear error, by design. `tools auto-run`/`auto-satin`
+take an automatic checkpoint before rewriting the document (pruned to the
+newest 5 autos; user flags are never pruned). In the artifact editor,
+right-click any History row → "Flag this state…"; flagged states appear as
+annotated thumbnail cards — click to restore, right-click to annotate or
+delete.
 
 
 ### Font

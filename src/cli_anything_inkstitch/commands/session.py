@@ -119,6 +119,78 @@ def reset(ctx, project_path):
         emit(ctx, {"reset": True})
 
 
+# ---- checkpoints ------------------------------------------------------------
+#
+# Durable flagged states, independent of the 50-entry history ring
+# (checkpoints.py documents the materialize-at-flag-time design).
+
+@session.group("checkpoint")
+def checkpoint():
+    """Flag, list, annotate, and restore durable design states."""
+
+
+def _resolve_project(ctx, project_path):
+    from cli_anything_inkstitch.commands._helpers import get_project_path
+    return get_project_path(ctx, project_path)
+
+
+@checkpoint.command("create")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--annotation", "-m", default="", help="Why this state matters.")
+@click.option("--at", "history_entry_id", default=None,
+              help="History entry id to flag (default: the current state). "
+                   "Only states still reachable through the patch chain can "
+                   "be flagged — flag early, while history remembers.")
+@click.pass_context
+def checkpoint_create(ctx, project_path, annotation, history_entry_id):
+    from cli_anything_inkstitch.checkpoints import create_checkpoint
+    record = create_checkpoint(_resolve_project(ctx, project_path),
+                               annotation, history_entry_id)
+    emit(ctx, {"checkpoint": record})
+
+
+@checkpoint.command("list")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.pass_context
+def checkpoint_list(ctx, project_path):
+    from cli_anything_inkstitch.checkpoints import list_checkpoints
+    emit(ctx, {"checkpoints": list_checkpoints(
+        _resolve_project(ctx, project_path))})
+
+
+@checkpoint.command("restore")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--id", "checkpoint_id", required=True)
+@click.pass_context
+def checkpoint_restore(ctx, project_path, checkpoint_id):
+    """Swap the flagged state back in — recorded as a normal, undoable
+    history entry (nothing is rolled back or lost)."""
+    from cli_anything_inkstitch.checkpoints import restore_checkpoint
+    emit(ctx, restore_checkpoint(_resolve_project(ctx, project_path),
+                                 checkpoint_id))
+
+
+@checkpoint.command("annotate")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--id", "checkpoint_id", required=True)
+@click.option("--annotation", "-m", required=True)
+@click.pass_context
+def checkpoint_annotate(ctx, project_path, checkpoint_id, annotation):
+    from cli_anything_inkstitch.checkpoints import annotate_checkpoint
+    emit(ctx, {"checkpoint": annotate_checkpoint(
+        _resolve_project(ctx, project_path), checkpoint_id, annotation)})
+
+
+@checkpoint.command("delete")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--id", "checkpoint_id", required=True)
+@click.pass_context
+def checkpoint_delete(ctx, project_path, checkpoint_id):
+    from cli_anything_inkstitch.checkpoints import delete_checkpoint
+    emit(ctx, delete_checkpoint(_resolve_project(ctx, project_path),
+                                checkpoint_id))
+
+
 def _apply_metadata(proj, patch, tree=None):
     _set_session_keys(proj, patch.get("after", {}), tree)
 

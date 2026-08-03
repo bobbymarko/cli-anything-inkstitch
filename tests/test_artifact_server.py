@@ -403,3 +403,63 @@ class TestPalettesEndpoint:
         with pytest.raises(urllib.error.HTTPError) as ei:
             _get(server, "/api/x/palettes?name=Nope")
         assert ei.value.code == 404
+
+
+class TestCheckpointEndpoints:
+    SVG = ('<svg xmlns="http://www.w3.org/2000/svg" '
+           'xmlns:inkstitch="http://inkstitch.org/namespace" '
+           'width="30mm" height="30mm" viewBox="0 0 113.386 113.386">'
+           '<metadata><inkstitch_svg_version>3</inkstitch_svg_version></metadata>'
+           '<path id="r1" d="M10,20 L100,20" fill="none" stroke="#000"/></svg>')
+
+    def _svg_project(self, tmp_path):
+        from cli_anything_inkstitch.project import ProjectFile
+        from cli_anything_inkstitch.svg.document import sha256_of
+        svg = tmp_path / "cpd.svg"
+        svg.write_text(self.SVG)
+        p = tmp_path / "cpd.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(p))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        return str(p), svg
+
+    def test_full_roundtrip(self, server, tmp_path):
+        proj_path, svg = self._svg_project(tmp_path)
+        key = _open_session(server, proj_path)["key"]
+
+        status, body = _post(server, f"/api/{key}/checkpoints",
+                             {"annotation": "liked this"})
+        assert status == 200
+        cp = body["checkpoint"]
+        assert cp["annotation"] == "liked this"
+
+        # mutate the design, then restore via the endpoint
+        from cli_anything_inkstitch.artifact.design_model import apply_edits
+        apply_edits(proj_path, [{"op": "set_attr", "id": "r1",
+                                 "name": "bean_stitch_repeats", "value": "4"}])
+        assert "bean_stitch_repeats" in svg.read_text()
+        status, body = _post(server, f"/api/{key}/checkpoints/{cp['id']}/restore")
+        assert status == 200 and body["restored"] == cp["id"]
+        assert "bean_stitch_repeats" not in svg.read_text()
+
+        status, body = _post(server, f"/api/{key}/checkpoints/{cp['id']}/annotate",
+                             {"annotation": "the keeper"})
+        assert body["checkpoint"]["annotation"] == "the keeper"
+
+        status, raw = _get(server, f"/api/{key}/checkpoints")
+        listed = json.loads(raw)["checkpoints"]
+        assert [c["annotation"] for c in listed] == ["the keeper"]
+
+        # thumbnail is served as a PNG
+        import urllib.request
+        with urllib.request.urlopen(
+                _url(server, f"/api/{key}/checkpoints/{cp['id']}/thumbnail"),
+                timeout=10) as r:
+            assert r.headers["Content-Type"] == "image/png"
+            assert r.read()[:8] == b"\x89PNG\r\n\x1a\n"
+
+        status, body = _post(server, f"/api/{key}/checkpoints/{cp['id']}/delete")
+        assert body == {"deleted": cp["id"]}
+        status, raw = _get(server, f"/api/{key}/checkpoints")
+        assert json.loads(raw)["checkpoints"] == []

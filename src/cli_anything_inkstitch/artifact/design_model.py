@@ -367,6 +367,7 @@ def history_entries(project_file: str, limit: int = 50) -> dict[str, Any]:
         return {
             "entries": [{
                 "index": offset + i,
+                "id": e["id"],
                 "command": e["command"],
                 "ts": e["ts"],
                 "current": (offset + i) == cursor,
