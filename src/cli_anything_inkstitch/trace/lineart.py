@@ -98,7 +98,11 @@ def build_px_document(traced_svg_path: str | Path, source_size_px,
     engine's correction transform at identity — svg/units.py documents the
     measured behavior behind that choice.
     """
-    from cli_anything_inkstitch.svg.geometry import transform_d
+    from cli_anything_inkstitch.svg.geometry import (
+        matrix_multiply,
+        parse_transform,
+        transform_d,
+    )
     src_w, src_h = source_size_px
     if width_mm is None and height_mm is None:
         raise ValueError("one of width_mm/height_mm is required")
@@ -124,7 +128,12 @@ def build_px_document(traced_svg_path: str | Path, source_size_px,
         n += 1
         el = etree.SubElement(out, f"{{{SVG_NS}}}path")
         el.set("id", f"elem_{n}")
-        el.set("d", transform_d(p.get("d"), (kd, 0, 0, kd, 0, 0)))
+        # vtracer writes each path's position as transform="translate(x,y)"
+        # with d starting at M0,0 — compose it, or every shape lands at the
+        # origin (measured: the celtic-patch trace scattered by up to 900px)
+        m = matrix_multiply((kd, 0, 0, kd, 0, 0),
+                            parse_transform(p.get("transform")))
+        el.set("d", transform_d(p.get("d"), m))
         el.set("fill", "#1a1a1a")
     if n == 0:
         raise ValueError(f"trace produced no paths: {traced_svg_path}")

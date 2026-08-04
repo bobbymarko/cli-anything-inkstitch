@@ -186,10 +186,20 @@ def segments_intersect(p1, p2, p3, p4) -> bool:
 
 
 def poly_self_intersects(pts: list[tuple[float, float]]) -> bool:
-    """True if any two non-adjacent segments of the polyline cross."""
+    """True if any two non-adjacent segments of the polyline cross.
+
+    On a CLOSED polyline (first point repeated at the end — e.g. ring-satin
+    rails from a letter outline) the closing segment is adjacent to the
+    first segment: they legitimately share an endpoint and must not count
+    as a crossing.  Index distance alone can't see that adjacency.
+    """
     n = len(pts) - 1
+    closed = (n >= 2 and abs(pts[0][0] - pts[n][0]) < 1e-6
+              and abs(pts[0][1] - pts[n][1]) < 1e-6)
     for i in range(n):
         for j in range(i + 2, n):
+            if closed and i == 0 and j == n - 1:
+                continue
             if segments_intersect(pts[i], pts[i + 1], pts[j], pts[j + 1]):
                 return True
     return False

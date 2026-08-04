@@ -288,3 +288,24 @@ class TestIgnoredFillMethods:
         result = run_gate(project)
         checks = [f["check"] for f in result["errors"]]
         assert "ignored_fill_method" not in checks
+
+
+class TestClosedPolylineSelfIntersection:
+    """Ring-satin rails are closed outlines (first point repeated at the
+    end); the closing segment is adjacent to the first and must not read
+    as a self-crossing (it did — first exercised by the celtic-patch
+    letter 'o')."""
+
+    def test_closed_square_is_clean(self):
+        from cli_anything_inkstitch.artifact.gate import poly_self_intersects
+        assert not poly_self_intersects(
+            [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)])
+
+    def test_open_square_unchanged(self):
+        from cli_anything_inkstitch.artifact.gate import poly_self_intersects
+        assert not poly_self_intersects([(0, 0), (10, 0), (10, 10), (0, 10)])
+
+    def test_real_crossing_still_detected_when_closed(self):
+        from cli_anything_inkstitch.artifact.gate import poly_self_intersects
+        bowtie = [(0, 0), (10, 10), (10, 0), (0, 10), (0, 0)]
+        assert poly_self_intersects(bowtie)
