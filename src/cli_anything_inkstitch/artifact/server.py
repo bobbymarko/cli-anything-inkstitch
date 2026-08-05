@@ -142,11 +142,30 @@ class ArtifactServer(ThreadingHTTPServer):
         self.idle_timeout_s = idle_timeout_s
         self._watch_stop = threading.Event()
         self._watched: dict[str, tuple[str, float]] = {}  # key -> (svg_path, mtime)
+        # watches are in-memory, but sessions persist across restarts —
+        # without re-registering, a server restart silently stops live
+        # reload for every open tab (a user stared at a stale design and
+        # blamed their overnight browser; the real cause was three server
+        # restarts that emptied this dict)
+        self._rewatch_live_sessions()
         threading.Thread(target=self._watch_loop, daemon=True).start()
         if idle_timeout_s:
             threading.Thread(target=self._idle_loop, daemon=True).start()
 
     # -- design-file watching (mtime polling; publishes live reload) --------
+
+    def _rewatch_live_sessions(self) -> None:
+        for key in self.state.store.keys():
+            session = self.state.store.find_by_key(key)
+            if not session or session.get("status") == "ended":
+                continue
+            try:
+                svg_path = json.loads(
+                    Path(session["file"]).read_text()).get("svg_path")
+            except (json.JSONDecodeError, OSError, KeyError):
+                continue
+            if svg_path:
+                self.watch_design(key, svg_path)
 
     def watch_design(self, key: str, svg_path: str) -> None:
         try:

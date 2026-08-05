@@ -285,6 +285,37 @@ class TestSSE:
         assert ("agent-presence", {"state": "listening"}) in events
 
 
+class TestWatchSurvivesRestart:
+    def test_design_watch_reregisters_on_startup(self, tmp_path):
+        """Design-file watches are in-memory but sessions persist — a fresh
+        server on the same state dir must resume publishing live reloads,
+        or every open tab silently goes stale after a restart."""
+        helper = TestCheckpointEndpoints()
+        proj_path, svg = helper._svg_project(tmp_path)
+        state = str(tmp_path / "artifact-state")
+
+        srv1 = serve(state, port=0, idle_timeout_s=None)
+        t1 = threading.Thread(target=srv1.serve_forever, daemon=True)
+        t1.start()
+        key = _open_session(srv1, proj_path)["key"]
+        srv1.stop()
+        t1.join(timeout=5)
+
+        srv2 = serve(state, port=0, idle_timeout_s=None)
+        t2 = threading.Thread(target=srv2.serve_forever, daemon=True)
+        t2.start()
+        try:
+            events, done = _read_sse_until(srv2, key, "reload")
+            time.sleep(0.3)
+            svg.write_text(svg.read_text().replace("M10,20", "M11,20"))
+            import os
+            os.utime(svg)          # guarantee an mtime tick on coarse filesystems
+            assert done.wait(15), "no reload published after restart + file edit"
+        finally:
+            srv2.stop()
+            t2.join(timeout=5)
+
+
 class TestPollSupersede:
     def test_new_poll_supersedes_old(self, server, project):
         """One poll per session: a second poll takes over; the first stands
