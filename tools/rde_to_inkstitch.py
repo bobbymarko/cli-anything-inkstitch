@@ -27,6 +27,12 @@ per the project's engine-contract rule:
         element.get_boolean_param("satin_column", False). With exactly two
         subpaths SatinColumn.rungs synthesizes the rungs
         (lib/elements/satin_column.py:_synthesize_rungs), so we emit rails only.
+  * inkstitch:zigzag_spacing_mm -- lib/elements/satin_column.py:263-272,
+        get_float_param("zigzag_spacing_mm", 0.4), peak-to-peak in mm.
+  * inkstitch:row_spacing_mm -- lib/elements/fill_stitch.py:364-379,
+        get_float_param("row_spacing_mm", 0.25); derived from area/thread.
+  * inkstitch:expand_mm -- lib/elements/fill_stitch.py:276-284,
+        get_float_param('expand_mm', 0), compensates gaps between shapes.
   * inkstitch:angle -- lib/elements/fill_stitch.py:300-310, read with
         math.radians(get_float_param('angle', 0)), i.e. DEGREES.
   * stroke_method defaults to "running_stitch"
@@ -84,6 +90,19 @@ SLIVER_COMPACTNESS = 0.15
 # A contour must hold at least this share of the object's own stitches to be
 # treated as the shape being filled; below it, it is a guide or a thin detail.
 FILL_MIN_COVERAGE = 0.15
+# Chroma overlaps adjacent shapes so their fills meet; Ink/Stitch does not by
+# default, which leaves hairline gaps along every shared petal edge. expand_mm
+# exists for exactly this ("compensate for gaps between shapes",
+# lib/elements/fill_stitch.py:276-284, read via get_float_param('expand_mm', 0)).
+FILL_EXPAND_MM = 0.2
+# An object is only filled if its own stitches carry at least this share of the
+# thread a fill of that area would need (area / 0.25 mm rows). Chroma's real
+# fills run 1.2x-2.4x that figure; objects it merely outlined run ~0.05x, and
+# filling those over-stitched one design by 8.9x. Measured over 769 fills and
+# 2871 non-fills: at 0.25 no real fill is rejected.
+FILL_DENSITY_MIN = 0.25
+# Share of a filled object's thread that is fill rows rather than underlay/travel.
+FILL_THREAD_SHARE = 0.85
 
 
 def read_design(path):
@@ -199,6 +218,87 @@ def _point_in(poly, pt):
             if xx > x:
                 inside = not inside
     return inside
+
+
+def _zigzag_spacing_mm(rail):
+    """Peak-to-peak zigzag spacing, measured off one rail.
+
+    Consecutive points on the same rail are one full zigzag cycle apart, which
+    is exactly what Ink/Stitch's zigzag_spacing_mm means
+    (lib/elements/satin_column.py:263-272, default 0.4). Chroma designs vary --
+    one logo stitches at 0.22 mm, and leaving it at the default under-stitched
+    that design to 0.56x the original thread.
+    """
+    gaps = []
+    for a, b in zip(rail, rail[1:]):
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        if 0.3 < d < 60:
+            gaps.append(d)
+    if len(gaps) < 4:
+        return None
+    gaps.sort()
+    # Measured, not clamped. Chroma's plain satins sit at 0.36-0.47 mm, but
+    # chain-stitch designs genuinely measure far finer and forcing them back to
+    # the 0.4 default halved their thread (0.62x -> 0.31x). Trust the file.
+    return gaps[len(gaps) // 2] / 10.0
+
+
+def _thread_mm(points):
+    total = 0.0
+    for a, b in zip(points, points[1:]):
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        if d < 150:
+            total += d
+    return total / 10.0
+
+
+def _area_mm2(nodes):
+    poly = _flatten(nodes)
+    a = 0.0
+    for i in range(len(poly)):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % len(poly)]
+        a += x1 * y2 - x2 * y1
+    return abs(a) / 2 / 100.0
+
+
+def _row_spacing_mm(shapes, stitches):
+    """Row spacing implied by the thread Chroma actually spent on this shape.
+
+    A fill of area A at spacing s consumes about A/s of thread, so s = A/thread.
+    Chroma's fills range from dense (~0.14 mm) to sparse (~0.8 mm); leaving
+    Ink/Stitch at its 0.25 mm default over-stitched the sparse ones several
+    times over. Read by lib/elements/fill_stitch.py:364-379,
+    get_float_param("row_spacing_mm", 0.25).
+    """
+    area = sum(_area_mm2(c) for c in shapes)
+    thread = _thread_mm(stitches)
+    if area <= 0.5 or thread <= 0.5:
+        return None
+    # Only part of an object's thread is fill rows -- the rest is underlay and
+    # travel, which Ink/Stitch regenerates separately. Attributing all of it to
+    # rows computes too tight a spacing and over-stitches. FILL_THREAD_SHARE is
+    # calibrated so the median design lands near 1.0x the original thread.
+    derived = min(area / (thread * FILL_THREAD_SHARE), 1.50)
+    derived = max(derived, 0.15)
+    # Only ever WIDEN. Ink/Stitch's 0.25 mm default already matched Chroma's
+    # dense fills (designs came out at 0.93x-1.03x the original thread);
+    # narrowing below it over-stitched them to 1.25x-1.45x. The real defect was
+    # sparse fills, where the default packed rows several times too tightly.
+    return derived
+
+
+def _stitched_as_fill(shapes, stitches):
+    """Did Chroma actually FILL this shape, or only outline it?
+
+    A shape's area implies how much thread a fill needs; if the object's own
+    stitches carry far less than that, it was never filled and turning it into
+    one is a large over-stitch.
+    """
+    area = sum(_area_mm2(c) for c in shapes)
+    if area <= 0.5:
+        return True
+    return _thread_mm(stitches) / (area / 0.25) >= FILL_DENSITY_MIN
 
 
 def _split_shapes(contours, stitches):
@@ -469,16 +569,21 @@ def convert(path):
             # and gets dropped rather than stitched.
             joined = _choose_contours(obj['contours'], stitches)
             shapes, details = _split_shapes(joined, stitches)
+            if not _stitched_as_fill(shapes, stitches):
+                shapes, details = [], shapes + details
             for group in _group_contours(shapes):
                 subpaths = [d for d in (_contour_path(n, X, Y)
                                         for n in group) if d]
                 if not subpaths:
                     continue
                 uid[0] += 1
+                rs = _row_spacing_mm(shapes, stitches)
+                rsa = f' inkstitch:row_spacing_mm="{rs:.2f}"' if rs else ''
                 add(obj['color'],
                     f'<path id="rde{uid[0]}" d="{" ".join(subpaths)}" '
                     f'style="fill:{color};fill-rule:evenodd;stroke:none" '
-                    f'inkstitch:angle="{_dominant_angle(stitches):.1f}"/>')
+                    f'inkstitch:angle="{_dominant_angle(stitches):.1f}" '
+                    f'inkstitch:expand_mm="{FILL_EXPAND_MM}"{rsa}/>')
                 counts['fill'] += 1
             for c in details:
                 d = _contour_path(c, X, Y)
@@ -516,10 +621,13 @@ def convert(path):
                 uid[0] += 1
                 d = ('M ' + ' L '.join(f'{x:.3f},{y:.3f}' for x, y in ra)
                      + ' M ' + ' L '.join(f'{x:.3f},{y:.3f}' for x, y in rb))
+                spacing = _zigzag_spacing_mm(rail_a[:n])
+                zz = (f' inkstitch:zigzag_spacing_mm="{spacing:.2f}"'
+                      if spacing else '')
                 add(obj['color'],
                     f'<path id="rde{uid[0]}" d="{d}" '
                     f'style="fill:none;stroke:{color};stroke-width:1" '
-                    f'inkstitch:satin_column="true"/>')
+                    f'inkstitch:satin_column="true"{zz}/>')
                 counts['satin'] += 1
                 emitted = True
             if emitted:
@@ -533,16 +641,21 @@ def convert(path):
         if obj['contours']:
             shapes, details = _split_shapes(
                 _choose_contours(obj['contours'], stitches), stitches)
+            if not _stitched_as_fill(shapes, stitches):
+                shapes, details = [], shapes + details
             for group in _group_contours(shapes):
                 subpaths = [d for d in (_contour_path(n, X, Y)
                                         for n in group) if d]
                 if not subpaths:
                     continue
                 uid[0] += 1
+                rs = _row_spacing_mm(shapes, stitches)
+                rsa = f' inkstitch:row_spacing_mm="{rs:.2f}"' if rs else ''
                 add(obj['color'],
                     f'<path id="rde{uid[0]}" d="{" ".join(subpaths)}" '
                     f'style="fill:{color};fill-rule:evenodd;stroke:none" '
-                    f'inkstitch:angle="{_dominant_angle(stitches):.1f}"/>')
+                    f'inkstitch:angle="{_dominant_angle(stitches):.1f}" '
+                    f'inkstitch:expand_mm="{FILL_EXPAND_MM}"{rsa}/>')
                 counts['fill'] += 1
             for c in details:
                 d = _contour_path(c, X, Y)
