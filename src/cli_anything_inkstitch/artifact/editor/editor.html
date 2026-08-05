@@ -1631,35 +1631,133 @@ canvas.addEventListener("pointerdown", (ev) => {
   if (activeTool === "pen" && ev.button === 0) {
     ev.stopPropagation();
     ev.preventDefault();
-    const p = clientToSvg(ev);
+    let p = clientToSvg(ev);
     if (!penDraft) penDraft = [];
     // clicking back on the first point closes the shape → fill
     if (penDraft.length > 2 &&
-        Math.hypot(p.x - penDraft[0][0], p.y - penDraft[0][1]) < px(8)) {
+        Math.hypot(p.x - penDraft[0].x, p.y - penDraft[0].y) < px(8)) {
       commitPen(true);
       return;
     }
-    penDraft.push([p.x, p.y]);
+    // clicking any other placed point selects it (right-click converts /
+    // Delete removes) instead of stacking a new point on top of it
+    for (let i = 1; i < penDraft.length; i++) {
+      if (Math.hypot(p.x - penDraft[i].x, p.y - penDraft[i].y) < px(6)) {
+        penSel = penSel === i ? null : i;
+        renderEditLayer();
+        return;
+      }
+    }
+    // shift constrains the new segment to 45° increments from the last point
+    if (penDraft.length)
+      p = penConstrain(p, penDraft[penDraft.length - 1], ev.shiftKey);
+    penDraft.push({ x: p.x, y: p.y, smooth: false });
+    penSel = null;
     renderEditLayer();
   }
 }, true);
-/* pen tool: click-placed points; straight segments — smooth curves after
-   with the node tool (double-click pulls bezier handles out of corners) */
-let penDraft = null;
+canvas.addEventListener("pointermove", (ev) => {
+  // pen rubber band: live preview of the next segment (shift shows the
+  // constrained line, so you see the snap before committing the click)
+  if (activeTool !== "pen" || !penDraft || !penDraft.length) return;
+  const last = penDraft[penDraft.length - 1];
+  penHover = penConstrain(clientToSvg(ev), last, ev.shiftKey);
+  if (penPreviewEl && penPreviewEl.parentNode) {
+    penPreviewEl.setAttribute("x1", last.x);
+    penPreviewEl.setAttribute("y1", last.y);
+    penPreviewEl.setAttribute("x2", penHover.x);
+    penPreviewEl.setAttribute("y2", penHover.y);
+  } else if (editLayer) {
+    penPreviewEl = el("line", { x1: last.x, y1: last.y,
+      x2: penHover.x, y2: penHover.y, class: "penDraft" }, editLayer);
+  }
+});
+/* pen tool: click-placed points, shift for 45°-constrained segments.
+   Placed points stay editable mid-draft: click selects (Delete removes,
+   right-click converts corner↔smooth or finishes the path). Smooth points
+   commit as curves — handles along the prev→next chord, same tangent rule
+   the node tool's smooth uses — so traced bowls come out round, not faceted. */
+let penDraft = null;      // [{x, y, smooth}]
+let penSel = null;        // selected draft point index
+let penHover = null;      // rubber-band cursor position
+let penPreviewEl = null;
+function penConstrain(p, from, shift) {
+  if (!shift || !from) return p;
+  const dx = p.x - from.x, dy = p.y - from.y;
+  const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const t = dx * c + dy * s;              // projection onto the snapped axis
+  return { x: from.x + t * c, y: from.y + t * s };
+}
+function penPathD(pts, closed) {
+  const n = pts.length;
+  const at = (i) => pts[(i + n) % n];
+  const tang = (i) => {
+    const a = closed ? at(i - 1) : pts[Math.max(0, i - 1)];
+    const b = closed ? at(i + 1) : pts[Math.min(n - 1, i + 1)];
+    const tx = b.x - a.x, ty = b.y - a.y;
+    const l = Math.hypot(tx, ty) || 1;
+    return { x: tx / l, y: ty / l };
+  };
+  let d = "M" + fmt(pts[0].x) + "," + fmt(pts[0].y);
+  const segCount = closed ? n : n - 1;
+  for (let i = 0; i < segCount; i++) {
+    const p0 = at(i), p1 = at(i + 1);
+    if (!p0.smooth && !p1.smooth) {
+      d += "L" + fmt(p1.x) + "," + fmt(p1.y);
+      continue;
+    }
+    const chord = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+    const t0 = tang(i), t1 = tang(i + 1);
+    const c1 = p0.smooth
+      ? [p0.x + t0.x * chord / 3, p0.y + t0.y * chord / 3] : [p0.x, p0.y];
+    const c2 = p1.smooth
+      ? [p1.x - t1.x * chord / 3, p1.y - t1.y * chord / 3] : [p1.x, p1.y];
+    d += "C" + [c1[0], c1[1], c2[0], c2[1], p1.x, p1.y].map(fmt).join(",");
+  }
+  return d + (closed ? "Z" : "");
+}
+function penDraftMenu(ev, i) {
+  const pt = penDraft[i];
+  showContextMenu(ev, [
+    { label: pt.smooth ? "Corner point" : "Smooth point",
+      run: () => { pt.smooth = !pt.smooth; renderEditLayer(); } },
+    { label: "Delete point", danger: true,
+      run: () => { penDraft.splice(i, 1); penSel = null; renderEditLayer(); } },
+    "-",
+    { label: "Finish (running stitch)", run: () => commitPen(false) },
+    { label: "Close (fill)", run: () => commitPen(true) },
+  ]);
+}
 function renderPenDraft() {
+  penPreviewEl = null;
   if (!penDraft || !penDraft.length) return;
-  const dd = "M" + penDraft.map(p => fmt(p[0]) + "," + fmt(p[1])).join(" L");
-  el("path", { d: dd, class: "penDraft" }, editLayer);
-  penDraft.forEach(([x, y], i) => el("circle", {
-    cx: x, cy: y, r: px(i === 0 ? 5.5 : 4),
-    class: "node" + (i === 0 ? " penFirst" : "") }, editLayer));
+  if (penDraft.length > 1)
+    el("path", { d: penPathD(penDraft, false), class: "penDraft" }, editLayer);
+  penDraft.forEach((p, i) => {
+    const c = el("circle", {
+      cx: p.x, cy: p.y, r: px(i === 0 ? 5.5 : (penSel === i ? 6 : 4)),
+      class: "node" + (i === 0 ? " penFirst" : "")
+                    + (penSel === i ? " nodeActive" : "") }, editLayer);
+    if (i > 0)
+      c.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        penSel = i;
+        renderEditLayer();
+        penDraftMenu(ev, i);
+      });
+  });
+  if (penHover) {
+    const last = penDraft[penDraft.length - 1];
+    penPreviewEl = el("line", { x1: last.x, y1: last.y,
+      x2: penHover.x, y2: penHover.y, class: "penDraft" }, editLayer);
+  }
 }
 async function commitPen(closed) {
   const pts = penDraft;
-  penDraft = null;
+  penDraft = null; penSel = null; penHover = null; penPreviewEl = null;
   if (!pts || pts.length < 2) { renderEditLayer(); return; }
-  const d = "M" + pts.map(p => fmt(p[0]) + "," + fmt(p[1])).join(" L")
-            + (closed ? " Z" : "");
+  const d = penPathD(pts, closed);
   renderEditLayer();
   try {
     const r = await postEdit([{ op: "add_element",
@@ -2698,11 +2796,20 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") {
     if (ctxMenu) { closeContextMenu(); return; }
     if ($("helpOverlay").classList.contains("show")) { helpClose(); return; }
-    if (penDraft) { penDraft = null; renderEditLayer(); return; }
+    if (penDraft) {
+      penDraft = null; penSel = null; penHover = null;
+      renderEditLayer(); return;
+    }
     setSelection([]);
   } else if (ev.key === "Enter" && penDraft) {
     ev.preventDefault();
     commitPen(false);
+  } else if ((ev.key === "Delete" || ev.key === "Backspace")
+             && penDraft && penSel != null) {
+    ev.preventDefault();
+    penDraft.splice(penSel, 1);
+    penSel = null;
+    renderEditLayer();
   } else if (!mod && k === "v") {
     setTool("select");
   } else if (!mod && k === "a" && !ev.shiftKey) {
@@ -2924,7 +3031,7 @@ function setTool(t) {
   $("toolPen").classList.toggle("on", t === "pen");
   activeRung = null;
   activeNode = null;
-  if (t !== "pen") penDraft = null;
+  if (t !== "pen") { penDraft = null; penSel = null; penHover = null; }
   canvas.style.cursor = t === "pen" ? "crosshair" : "";
   renderEditLayer();
 }
