@@ -242,7 +242,7 @@ def branch_to_rails(branch, radii, min_half_width: float = 1.0,
                 r = min((radii[q] for q in radii
                          if abs(q[0]-x) < 4 and abs(q[1]-y) < 4),
                         default=min_half_width)
-            ri.append(max(min_half_width, r))
+            ri.append(r)  # raw; taper truncation needs it — floored below
             target += step
         acc += seg
         i += 1
@@ -252,6 +252,23 @@ def branch_to_rails(branch, radii, min_half_width: float = 1.0,
     for _ in range(2):
         ri = [ri[0]] + [(ri[j-1] + 2*ri[j] + ri[j+1]) / 4
                         for j in range(1, len(ri)-1)] + [ri[-1]]
+    if not closed:
+        # where the shape genuinely tapers below stitchable width (a spiral
+        # tail narrowing to a point), END the column — flooring the radius
+        # there manufactures width the artwork doesn't have and the rails
+        # collapse into a pile of folds (user-visible garbage at the
+        # celtic C's tail)
+        lo = 0
+        hi = len(resampled)
+        while lo < hi - 2 and ri[lo] < 0.55 * min_half_width:
+            lo += 1
+        while hi > lo + 2 and ri[hi - 1] < 0.55 * min_half_width:
+            hi -= 1
+        resampled = resampled[lo:hi]
+        ri = ri[lo:hi]
+        if len(resampled) < 2:
+            return None
+    ri = [max(min_half_width, r) for r in ri]
     if not closed:
         # the medial axis stops one radius short of the true stroke end —
         # extend both ends along the tangent so the satin caps the terminal
@@ -327,12 +344,18 @@ def remove_folds(pts, max_span: int = 60, max_rounds: int = 20):
 
 
 def rails_to_satin_d(rail_a, rail_b, transform=None,
-                     rung_every: int = 4) -> str:
+                     rung_spacing: float = 0.0) -> str:
     """Satin path data: two rails + explicit rungs from paired samples.
 
     Rung pairing by construction (same skeleton sample) — the twist-free
     property the medial-axis approach buys.  transform maps source px →
     doc px, applied last.
+
+    rung_spacing is an ARC LENGTH along rail_a (pre-transform units);
+    rungs guide the engine's zigzag direction and a human fixing a column
+    drags them — a handful per column, not one per sample (index-spaced
+    rungs put hundreds of nodes on a spiral, measured unusable).  0 means
+    auto: ~8× the mean rail separation.
     """
     def tx(p):
         if transform is None:
@@ -340,12 +363,28 @@ def rails_to_satin_d(rail_a, rail_b, transform=None,
         a, b, c, d, e, f = transform
         return (a*p[0] + c*p[1] + e, b*p[0] + d*p[1] + f)
 
+    n = min(len(rail_a), len(rail_b))
+    if rung_spacing <= 0:
+        mean_sep = sum(math.hypot(rail_a[i][0]-rail_b[i][0],
+                                  rail_a[i][1]-rail_b[i][1])
+                       for i in range(n)) / max(1, n)
+        rung_spacing = max(8 * mean_sep, 1e-6)
+    idxs = []
+    acc = rung_spacing / 2   # first rung half a spacing in, not at the cap
+    dist = 0.0
+    for i in range(1, n - 1):
+        dist += math.hypot(rail_a[i][0]-rail_a[i-1][0],
+                           rail_a[i][1]-rail_a[i-1][1])
+        if dist >= acc:
+            idxs.append(i)
+            acc += rung_spacing
+    if not idxs:
+        idxs = [n // 2]
+
     A = [tx(p) for p in rail_a]
     B = [tx(p) for p in rail_b]
     parts = ["M " + " L ".join(f"{x:.2f},{y:.2f}" for x, y in A),
              "M " + " L ".join(f"{x:.2f},{y:.2f}" for x, y in B)]
-    n = min(len(A), len(B))
-    idxs = list(range(1, n - 1, rung_every)) or [n // 2]
     for i in idxs:
         (ax, ay), (bx, by) = A[i], B[i]
         dx, dy = bx - ax, by - ay

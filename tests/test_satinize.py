@@ -174,3 +174,44 @@ class TestTerminalCaps:
         # half-width short of them
         assert min(xs) <= 1.5, f"left terminal uncovered: min x {min(xs):.1f}"
         assert max(xs) >= 58.5, f"right terminal uncovered: max x {max(xs):.1f}"
+
+
+class TestRungDensity:
+    def test_rungs_spaced_by_arc_length(self):
+        from cli_anything_inkstitch.artifact.gate import flatten_path
+        from cli_anything_inkstitch.trace.satinize import rails_to_satin_d
+        rail_a = [(float(x), 0.0) for x in range(0, 101, 2)]
+        rail_b = [(float(x), 6.0) for x in range(0, 101, 2)]
+        d = rails_to_satin_d(rail_a, rail_b, rung_spacing=25.0)
+        subs = [flatten_path("M " + t) for t in d.split("M") if t.strip()]
+        rungs = subs[2:]
+        assert 3 <= len(rungs) <= 5, f"expected ~4 rungs on 100u rail, got {len(rungs)}"
+
+    def test_auto_spacing_is_sparse(self):
+        from cli_anything_inkstitch.artifact.gate import flatten_path
+        from cli_anything_inkstitch.trace.satinize import rails_to_satin_d
+        rail_a = [(float(x), 0.0) for x in range(0, 101, 2)]
+        rail_b = [(float(x), 6.0) for x in range(0, 101, 2)]
+        d = rails_to_satin_d(rail_a, rail_b)
+        rungs = [t for t in d.split("M") if t.strip()][2:]
+        # auto = ~8x separation (6u) -> ~2 rungs, never one per sample
+        assert len(rungs) < 10
+
+
+class TestTaperTruncation:
+    def test_tail_below_stitchable_width_is_cut(self):
+        from cli_anything_inkstitch.trace.satinize import satinize_mask
+        # bar whose last third is a single-pixel hairline (radius 1.0,
+        # far below the 3.0 stitchable half-width)
+        mask = set()
+        for x in range(60):
+            for y in range(-5, 6):
+                mask.add((x, y))
+        for x in range(60, 90):
+            mask.add((x, 0))
+        pairs = satinize_mask(mask, min_half_width=3.0)
+        rail_a, rail_b, _ = max(pairs, key=lambda p: len(p[0]))
+        max_x = max(p[0] for p in rail_a + rail_b)
+        # the hairline must be cut, not floored into a manufactured-width
+        # pile (the celtic C's tail failure)
+        assert max_x < 80, f"hairline tail not truncated (max x {max_x:.0f})"
