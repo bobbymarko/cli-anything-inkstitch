@@ -90,6 +90,103 @@ def font():
     """Create and manage Inkstitch embroidery fonts."""
 
 
+@font.command("fonts")
+@click.pass_context
+def font_fonts(ctx):
+    """List fonts shipped with the installed Ink/Stitch binary."""
+    from cli_anything_inkstitch.binary import discover
+    from cli_anything_inkstitch.embroidery.lettering import list_fonts
+    binary = discover(ctx.obj.get("binary_override"))
+    fonts = list_fonts(binary)
+    emit(ctx, {"fonts": fonts, "count": len(fonts)})
+
+
+@font.command("compose")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--font", "font_ref", required=True,
+              help="Shipped font name (see `font fonts`) or a font directory.")
+@click.option("--text", required=True, help="Text to place; \\n = new line.")
+@click.option("--height-mm", type=float, default=None,
+              help="Target letter height; scales geometry only — satin "
+                   "params stay physical mm, which is why fonts carry "
+                   "min/max scale limits (violations become warnings).")
+@click.option("--at-mm", default=None,
+              help="Baseline start 'x,y' in mm (default 10,10).")
+@click.option("--tracking-em", type=float, default=0.1, show_default=True,
+              help="Extra advance between letters when the font has no "
+                   "per-glyph advance table.")
+@click.pass_context
+def font_compose(ctx, project_path, font_ref, text, height_mm, at_mm,
+                 tracking_em):
+    """Compose text from a pre-digitized Ink/Stitch font into the design.
+
+    Glyphs are finished satin/stroke elements — this is layout, not
+    digitization (readers: lib/lettering/font_variant.py GlyphLayer-*,
+    glyph.py baseline guide, font.json metrics). Elements land in one
+    labeled group, fully editable in the artifact editor like anything
+    else.
+    """
+    from cli_anything_inkstitch.binary import discover
+    from cli_anything_inkstitch.commands._helpers import open_project
+    from cli_anything_inkstitch.embroidery.lettering import (
+        PX_PER_MM,
+        compose,
+        load_font,
+        resolve_font,
+    )
+    from cli_anything_inkstitch.history import (
+        document_replace,
+        make_entry,
+        push,
+    )
+    binary = discover(ctx.obj.get("binary_override"))
+    fdir = resolve_font(font_ref, binary)
+    fobj = load_font(fdir)
+    if not fobj.glyphs:
+        raise UserError(f"{fdir} has no glyph layers")
+    text = text.replace("\\n", "\n")
+    if at_mm:
+        try:
+            ax, ay = (float(v) for v in at_mm.split(","))
+        except ValueError as exc:
+            raise UserError("--at-mm must be 'x,y' in mm") from exc
+    else:
+        ax = ay = 10.0
+    placement = compose(fobj, text, height_mm=height_mm,
+                        at_px=(ax * PX_PER_MM, ay * PX_PER_MM),
+                        tracking_em=tracking_em)
+    if not placement.elements:
+        raise UserError("nothing to place — no glyph in this font matched")
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
+        root = tree.getroot()
+        before_xml = etree.tostring(root).decode("utf-8")
+        group = etree.SubElement(root, f"{{{SVG_NS}}}g")
+        gid = "lettering_" + secrets.token_hex(3)
+        group.set("id", gid)
+        group.set(f"{{{INKSCAPE_NS}}}label",
+                  f"lettering: {text[:24]}" + ("…" if len(text) > 24 else ""))
+        ids = []
+        for el in placement.elements:
+            eid = "let_" + secrets.token_hex(3)
+            el.set("id", eid)
+            ids.append(eid)
+            group.append(el)
+        push(proj.history, make_entry(
+            command=f"font compose --font {font_ref} --text {text[:32]!r}",
+            patch=document_replace(
+                before_xml, etree.tostring(root).decode("utf-8"))))
+        payload = {"group": gid, "elements": len(ids),
+                   "font": fobj.name,
+                   "width_mm": round(placement.width_px / PX_PER_MM, 2),
+                   "warnings": placement.warnings}
+        if fobj.meta.get("auto_satin"):
+            payload["note"] = ("this font expects routing: run "
+                               f"`tools auto-satin --ids {','.join(ids[:1])},…`"
+                               " over the group's elements for engine-order "
+                               "stitching")
+        emit(ctx, payload)
+
+
 @font.command("init")
 @click.option("--name", required=True, help="Human-readable font name.")
 @click.option("--dir", "font_dir", required=True, type=click.Path(),

@@ -247,6 +247,8 @@ Create, import, calibrate, and validate Inkstitch-compatible embroidery font pac
 
 | Command | Description |
 |---------|-------------|
+| `fonts` | List the 140 fonts shipped with the installed Ink/Stitch binary (name, mm size, glyph count, scale range) |
+| `compose` | Compose text from a pre-digitized Ink/Stitch font into the design as one labeled group of finished satin/stroke elements — layout, not digitization (kerning, per-glyph advances, leading, baseline guide all honored; handles the shipped .xz-compressed fonts). `--font <shipped-name or dir>`, `--text` (\\n = newline), `--height-mm` (scales GEOMETRY only — satin params are physical mm, which is why fonts carry min/max scale limits; violations become warnings), `--at-mm x,y` baseline start. Fonts flagged auto_satin want `tools auto-satin` over the group afterward (the payload says so). |
 | `init` | Create a blank font directory (SVG skeleton + `font.json`) |
 | `import` | Import per-letter embroidery files into a complete font package. Key options: `--bx-file` for Embrilliance BX baseline extraction; `--baseline-method bbox-bottom\|last-stitch\|reference-letter`; `--script` for connecting script fonts; `--advance-padding` for extra spacing. |
 | `set-baseline` | Per-glyph vertical shift correction (`--char`, `--shift-mm`). Positive = up. Cumulative; stored in `font.json["baseline_overrides"]`. |
