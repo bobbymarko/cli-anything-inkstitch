@@ -368,6 +368,53 @@ def fill_to_satin_cmd(ctx, project_path, ids_csv, pull_compensation_mm):
     })
 
 
+@tools.command("density-map")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--cell-mm", type=float, default=0.5, show_default=True)
+@click.option("--warn", type=float, default=20.0, show_default=True,
+              help="Penetrations/mm² that flag a warning region.")
+@click.option("--error", "error_", type=float, default=35.0, show_default=True,
+              help="Penetrations/mm² where needles cut fabric (the validated "
+                   "celtic sew-out peaked at 32 and stitched clean).")
+@click.option("--out", "out_path", type=click.Path(), default=None,
+              help="Heatmap PNG path (default: <svg dir>/density-map.png).")
+@click.pass_context
+def density_map(ctx, project_path, cell_mm, warn, error_, out_path):
+    """Needle-penetration density from the ENGINE's stitch plan.
+
+    Every stacked layer counts — this measures what the machine sews, not
+    what the vectors imply. Requires the Ink/Stitch binary.
+    """
+    from pathlib import Path as _Path
+
+    from cli_anything_inkstitch.artifact.design_model import stitch_sequence
+    from cli_anything_inkstitch.embroidery.density import (
+        density_grid,
+        hotspots,
+        render_heatmap,
+    )
+    from cli_anything_inkstitch.commands._helpers import get_project_path
+    proj_file = get_project_path(ctx, project_path)
+    seq = stitch_sequence(proj_file,
+                          binary_override=ctx.obj.get("binary_override"))
+    points = [p for block in seq["blocks"] for path in block["paths"]
+              for p in path]
+    grid = density_grid(points, cell_mm=cell_mm)
+    if grid is None:
+        emit(ctx, {"error": "no stitches in plan"})
+        return
+    spots = hotspots(grid, warn=warn, error=error_)
+    if out_path is None:
+        from cli_anything_inkstitch.project import ProjectFile
+        proj = ProjectFile.load(proj_file)
+        out_path = str(_Path(proj.svg_path).parent / "density-map.png")
+    render_heatmap(grid, out_path, warn=warn, error=error_)
+    emit(ctx, {"peak_per_mm2": round(grid.peak(), 1),
+               "cell_mm": cell_mm, "hotspots": spots,
+               "heatmap": out_path,
+               "total_stitches": seq["total_stitches"]})
+
+
 @tools.command("optimize-trims")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--min-jump-mm", type=float, default=2.0, show_default=True,

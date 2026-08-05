@@ -504,6 +504,14 @@
           <path d="M1.5 5.8 H14.5 M1.5 10.2 H14.5 M5.8 1.5 V14.5 M10.2 1.5 V14.5"/>
         </svg>
       </button>
+      <button class="tool" id="toggleDensity" type="button"
+              title="Stitch density heat overlay (needle penetrations/mm²)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+          <path d="M8 14 C4 11 2.5 8.5 2.5 6.2 A3 3 0 0 1 8 4.6
+                   A3 3 0 0 1 13.5 6.2 C13.5 8.5 12 11 8 14 Z"/>
+        </svg>
+      </button>
     </div>
     <div id="timelineBar">
       <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
@@ -960,7 +968,8 @@ async function postFeedback(payload) {
 /* ---------- tier-2 overlay (debounced, coalescing) ---------- */
 let tier2Timer = null;
 function scheduleTier2() {
-  if (!planOn) { stitchData = null; return; }   // stale after edits; refetch on mode switch
+  // the density overlay needs the plan in ANY view mode — outline included
+  if (!planOn && !densityOn) { stitchData = null; return; }   // stale after edits
   clearTimeout(tier2Timer);
   tier2Timer = setTimeout(fetchTier2, 600);
 }
@@ -1000,6 +1009,7 @@ async function fetchTier2() {
     stopTimelinePlay();
     updateTimelineLabel();
     renderPlanLayer();
+    renderDensity();                   // heat overlay tracks the fresh plan
     renderOverview();                  // stitch count + block colors just landed
   } catch (e) {
     if (gen === tier2Gen) showToast("stitch plan: server unreachable", true);
@@ -1475,6 +1485,66 @@ $("toggleGrid").onclick = () => {
   $("toggleGrid").classList.toggle("on", gridOn);
   renderGrid();
 };
+/* density heat overlay: needle penetrations per mm², binned at 0.5mm from
+   the ENGINE's stitch plan (stitchData vertices = penetrations — what the
+   machine sews, not what the vectors imply). Same ramp/thresholds as
+   `tools density-map`: green comfortable, yellow ≥20/mm², red ≥35/mm²
+   (calibrated against the celtic sew-out, which peaked at 32 and
+   stitched clean — rail edges concentrate penetrations, so hot CELLS
+   are normal; hot AREAS are what to look at). */
+let densityOn = false;
+$("toggleDensity").onclick = () => {
+  densityOn = !densityOn;
+  $("toggleDensity").classList.toggle("on", densityOn);
+  if (densityOn && !stitchData) scheduleTier2();
+  renderDensity();
+};
+function renderDensity() {
+  if (!densityLayer) return;
+  densityLayer.textContent = "";
+  if (!densityOn || !stitchData) return;
+  const CELL = 0.5 * 96 / 25.4;            // 0.5mm in px
+  const WARN = 20 * 0.25, ERROR = 35 * 0.25; // per-cell counts (d * cell²)
+  const pts = [];
+  for (const block of stitchData.blocks)
+    for (const path of block.paths)
+      for (const p of path) pts.push(p);
+  if (!pts.length) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of pts) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  const cols = Math.floor((x1 - x0) / CELL) + 1;
+  const rows = Math.floor((y1 - y0) / CELL) + 1;
+  if (cols * rows > 4e6) return;           // absurd zoom-independent guard
+  const counts = new Uint16Array(cols * rows);
+  for (const [x, y] of pts)
+    counts[Math.floor((y - y0) / CELL) * cols + Math.floor((x - x0) / CELL)]++;
+  const cv = document.createElement("canvas");
+  cv.width = cols; cv.height = rows;
+  const g = cv.getContext("2d");
+  const im = g.createImageData(cols, rows);
+  for (let i = 0; i < counts.length; i++) {
+    const n = counts[i];
+    if (!n) continue;
+    const o = i * 4;
+    if (n >= ERROR) { im.data[o] = 220; im.data[o+1] = 30; im.data[o+2] = 30; im.data[o+3] = 230; }
+    else if (n >= WARN) {
+      const f = (n - WARN) / Math.max(ERROR - WARN, 1e-9);
+      im.data[o] = 230; im.data[o+1] = 200 - 140 * f; im.data[o+2] = 30; im.data[o+3] = 210;
+    } else {
+      const f = n / ERROR;
+      im.data[o] = 60 + 170 * f; im.data[o+1] = 200; im.data[o+2] = 60;
+      im.data[o+3] = 60 + 120 * f;
+    }
+  }
+  g.putImageData(im, 0, 0);
+  el("image", { href: cv.toDataURL(), x: x0, y: y0,
+    width: cols * CELL, height: rows * CELL, opacity: 0.65,
+    "pointer-events": "none",
+    style: "image-rendering:pixelated" }, densityLayer);
+}
 window.addEventListener("resize", () => { preserveScaleOnResize(); drawRulers(); renderGrid(); });
 /* the canvas box changes when sidebars resize/collapse or the window
    resizes — hold the ART's on-screen scale constant by growing/shrinking
@@ -1796,7 +1866,7 @@ function el(tag, attrs, parent) {
   if (parent) parent.appendChild(e);
   return e;
 }
-let artworkLayer, planLayer, editLayer, refLayer;
+let artworkLayer, planLayer, editLayer, refLayer, densityLayer;
 // editor-local canvas visibility (Layers panel eye toggles). Deliberately NOT
 // persisted anywhere: hiding is a tracing aid, and the design must stitch
 // identically whether or not something is hidden on screen.
@@ -1813,11 +1883,13 @@ function renderAll() {
   refLayer = el("g", {}, canvas);   // reference art under the design, over grid
   artworkLayer = el("g", { class: "artwork" }, canvas);
   planLayer = el("g", { class: "planLayer" }, canvas);
+  densityLayer = el("g", {}, canvas);   // heat overlay above plan, below guides
   guideLayer = el("g", {}, canvas);
   editLayer = el("g", {}, canvas);
   renderPlanLayer();
   renderGrid();
   renderReference();
+  renderDensity();
   renderGuides();
   drawRulers();
   for (const o of design.objects) {
