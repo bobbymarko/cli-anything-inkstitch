@@ -2936,8 +2936,8 @@ function connectSSE() {
   es.onerror = () => { es.close(); setTimeout(connectSSE, 2000); };
 }
 
-/* ---------- right panel stack (Overview / Inspect / Layers / Colors / History) ---------- */
-for (const pnl of ["overview", "inspect", "layers", "colors", "history"]) {
+/* ---------- right panel stack (Overview / Inspect / Layers / Colors / Reference / History) ---------- */
+for (const pnl of ["overview", "inspect", "layers", "colors", "reference", "history"]) {
   const root = document.querySelector(`[data-panel="${pnl}"]`);
   root.querySelector(".panelHead").addEventListener("click", () => {
     root.classList.toggle("closed");
