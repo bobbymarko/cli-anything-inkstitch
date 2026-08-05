@@ -798,36 +798,73 @@ function dragBezHandle(segs, ai, end, dx, dy, broken) {
 }
 /* smooth anchor `ai` (double-click): straight neighbours upgrade L→C and
    both handles align to the Catmull-Rom tangent (direction prev→next
-   anchor, length ⅓ of each chord) — pulls editable handles out of corners */
+   anchor, length ⅓ of each chord) — pulls editable handles out of corners.
+   Endpoints smooth too: on a closed subpath the neighbour wraps around the
+   closure (keeping the duplicated closing anchor in sync); on an open rail
+   the end gets a one-sided handle along its chord — engine satin rails are
+   open polylines, and their end nodes used to be the one place where
+   double-click silently did nothing. */
 function smoothAnchor(segs, ai) {
   const as = anchors(segs);
   const a = as[ai];
   if (!a) return false;
-  const seg = segs[a.si], next = segs[a.si + 1];
-  const start = segStart(segs, a.si);
-  const prevPt = { x: start[0], y: start[1] };
+  const r = subpathRanges(segs).find(rr => a.si >= rr.start && a.si <= rr.end);
+  const sub = as.filter(x => x.si >= r.start && x.si <= r.end);
+  if (sub.length < 2) return false;
+  const firstA = sub[0], lastA = sub[sub.length - 1];
+  const closed = sub.length > 2 &&
+    Math.hypot(firstA.x - lastA.x, firstA.y - lastA.y) < 1e-6;
+  if (a.si === lastA.si && closed && a.si !== firstA.si)
+    return smoothAnchor(segs, as.indexOf(firstA));   // same point — smooth once
+
+  const seg = segs[a.si];
+  const next = (a.si < r.end) ? segs[a.si + 1] : null;
   const nextPt = (next && (next.c === "L" || next.c === "C"))
     ? { x: next.p[next.p.length - 2], y: next.p[next.p.length - 1] } : null;
-  if (seg.c === "M" || (!nextPt && seg.c !== "C")) return false;
-  let tx = nextPt ? nextPt.x - prevPt.x : a.x - prevPt.x;
-  let ty = nextPt ? nextPt.y - prevPt.y : a.y - prevPt.y;
+  let prevPt = null;
+  let inAi = ai;                 // anchor whose "in" handle carries this joint
+  if (seg.c !== "M") {
+    const s = segStart(segs, a.si);
+    prevPt = { x: s[0], y: s[1] };
+  } else if (closed) {
+    // wrap around the closure: the incoming side lives on the last segment
+    const prevA = sub[sub.length - 2];
+    prevPt = { x: prevA.x, y: prevA.y };
+    inAi = as.indexOf(lastA);
+  }
+  if (!prevPt && !nextPt) return false;
+
+  // through-tangent when both neighbours exist, chord direction at open ends
+  let tx = nextPt ? nextPt.x - (prevPt ? prevPt.x : a.x)
+                  : a.x - prevPt.x;
+  let ty = nextPt ? nextPt.y - (prevPt ? prevPt.y : a.y)
+                  : a.y - prevPt.y;
   const tl = Math.hypot(tx, ty) || 1;
   tx /= tl; ty /= tl;
-  if (seg.c === "L") {
-    const c1 = [prevPt.x + (a.x - prevPt.x) / 3, prevPt.y + (a.y - prevPt.y) / 3];
-    segs[a.si] = { c: "C", p: [...c1, a.x, a.y, a.x, a.y] };
-  }
-  const inLen = Math.hypot(a.x - prevPt.x, a.y - prevPt.y) / 3;
-  setBezHandle(segs, ai, "in", a.x - tx * inLen, a.y - ty * inLen);
-  if (next && next.c === "L") {
-    const c2 = [nextPt.x - (nextPt.x - a.x) / 3, nextPt.y - (nextPt.y - a.y) / 3];
-    segs[a.si + 1] = { c: "C", p: [a.x, a.y, ...c2, nextPt.x, nextPt.y] };
+
+  let changed = false;
+  if (prevPt) {
+    const inSi = as[inAi].si;
+    if (segs[inSi].c === "L") {
+      const c1 = [prevPt.x + (a.x - prevPt.x) / 3, prevPt.y + (a.y - prevPt.y) / 3];
+      segs[inSi] = { c: "C", p: [...c1, a.x, a.y, a.x, a.y] };
+    }
+    if (segs[inSi].c === "C") {
+      const inLen = Math.hypot(a.x - prevPt.x, a.y - prevPt.y) / 3;
+      setBezHandle(segs, inAi, "in", a.x - tx * inLen, a.y - ty * inLen);
+      changed = true;
+    }
   }
   if (nextPt) {
+    if (next.c === "L") {
+      const c2 = [nextPt.x - (nextPt.x - a.x) / 3, nextPt.y - (nextPt.y - a.y) / 3];
+      segs[a.si + 1] = { c: "C", p: [a.x, a.y, ...c2, nextPt.x, nextPt.y] };
+    }
     const outLen = Math.hypot(nextPt.x - a.x, nextPt.y - a.y) / 3;
     setBezHandle(segs, ai, "out", a.x + tx * outLen, a.y + ty * outLen);
+    changed = true;
   }
-  return true;
+  return changed;
 }
 /* retract anchor `ai`'s handles (alt-double-click): collapse both control
    points onto the anchor — a sharp corner, segments stay cubic */
