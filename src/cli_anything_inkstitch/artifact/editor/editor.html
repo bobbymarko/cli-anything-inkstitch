@@ -1852,9 +1852,14 @@ function renderAll() {
     el("path", { d: displayD, fill: displayFill || "none",
       "fill-rule": "evenodd",
       stroke: displayStroke || "none", "stroke-width": .4, ...tAttr }, artworkLayer);
+    // stroke-only elements (running stitches) have no fill area to grab —
+    // their whole click target is the invisible hit stroke, so give them a
+    // wider band than filled shapes (inline style: the class rule would
+    // otherwise win). Still screen-px via non-scaling-stroke.
     const hit = el("path", { d: displayD, class: "obj-hit",
       "fill-rule": "evenodd",
-      fill: displayFill ? "rgba(0,0,0,0)" : "none", ...tAttr }, artworkLayer);
+      fill: displayFill ? "rgba(0,0,0,0)" : "none",
+      ...(displayFill ? {} : { style: "stroke-width:14" }), ...tAttr }, artworkLayer);
     hit.addEventListener("pointerdown", (ev) => {
       if (spaceHeld) return;                      // hand tool wins
       ev.stopPropagation();
