@@ -215,3 +215,45 @@ class TestTaperTruncation:
         # the hairline must be cut, not floored into a manufactured-width
         # pile (the celtic C's tail failure)
         assert max_x < 80, f"hairline tail not truncated (max x {max_x:.0f})"
+
+
+class TestBranchMerging:
+    def test_straight_through_spur_junction_merges(self):
+        from cli_anything_inkstitch.trace.satinize import merge_collinear_branches
+        # a long horizontal path broken at a junction + a perpendicular spur
+        left = [(x, 0) for x in range(0, 31)]
+        right = [(x, 0) for x in range(30, 61)]
+        spur = [(30, y) for y in range(0, 8)]
+        merged = merge_collinear_branches([left, right, spur])
+        lengths = sorted(len(b) for b in merged)
+        assert len(merged) == 2, f"expected through-merge, got {len(merged)}"
+        assert lengths[-1] >= 60, "through-path was not spliced"
+
+    def test_right_angle_stays_separate(self):
+        from cli_anything_inkstitch.trace.satinize import merge_collinear_branches
+        horiz = [(x, 0) for x in range(0, 31)]
+        vert = [(30, y) for y in range(0, 31)]
+        merged = merge_collinear_branches([horiz, vert])
+        assert len(merged) == 2, "L-corner must not merge into one column"
+
+
+class TestRadialRungs:
+    def test_rungs_radial_on_concentric_arcs(self):
+        import math
+        from cli_anything_inkstitch.artifact.gate import flatten_path
+        from cli_anything_inkstitch.trace.satinize import rails_to_satin_d
+        outer = [(50 * math.cos(a), 50 * math.sin(a))
+                 for a in [i * math.pi / 60 for i in range(61)]]
+        inner = [(38 * math.cos(a), 38 * math.sin(a))
+                 for a in [i * math.pi / 60 for i in range(61)]]
+        d = rails_to_satin_d(outer, inner, rung_spacing=30.0)
+        rungs = [flatten_path("M " + t) for t in d.split("M") if t.strip()][2:]
+        assert len(rungs) >= 3   # curvature adds rungs beyond arc spacing
+        for r in rungs:
+            (x1, y1), (x2, y2) = r[0], r[-1]
+            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            radial = math.atan2(my, mx)
+            rung_ang = math.atan2(y2 - y1, x2 - x1)
+            diff = abs((rung_ang - radial + math.pi/2) % math.pi - math.pi/2)
+            assert diff < math.radians(12), \
+                f"rung leans {math.degrees(diff):.0f}° off radial"

@@ -197,6 +197,60 @@ def extract_branches(skel: set[tuple[int, int]],
     return kept
 
 
+def _end_tangent(branch, at_start: bool, span: int = 6):
+    """Unit direction pointing OUT of the branch at one end."""
+    if at_start:
+        a, b = branch[min(span, len(branch) - 1)], branch[0]
+    else:
+        a, b = branch[max(0, len(branch) - 1 - span)], branch[-1]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L = math.hypot(dx, dy) or 1.0
+    return dx / L, dy / L
+
+
+def merge_collinear_branches(branches, angle_dot: float = -0.75):
+    """Join branch pairs that continue straight through a junction.
+
+    A skeleton junction breaks the ribbon it sits on: a smooth spiral
+    crossed by a spur becomes fragments whose columns lie at arbitrary
+    angles (user-visible "random shapes" on the celtic J).  Where two
+    branch ends meet and their outward tangents oppose (dot < angle_dot),
+    they are one stroke and get spliced back together.  Side branches at
+    real corners (L joints, T crossbars) don't oppose and stay separate.
+    """
+    branches = [list(b) for b in branches]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(branches)):
+            if merged:
+                break
+            for j in range(len(branches)):
+                if i == j:
+                    continue
+                bi, bj = branches[i], branches[j]
+                if bi[0] == bi[-1] or bj[0] == bj[-1]:
+                    continue  # closed loops don't merge
+                for i_end, j_end in ((-1, 0), (-1, -1), (0, 0), (0, -1)):
+                    pi = bi[i_end]
+                    pj = bj[j_end]
+                    if abs(pi[0] - pj[0]) > 2 or abs(pi[1] - pj[1]) > 2:
+                        continue
+                    ti = _end_tangent(bi, at_start=(i_end == 0))
+                    tj = _end_tangent(bj, at_start=(j_end == 0))
+                    if ti[0]*tj[0] + ti[1]*tj[1] > angle_dot:
+                        continue
+                    a = bi if i_end == -1 else bi[::-1]
+                    b = bj if j_end == 0 else bj[::-1]
+                    branches[i] = a + b
+                    del branches[j]
+                    merged = True
+                    break
+                if merged:
+                    break
+    return branches
+
+
 def _smooth(pts, passes=2):
     for _ in range(passes):
         out = [pts[0]]
@@ -369,24 +423,65 @@ def rails_to_satin_d(rail_a, rail_b, transform=None,
                                   rail_a[i][1]-rail_b[i][1])
                        for i in range(n)) / max(1, n)
         rung_spacing = max(8 * mean_sep, 1e-6)
-    idxs = []
-    acc = rung_spacing / 2   # first rung half a spacing in, not at the cap
-    dist = 0.0
-    for i in range(1, n - 1):
-        dist += math.hypot(rail_a[i][0]-rail_a[i-1][0],
-                           rail_a[i][1]-rail_a[i-1][1])
-        if dist >= acc:
-            idxs.append(i)
-            acc += rung_spacing
-    if not idxs:
-        idxs = [n // 2]
+
+    def arc_point(rail, t):
+        """Point at arc fraction t along a polyline."""
+        total = sum(math.hypot(rail[i+1][0]-rail[i][0],
+                               rail[i+1][1]-rail[i][1])
+                    for i in range(len(rail) - 1))
+        target = t * total
+        acc = 0.0
+        for i in range(len(rail) - 1):
+            seg = math.hypot(rail[i+1][0]-rail[i][0], rail[i+1][1]-rail[i][1])
+            if acc + seg >= target and seg > 0:
+                u = (target - acc) / seg
+                return (rail[i][0] + (rail[i+1][0]-rail[i][0]) * u,
+                        rail[i][1] + (rail[i+1][1]-rail[i][1]) * u)
+            acc += seg
+        return rail[-1]
+
+    # rung fractions: pairing by equal ARC FRACTION keeps rungs radial on
+    # concentric curves — index pairing leaned the zigzag over on spirals
+    # (the inner rail is shorter).  Placement is curvature-adaptive: a new
+    # rung whenever the arc budget runs out OR the rail direction has
+    # turned ~15° since the last one, so tight curls get the guidance the
+    # engine needs to keep stitches perpendicular.
+    fractions = []
+    total_a = sum(math.hypot(rail_a[i+1][0]-rail_a[i][0],
+                             rail_a[i+1][1]-rail_a[i][1])
+                  for i in range(len(rail_a) - 1))
+    arc = 0.0
+    arc_since = rung_spacing / 2
+    turn_since = 0.0
+    prev_dir = None
+    for i in range(1, len(rail_a)):
+        seg = math.hypot(rail_a[i][0]-rail_a[i-1][0],
+                         rail_a[i][1]-rail_a[i-1][1])
+        if seg <= 0:
+            continue
+        d = ((rail_a[i][0]-rail_a[i-1][0]) / seg,
+             (rail_a[i][1]-rail_a[i-1][1]) / seg)
+        if prev_dir is not None:
+            dot = max(-1.0, min(1.0, d[0]*prev_dir[0] + d[1]*prev_dir[1]))
+            turn_since += math.degrees(math.acos(dot))
+        prev_dir = d
+        arc += seg
+        arc_since += seg
+        near_end = arc > total_a - rung_spacing / 3
+        if not near_end and (arc_since >= rung_spacing or turn_since >= 15.0):
+            fractions.append(arc / total_a)
+            arc_since = 0.0
+            turn_since = 0.0
+    if not fractions:
+        fractions = [0.5]
 
     A = [tx(p) for p in rail_a]
     B = [tx(p) for p in rail_b]
     parts = ["M " + " L ".join(f"{x:.2f},{y:.2f}" for x, y in A),
              "M " + " L ".join(f"{x:.2f},{y:.2f}" for x, y in B)]
-    for i in idxs:
-        (ax, ay), (bx, by) = A[i], B[i]
+    for t in fractions:
+        ax, ay = tx(arc_point(rail_a, t))
+        bx, by = tx(arc_point(rail_b, t))
         dx, dy = bx - ax, by - ay
         parts.append(f"M {ax - dx*0.15:.2f},{ay - dy*0.15:.2f} "
                      f"L {bx + dx*0.15:.2f},{by + dy*0.15:.2f}")
@@ -410,7 +505,9 @@ def satinize_mask(mask: set[tuple[int, int]], min_half_width: float = 1.0,
     radii = distance_transform(mask)
     skel_radii = {p: radii.get(p, 1.0) for p in skel}
     out = []
-    for branch in extract_branches(skel, skel_radii, min_spur_factor):
+    branches = merge_collinear_branches(
+        extract_branches(skel, skel_radii, min_spur_factor))
+    for branch in branches:
         # a column shorter than it is wide is a bartack, not a satin —
         # junction fragments this small are already covered by their
         # neighbors' terminal caps (273 columns collapsed to ~90 on the
