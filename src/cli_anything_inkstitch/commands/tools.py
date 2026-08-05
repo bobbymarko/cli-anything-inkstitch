@@ -74,6 +74,56 @@ def _run_tool(ctx, project_path, extension_name, ids, args, *, pre_process=None)
 _SATIN_PRODUCERS = {"auto_satin", "stroke_to_satin", "fill_to_satin"}
 
 
+def _normalize_new_satins(extension_name: str, new_tree) -> int:
+    """Give engine-emitted satins an id and attribute paints.
+
+    fill_to_satin emits satin columns with NO id and their colors buried
+    in a style attribute (measured on v3.3.0; the celtic v9 build fixed
+    this by hand and the lesson was nearly lost: the artifact editor's
+    design payload SKIPS id-less elements, so the satin exists, stitches,
+    and exports — but is invisible and uneditable in the editor). Assign
+    fsat_N ids and lift stroke/fill out of style (style wins the SVG
+    cascade, so the stale declarations must go).
+    """
+    if extension_name not in _SATIN_PRODUCERS:
+        return 0
+    import re as _re
+    ink_sat = "{http://inkstitch.org/namespace}satin_column"
+    root = new_tree.getroot()
+    taken = {e.get("id") for e in root.iter() if e.get("id")}
+    n = 0
+    fixed = 0
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        if (el.get(ink_sat) or "").lower() != "true":
+            continue
+        changed = False
+        if not el.get("id"):
+            while True:
+                n += 1
+                if f"fsat_{n}" not in taken:
+                    break
+            el.set("id", f"fsat_{n}")
+            taken.add(f"fsat_{n}")
+            changed = True
+        style = el.get("style") or ""
+        for prop in ("stroke", "fill"):
+            m = _re.search(rf"(?:^|;)\s*{prop}\s*:\s*([^;]+)", style)
+            if m and not el.get(prop):
+                el.set(prop, m.group(1).strip())
+                changed = True
+        if changed and style:
+            kept = [s for s in style.split(";") if s.strip()
+                    and not s.strip().startswith(("stroke:", "fill:"))]
+            if kept:
+                el.set("style", ";".join(kept))
+            else:
+                el.attrib.pop("style", None)
+        fixed += 1 if changed else 0
+    return fixed
+
+
 def _simplify_new_satin_rails(extension_name: str, before_xml: str,
                               new_tree) -> dict | None:
     """RDP-simplify rails of satins the tool created or rewrote.
@@ -186,6 +236,35 @@ def run_tool_core(ctx, project_path, extension_name, ids, args, *,
                     etree.fromstring(before_xml.encode("utf-8")))
                 save_svg(restored, proj.svg_path)
             raise
+        # fill_to_satin fails SILENT when rungs mis-section a fill: it
+        # consumes the fill and its rungs and emits NOTHING (measured on an
+        # arc-band whose rungs came from degenerate geometry). Refuse to
+        # save a document that lost the selection without gaining a satin.
+        if extension_name == "fill_to_satin":
+            ink_sat = "{http://inkstitch.org/namespace}satin_column"
+
+            def _satins(node):
+                return sum(1 for e in node.iter()
+                           if isinstance(e.tag, str)
+                           and (e.get(ink_sat) or "").lower() == "true")
+
+            before_sats = _satins(etree.fromstring(before_xml.encode("utf-8")))
+            if _satins(new_tree.getroot()) <= before_sats:
+                if extra_payload:
+                    restored = etree.ElementTree(
+                        etree.fromstring(before_xml.encode("utf-8")))
+                    save_svg(restored, proj.svg_path)
+                raise UserError(
+                    "fill_to_satin consumed the selection without emitting "
+                    "a satin — the rungs did not section the fill (each "
+                    "rung must cross the fill boundary exactly twice and "
+                    "the sections must chain). Nothing was changed; check "
+                    "the rung placement and retry.")
+        # engine satins arrive id-less with style-buried colors — normalize
+        # so the editor can see them (details on _normalize_new_satins)
+        normalized = _normalize_new_satins(extension_name, new_tree)
+        if normalized:
+            extra_payload["normalized_satins"] = normalized
         # node economy: engine satin output samples its rails from the input
         # density — simplify NEW/CHANGED satin rails before they enter the
         # document (helper contract + reader citation: trace/satinize.py
@@ -361,11 +440,26 @@ def fill_to_satin_cmd(ctx, project_path, ids_csv, pull_compensation_mm):
     pattern. Output rails are RDP-simplified (_simplify_new_satin_rails).
     """
     ids = [s.strip() for s in ids_csv.split(",") if s.strip()]
+
+    # the compiled engine reports unrunged fills with a GUI DIALOG on the
+    # user's desktop — invisible to this process — then skips them. Refuse
+    # the selection here so the dialog can never fire.
+    def _pre(tree, ids_in):
+        from cli_anything_inkstitch.trace.rungs import unrunged_fills
+        bad = unrunged_fills(tree, ids_in)
+        if bad:
+            raise UserError(
+                "these fills have no selected rung crossing them: "
+                + ", ".join(bad)
+                + " — the engine would pop a GUI dialog and skip them. "
+                "Add/select crossing rungs (tools suggest-rungs) and retry.")
+        return ids_in, {}
+
     _run_tool(ctx, project_path, "fill_to_satin", ids, {
         "keep": "none",
         "pull_compensation_mm": pull_compensation_mm,
         "skip_end_section": "false",
-    })
+    }, pre_process=_pre)
 
 
 @tools.command("density-map")

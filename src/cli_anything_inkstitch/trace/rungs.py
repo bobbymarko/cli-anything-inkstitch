@@ -34,6 +34,53 @@ from cli_anything_inkstitch.trace.satinize import (
 RUNG_COLOR = "#ed2024"        # the review convention (artist's rung red)
 
 
+def segment_crosses_path(p1, p2, d: str) -> int:
+    """How many times the segment crosses the path's boundary."""
+    def orient(p, q, r):
+        v = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return 0 if abs(v) < 1e-12 else (1 if v > 0 else -1)
+    n = 0
+    for ring in _flatten_subpaths(d):
+        for a, b in zip(ring, ring[1:]):
+            if orient(p1, p2, a) != orient(p1, p2, b) and \
+               orient(a, b, p1) != orient(a, b, p2):
+                n += 1
+    return n
+
+
+def unrunged_fills(tree, ids: list[str]) -> list[str]:
+    """Selected fills with NO selected rung crossing them twice.
+
+    The compiled engine reports these with a GUI DIALOG on the user's
+    desktop (invisible to a headless caller) and skips them — so callers
+    must refuse the selection BEFORE invoking the engine.
+    """
+    from lxml import etree as _etree
+    by_id = {e.get("id"): e for e in tree.getroot().iter() if e.get("id")}
+    fills, strokes = [], []
+    for i in ids:
+        el = by_id.get(i)
+        if el is None or not el.get("d"):
+            continue
+        if el.get("fill") not in (None, "none"):
+            fills.append(el)
+        else:
+            strokes.append(el)
+    bad = []
+    for f in fills:
+        hit = False
+        for s in strokes:
+            from cli_anything_inkstitch.artifact.gate import flatten_path
+            pts = flatten_path(s.get("d"))
+            if len(pts) >= 2 and segment_crosses_path(
+                    pts[0], pts[-1], f.get("d")) >= 2:
+                hit = True
+                break
+        if not hit:
+            bad.append(f.get("id"))
+    return bad
+
+
 def _flatten_subpaths(d: str, per_curve: int = 16):
     import re
     from cli_anything_inkstitch.artifact.gate import flatten_path

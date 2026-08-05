@@ -140,6 +140,42 @@ class TestPipelineHook:
         assert by_id["mine"].get("d") == _dense_satin_d(50)
 
 
+class TestNormalizeEngineSatins:
+    def test_idless_style_colored_satin_becomes_editable(self, tmp_path,
+                                                         monkeypatch):
+        """fill_to_satin emits satins with NO id and colors in style — the
+        editor's design payload skips id-less elements, so the satin
+        stitched and exported but was invisible in the editor (caught live
+        on the feature demo). Normalization assigns fsat_N + attribute
+        paints."""
+        body = ('<path id="s1" d="M10,56 L100,56" fill="none" '
+                'stroke="#000000"/>')
+        proj_path, svg = _project(tmp_path, body)
+        out_body = (
+            '<path id="s1" d="M10,56 L100,56" fill="none" stroke="#000000"/>'
+            '<path inkstitch:satin_column="true" '
+            'style="stroke:#b4aa3f;fill:none;stroke-width:1.0" '
+            f'd="{_dense_satin_d(20)}"/>')
+        fake_out = SVG_TMPL.format(body=out_body).encode()
+        monkeypatch.setattr(tools_mod, "require", lambda *a, **k: "/fake")
+        monkeypatch.setattr(tools_mod, "run_extension",
+                            lambda *a, **k: fake_out)
+        result = CliRunner().invoke(
+            root, ["--json", "tools", "auto-satin", "--project", proj_path,
+                   "--ids", "s1"], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output[result.output.index("{"):])
+        assert payload["normalized_satins"] == 1
+        tree = etree.parse(str(svg))
+        ink = "{http://inkstitch.org/namespace}satin_column"
+        sat = next(e for e in tree.getroot().iter()
+                   if (e.get(ink) or "").lower() == "true")
+        assert (sat.get("id") or "").startswith("fsat_")
+        assert sat.get("stroke") == "#b4aa3f"
+        assert sat.get("fill") == "none"
+        assert "stroke:" not in (sat.get("style") or "")
+
+
 needs_binary = pytest.mark.skipif(discover() is None,
                                   reason="Ink/Stitch binary not installed")
 

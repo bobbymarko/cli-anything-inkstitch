@@ -123,11 +123,54 @@ def flatten_path(d: str, per_curve: int = 12) -> list[tuple[float, float]]:
                   x + 2 / 3 * (qx - x), y + 2 / 3 * (qy - y), x, y)
             last_q = (qx, qy); last_c = None
         elif c == "A":
-            for _ in range(5):
-                num()
+            rx = abs(num()); ry = abs(num())
+            phi = math.radians(num())
+            large = num() != 0; sweep = num() != 0
             x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
-            cx, cy = x, y
-            pts.append((x, y))
+            # endpoint → center parameterization (SVG 1.1 F.6.5) so arcs
+            # flatten with real curvature. The old endpoint-only shortcut
+            # made every ellipse-derived shape degenerate: a half-annulus
+            # flattened to two chords, suggest-rungs skeletonized the
+            # sliver, and the engine silently consumed the mis-runged fill.
+            if rx < 1e-9 or ry < 1e-9 or (abs(x - cx) < 1e-12 and abs(y - cy) < 1e-12):
+                cx, cy = x, y
+                pts.append((x, y))
+            else:
+                cosp, sinp = math.cos(phi), math.sin(phi)
+                x1p = (cosp * (cx - x) + sinp * (cy - y)) / 2
+                y1p = (-sinp * (cx - x) + cosp * (cy - y)) / 2
+                lam = (x1p / rx) ** 2 + (y1p / ry) ** 2
+                if lam > 1:                       # F.6.6: scale radii up
+                    s = math.sqrt(lam)
+                    rx *= s; ry *= s
+                num_ = (rx * ry) ** 2 - (rx * y1p) ** 2 - (ry * x1p) ** 2
+                den = (rx * y1p) ** 2 + (ry * x1p) ** 2
+                coef = math.sqrt(max(num_, 0.0) / den) if den else 0.0
+                if large == sweep:
+                    coef = -coef
+                cxp = coef * rx * y1p / ry
+                cyp = -coef * ry * x1p / rx
+                ccx = cosp * cxp - sinp * cyp + (cx + x) / 2
+                ccy = sinp * cxp + cosp * cyp + (cy + y) / 2
+
+                def ang(ux, uy, vx, vy):
+                    d = math.hypot(ux, uy) * math.hypot(vx, vy) or 1.0
+                    a = math.acos(max(-1.0, min(1.0, (ux * vx + uy * vy) / d)))
+                    return a if ux * vy - uy * vx >= 0 else -a
+
+                th1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry)
+                dth = ang((x1p - cxp) / rx, (y1p - cyp) / ry,
+                          (-x1p - cxp) / rx, (-y1p - cyp) / ry)
+                if not sweep and dth > 0:
+                    dth -= 2 * math.pi
+                elif sweep and dth < 0:
+                    dth += 2 * math.pi
+                steps = max(per_curve, int(abs(dth) / (math.pi / 12)))
+                for k in range(1, steps + 1):
+                    t = th1 + dth * k / steps
+                    pts.append((ccx + rx * math.cos(t) * cosp - ry * math.sin(t) * sinp,
+                                ccy + rx * math.cos(t) * sinp + ry * math.sin(t) * cosp))
+                cx, cy = x, y
             last_c = last_q = None
         elif c == "Z":
             cx, cy = sx, sy

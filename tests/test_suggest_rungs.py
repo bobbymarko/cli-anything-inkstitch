@@ -127,8 +127,80 @@ class TestCli:
             "tools suggest-rungs")
 
 
+class TestArcFlattening:
+    def test_arc_semicircle_has_curvature_not_a_chord(self):
+        """flatten_path used to collapse A commands to endpoints — every
+        ellipse-derived shape became a degenerate sliver, suggest-rungs
+        skeletonized garbage, and the engine silently ate the fill."""
+        from cli_anything_inkstitch.artifact.gate import flatten_path, poly_length
+        pts = flatten_path("M0,0 A50,50 0 0 1 100,0")
+        assert len(pts) > 10
+        # a real semicircle is ~pi*r long, the old chord was 100
+        assert math.isclose(poly_length(pts), math.pi * 50, rel_tol=0.01)
+        assert any(abs(y) > 45 for _, y in pts)   # reaches the apex
+
+    def test_arc_band_rungs_cross_like_the_polyline_version(self):
+        band = ("M240,180 A60,60 0 0 1 360,180 L342,180 "
+                "A42,42 0 0 0 258,180 Z")
+        rungs = suggest_rungs(band)
+        assert len(rungs) >= 8                    # was 5 on the degenerate mask
+        good = sum(1 for seg in rungs if _crossings(seg, band) == 2)
+        assert good >= len(rungs) * 0.85
+
+
 needs_binary = pytest.mark.skipif(discover() is None,
                                   reason="Ink/Stitch binary not installed")
+
+
+class TestEngineDialogPrevention:
+    """The compiled engine reports unrunged fills with a GUI DIALOG on the
+    user's desktop — twice observed live ('None (band2)', 'None (f1)') and
+    invisible to the headless caller. These tests never touch the real
+    binary: the pre-check must refuse BEFORE the engine could pop anything.
+    """
+
+    def test_unrunged_fill_refused_before_engine_runs(self, tmp_path,
+                                                      monkeypatch):
+        from cli_anything_inkstitch.commands import tools as tools_mod
+        band = _arc_band_d()
+        body = (f'<path id="f1" d="{band}" fill="#336699"/>'
+                '<path id="r1" d="M5,5 L15,5" stroke="#ed2024" fill="none"/>')
+        proj_path, svg = _project(tmp_path, body)
+        invoked = []
+        monkeypatch.setattr(tools_mod, "require", lambda *a, **k: "/fake")
+        monkeypatch.setattr(tools_mod, "run_extension",
+                            lambda *a, **k: invoked.append(1) or b"")
+        result = CliRunner().invoke(
+            root, ["--json", "tools", "fill-to-satin", "--project", proj_path,
+                   "--ids", "f1,r1"])
+        assert result.exit_code != 0
+        assert "no selected rung crossing" in result.output
+        assert not invoked, "engine was invoked — it would have popped a dialog"
+        assert 'id="f1"' in svg.read_text()
+
+    def test_silent_consumption_rolls_back(self, tmp_path, monkeypatch):
+        """Backstop: rungs cross (pre-check passes) but the engine consumes
+        everything and emits no satin — measured on a mis-runged arc band.
+        The wrapper must refuse the emptier document."""
+        from cli_anything_inkstitch.commands import tools as tools_mod
+        band = _arc_band_d()
+        rungs = suggest_rungs(band)
+        rung_body = "".join(
+            f'<path id="rr{i}" d="M{a[0]:.2f},{a[1]:.2f} L{b[0]:.2f},{b[1]:.2f}" '
+            f'stroke="#ed2024" fill="none"/>'
+            for i, (a, b) in enumerate(rungs))
+        body = f'<path id="f1" d="{band}" fill="#336699"/>' + rung_body
+        proj_path, svg = _project(tmp_path, body)
+        empty_out = SVG_TMPL.format(body="").encode()
+        monkeypatch.setattr(tools_mod, "require", lambda *a, **k: "/fake")
+        monkeypatch.setattr(tools_mod, "run_extension",
+                            lambda *a, **k: empty_out)
+        result = CliRunner().invoke(
+            root, ["--json", "tools", "fill-to-satin", "--project", proj_path,
+                   "--ids", ",".join(["f1"] + [f"rr{i}" for i in range(len(rungs))])])
+        assert result.exit_code != 0
+        assert "consumed the selection" in result.output
+        assert 'id="f1"' in svg.read_text()
 
 
 @needs_binary
