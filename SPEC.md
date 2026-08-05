@@ -66,7 +66,14 @@ The project JSON is an *index* with undo/redo and session metadata. The actual d
     "thread_palette": "Madeira Polyneon",
     "collapse_len_mm": 3.0,
     "min_stitch_len_mm": 0.1,
-    "inkstitch_binary": "/Applications/Ink Stitch.app/Contents/MacOS/inkstitch"
+    "inkstitch_binary": "/Applications/Ink Stitch.app/Contents/MacOS/inkstitch",
+    "reference": {                     // `document set-reference` — tracing overlay.
+      "path": "/abs/art.png",          // Session-only BY DESIGN: the engine reads the
+      "opacity": 0.4,                  // SVG, so a reference must never become a
+      "visible": true,                 // stitchable element, gate finding, or export
+      "x": 0.0, "y": 0.0,              // artifact. The editor draws it as a local
+      "scale": 1.0                     // <image> layer fitted to the document viewBox.
+    }
   },
   "elements": {
     // keyed by SVG element @id — populated by `element list --refresh`

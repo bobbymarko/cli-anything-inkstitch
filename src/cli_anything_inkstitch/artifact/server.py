@@ -240,6 +240,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                 self._handle_palettes(parse_qs(parsed.query))
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "export":
                 self._handle_export(parts[1], parse_qs(parsed.query))
+            elif len(parts) == 3 and parts[0] == "api" and parts[2] == "reference-image":
+                self._handle_reference_image(parts[1])
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "checkpoints":
                 self._handle_checkpoints_list(parts[1])
             elif (len(parts) == 5 and parts[0] == "api"
@@ -286,6 +288,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                     self._json({"status": "sent"})
                 elif action == "checkpoints":
                     self._handle_checkpoint_create(key, self._read_body())
+                elif action == "reference":
+                    self._handle_reference_update(key, self._read_body())
                 else:
                     self._json({"error": "not found"}, 404)
             elif (len(parts) == 5 and parts[0] == "api"
@@ -585,6 +589,54 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    # -- reference overlay (tracing aid; view-state, never in the SVG) -----------
+
+    def _handle_reference_image(self, key: str) -> None:
+        file = self._session_file(key)
+        if file is None:
+            return
+        import json as _json
+        from pathlib import Path as _Path
+        ref = (_json.loads(_Path(file).read_text()).get("session") or {}) \
+            .get("reference") or {}
+        path = ref.get("path")
+        if not path or not _Path(path).exists():
+            self._json({"error": "no reference image"}, 404)
+            return
+        data = _Path(path).read_bytes()
+        ext = _Path(path).suffix.lower()
+        ctype = {".png": "image/png", ".jpg": "image/jpeg",
+                 ".jpeg": "image/jpeg", ".svg": "image/svg+xml",
+                 ".webp": "image/webp", ".gif": "image/gif"}.get(
+            ext, "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_reference_update(self, key: str, body: dict) -> None:
+        """Editor adjusts opacity/visibility/position of the overlay."""
+        file = self._session_file(key)
+        if file is None:
+            return
+        from cli_anything_inkstitch.project import ProjectFile, project_lock
+        with project_lock(file):
+            proj = ProjectFile.load(file)
+            ref = dict(proj.session.get("reference") or {})
+            if not ref.get("path"):
+                self._json({"error": "no reference image set"}, 404)
+                return
+            for k in ("opacity", "x", "y", "scale"):
+                if k in body:
+                    ref[k] = float(body[k])
+            if "visible" in body:
+                ref["visible"] = bool(body["visible"])
+            ref["opacity"] = max(0.0, min(1.0, ref.get("opacity", 0.4)))
+            proj.session["reference"] = ref
+            proj.save()
+        self._json({"reference": ref})
 
     # -- checkpoints (durable flagged states; checkpoints.py) --------------------
 

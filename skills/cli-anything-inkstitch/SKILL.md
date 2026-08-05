@@ -71,6 +71,7 @@ Document and project management.
 | `prep` | Assign IDs, inline CSS-class fills/strokes, and detect/handle Illustrator stroke-to-outline rings (`--illustrator-rings={detect\|skip\|fill-black\|satin}`) |
 | `set-context` | Capture design-intent context (material, stretch, thread, stabilizer, hoop_tension, intent, plus arbitrary `--set KEY=VALUE`). Surfaced in `element list` / `describe`. |
 | `get-context` | Print the design-intent context. |
+| `set-reference` | Attach reference artwork (`--image` PNG/JPG/SVG) the artifact editor overlays under the design for tracing/alignment. `--opacity 0..1` (default 0.4), `--visible/--hidden`, `--x/--y` (document units), `--scale`, `--clear`. Stored in the project session, NEVER in the SVG — the engine, gate, and exports never see it. Default fit stretches the image to the document viewBox, so a doc built from the same source art aligns 1:1 with no tweaking. |
 | `save` | Flush in-memory mutations to the SVG and project JSON |
 | `info` | Show SVG dimensions, hoop, units, palette, element counts, stitch_type histogram |
 | `set-hoop` | Set hoop size (`--name 100x100` or `--width-mm W --height-mm H`) |

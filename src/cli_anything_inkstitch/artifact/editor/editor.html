@@ -145,6 +145,12 @@
   .panel.closed .panelHead::after { content: "▸"; }
   .panel.closed .panelBody { display: none; }
   .panelBody { padding: 2px 4px 10px; }
+  .refRow { display: flex; align-items: center; gap: 8px; padding: 3px 2px; }
+  .refLabel { flex: 0 0 62px; font-size: 11px; color: var(--muted, #999); }
+  .refRow input[type="range"] { flex: 1; min-width: 0; }
+  .refNum { width: 64px; font-size: 11px; }
+  .refName { font-size: 11px; padding: 2px; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
   .ovRow { display: flex; justify-content: space-between; gap: 8px;
            padding: 2px 0; font-size: 12px; }
   .ovRow .k { color: var(--muted); }
@@ -526,6 +532,10 @@
       <div class="panel" data-panel="colors">
         <div class="panelHead">Colors</div>
         <div class="panelBody" id="colorsBody"></div>
+      </div>
+      <div class="panel closed" data-panel="reference">
+        <div class="panelHead">Reference</div>
+        <div class="panelBody" id="referenceBody"></div>
       </div>
       <div class="panel closed" data-panel="history">
         <div class="panelHead">History</div>
@@ -1632,7 +1642,7 @@ function el(tag, attrs, parent) {
   if (parent) parent.appendChild(e);
   return e;
 }
-let artworkLayer, planLayer, editLayer;
+let artworkLayer, planLayer, editLayer, refLayer;
 function renderAll() {
   canvas.textContent = "";
   parseViewBox();
@@ -1642,12 +1652,14 @@ function renderAll() {
     width: baseVb.w * 3, height: baseVb.h * 3, fill: "transparent" }, canvas);
   bg.addEventListener("pointerdown", startPan);
   gridLayer = el("g", {}, canvas);
+  refLayer = el("g", {}, canvas);   // reference art under the design, over grid
   artworkLayer = el("g", { class: "artwork" }, canvas);
   planLayer = el("g", { class: "planLayer" }, canvas);
   guideLayer = el("g", {}, canvas);
   editLayer = el("g", {}, canvas);
   renderPlanLayer();
   renderGrid();
+  renderReference();
   renderGuides();
   drawRulers();
   for (const o of design.objects) {
@@ -3054,6 +3066,95 @@ function renderLayers() {
    row rethreads all of them (one set_svg_attr per element: fill attr for
    fills, stroke for satins/runs — the same color the engine stitches).
    Clicking a row selects the group. */
+/* Reference overlay: tracing aid served from the project session
+   (server _handle_reference_image). Editor-local layer only — never part of
+   design.objects, never serialized through /edit ops, never written into the
+   engine-facing SVG, so stitching, the gate, and export can't see it. */
+function renderReference() {
+  if (!refLayer) return;
+  refLayer.textContent = "";
+  const ref = design && design.reference;
+  if (!ref || !ref.path || ref.visible === false) return;
+  const s = ref.scale || 1;
+  el("image", {
+    // ?v= busts the browser cache when the file path changes (urlparse on
+    // the server strips the query before routing)
+    href: api("/reference-image") + "?v=" + encodeURIComponent(ref.path),
+    x: baseVb.x + (ref.x || 0), y: baseVb.y + (ref.y || 0),
+    width: baseVb.w * s, height: baseVb.h * s,
+    opacity: ref.opacity == null ? 0.4 : ref.opacity,
+    preserveAspectRatio: "xMinYMin meet",
+    "pointer-events": "none",
+  }, refLayer);
+}
+/* Reference panel: overlay view-state (opacity/position/scale). POSTs go to
+   /reference (server _handle_reference_update) — session state, not design
+   edits, so no history entries and undo never fights the overlay. */
+function renderReferencePanel() {
+  const body = $("referenceBody");
+  if (!body) return;
+  body.textContent = "";
+  const ref = design && design.reference;
+  if (!ref || !ref.path) {
+    const d = document.createElement("div");
+    d.className = "noSel";
+    d.textContent = "No reference image. Ask in chat, or run: " +
+      "document set-reference --image <file>";
+    body.appendChild(d);
+    return;
+  }
+  const post = async (patch) => {
+    Object.assign(ref, patch);
+    renderReference();
+    try {
+      const r = await fetch(api("/reference"), { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch) });
+      if (!r.ok) throw new Error(String(r.status));
+    } catch (e) { showToast("reference update failed", true); }
+  };
+  const row = (label, control) => {
+    const r = document.createElement("div");
+    r.className = "refRow";
+    const l = document.createElement("span");
+    l.className = "refLabel";
+    l.textContent = label;
+    r.append(l, control);
+    body.appendChild(r);
+  };
+  const name = document.createElement("div");
+  name.className = "refName";
+  name.textContent = ref.path.split("/").pop();
+  name.title = ref.path;
+  body.appendChild(name);
+  const vis = document.createElement("input");
+  vis.type = "checkbox";
+  vis.checked = ref.visible !== false;
+  vis.addEventListener("change", () => post({ visible: vis.checked }));
+  row("Visible", vis);
+  const op = document.createElement("input");
+  op.type = "range";
+  op.min = "0"; op.max = "1"; op.step = "0.05";
+  op.value = ref.opacity == null ? 0.4 : ref.opacity;
+  op.addEventListener("input", () => {       // live preview while dragging
+    ref.opacity = parseFloat(op.value);
+    renderReference();
+  });
+  op.addEventListener("change", () => post({ opacity: parseFloat(op.value) }));
+  row("Opacity", op);
+  const num = (key, step) => {
+    const n = document.createElement("input");
+    n.type = "number";
+    n.className = "refNum";
+    n.step = step;
+    n.value = ref[key] || (key === "scale" ? 1 : 0);
+    n.addEventListener("change", () => post({ [key]: parseFloat(n.value) || (key === "scale" ? 1 : 0) }));
+    return n;
+  };
+  row("Scale", num("scale", "0.01"));
+  row("X offset", num("x", "1"));
+  row("Y offset", num("y", "1"));
+}
 function renderColors() {
   const body = $("colorsBody");
   if (!body || !design) return;
@@ -3387,6 +3488,7 @@ async function refresh() {
   renderOverview();
   renderLayers();
   renderColors();
+  renderReferencePanel();
   renderHistory();
   scheduleTier2();
   preserveScaleOnResize();   // seed the rect baseline once vb exists

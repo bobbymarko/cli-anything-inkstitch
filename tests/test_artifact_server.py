@@ -465,6 +465,59 @@ class TestCheckpointEndpoints:
         assert json.loads(raw)["checkpoints"] == []
 
 
+class TestReferenceEndpoints:
+    def _project_with_reference(self, tmp_path):
+        from cli_anything_inkstitch.project import ProjectFile
+        helper = TestCheckpointEndpoints()
+        proj_path, svg = helper._svg_project(tmp_path)
+        img = tmp_path / "ref.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\nfake-bytes")
+        from cli_anything_inkstitch.project import project_lock
+        with project_lock(proj_path):
+            proj = ProjectFile.load(proj_path)
+            proj.session["reference"] = {"path": str(img), "opacity": 0.4,
+                                         "visible": True, "x": 0.0, "y": 0.0,
+                                         "scale": 1.0}
+            proj.save()
+        return proj_path, img
+
+    def test_image_404_when_unset(self, server, tmp_path):
+        helper = TestCheckpointEndpoints()
+        proj_path, _svg = helper._svg_project(tmp_path)
+        key = _open_session(server, proj_path)["key"]
+        import urllib.error
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _get(server, f"/api/{key}/reference-image")
+        assert ei.value.code == 404
+        status, body = _post(server, f"/api/{key}/reference", {"opacity": 0.5})
+        assert status == 404
+
+    def test_image_streams_with_content_type(self, server, tmp_path):
+        proj_path, img = self._project_with_reference(tmp_path)
+        key = _open_session(server, proj_path)["key"]
+        import urllib.request
+        # query string must not break routing — the editor cache-busts with ?v=
+        with urllib.request.urlopen(
+                _url(server, f"/api/{key}/reference-image?v=x"),
+                timeout=10) as r:
+            assert r.headers["Content-Type"] == "image/png"
+            assert r.read() == img.read_bytes()
+
+    def test_update_persists_and_clamps(self, server, tmp_path):
+        proj_path, _img = self._project_with_reference(tmp_path)
+        key = _open_session(server, proj_path)["key"]
+        status, body = _post(server, f"/api/{key}/reference",
+                             {"opacity": 2.0, "x": 12.5, "visible": False})
+        assert status == 200
+        ref = body["reference"]
+        assert ref["opacity"] == 1.0 and ref["x"] == 12.5
+        assert ref["visible"] is False
+        # persisted: the design payload the editor refreshes from agrees
+        from cli_anything_inkstitch.artifact.design_model import read_design
+        got = read_design(proj_path)["reference"]
+        assert got["opacity"] == 1.0 and got["visible"] is False
+
+
 class TestExportEndpoint:
     def test_streams_machine_file_as_download(self, server, tmp_path, monkeypatch):
         from cli_anything_inkstitch import binary as B

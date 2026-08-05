@@ -409,6 +409,64 @@ def get_context(ctx, project_path):
         emit(ctx, {"context": dict(_ensure_context(proj))})
 
 
+@document.command("set-reference")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--image", "image_path", type=click.Path(),
+              help="Reference artwork (PNG/JPG/SVG) overlaid in the editor "
+                   "for tracing. View-state only — never enters the stitch "
+                   "document, so the engine and exports never see it.")
+@click.option("--opacity", type=float, default=None,
+              help="0..1 (default 0.4 when first set).")
+@click.option("--visible/--hidden", "visible", default=None)
+@click.option("--x", "off_x", type=float, default=None,
+              help="Offset in document units (default 0).")
+@click.option("--y", "off_y", type=float, default=None)
+@click.option("--scale", type=float, default=None,
+              help="Scale factor (default 1.0 = fit the viewBox).")
+@click.option("--clear", is_flag=True, help="Remove the reference.")
+@click.pass_context
+def set_reference(ctx, project_path, image_path, opacity, visible,
+                  off_x, off_y, scale, clear):
+    """Attach a reference image the editor overlays under the design.
+
+    Deliberately stored in the project session (not the SVG): the engine
+    reads the SVG, and a raster reference must never become a stitchable
+    element, gate finding, or export artifact.
+    """
+    with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+        before = {"reference": proj.session.get("reference")}
+        if clear:
+            proj.session.pop("reference", None)
+        else:
+            ref = dict(proj.session.get("reference") or {})
+            if image_path:
+                p = Path(require_absolute(image_path, "image"))
+                if not p.exists():
+                    raise UserError(f"image not found: {p}")
+                ref["path"] = str(p)
+            if not ref.get("path"):
+                raise UserError("no reference image set: pass --image")
+            ref.setdefault("opacity", 0.4)
+            ref.setdefault("visible", True)
+            ref.setdefault("x", 0.0)
+            ref.setdefault("y", 0.0)
+            ref.setdefault("scale", 1.0)
+            if opacity is not None:
+                ref["opacity"] = max(0.0, min(1.0, opacity))
+            if visible is not None:
+                ref["visible"] = visible
+            if off_x is not None:
+                ref["x"] = off_x
+            if off_y is not None:
+                ref["y"] = off_y
+            if scale is not None:
+                ref["scale"] = scale
+            proj.session["reference"] = ref
+        _record_session_change(proj, "document set-reference", before,
+                               {"reference": proj.session.get("reference")})
+        emit(ctx, {"reference": proj.session.get("reference")})
+
+
 @document.command("prep")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--illustrator-rings", "ring_action",
