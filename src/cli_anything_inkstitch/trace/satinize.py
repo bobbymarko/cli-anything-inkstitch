@@ -403,6 +403,101 @@ def simplify_polyline(pts, tolerance: float = 0.8):
     return [pts[i] for i in sorted(keep)]
 
 
+_POLYLINE_RE_TOKEN = None    # lazy-compiled in simplify_satin_d
+
+
+def simplify_satin_d(d: str, tolerance: float = 0.5):
+    """RDP-simplify a satin element's RAILS in place; rungs pass untouched.
+
+    Engine-emitted satins (fill_to_satin, auto_satin) sample their rails
+    from whatever density the input had — a pre-flattened source yields
+    hundreds of near-collinear rail points that jag the column and make
+    hand-editing hopeless (celtic patch v2: the user's few-node source
+    became a node forest).  Contract (reader:
+    lib/elements/satin_column.py — subpaths = 2 rails, rest are rungs):
+
+    * only subpaths 0 and 1 are touched, and only when they are PURE
+      polylines (M/L) — bezier rails are user-authored geometry and pass
+      through byte-identical;
+    * rung subpaths are never modified;
+    * endpoints are preserved exactly (RDP keeps them by construction), so
+      closed rings stay exactly closed and rung↔rail intersections at the
+      ends survive;
+    * consecutive duplicate points are dropped first (the engine repeats a
+      ring's closure point 2-3 times — the gate false-positive lesson).
+
+    Returns (new_d, nodes_before, nodes_after); new_d is `d` unchanged when
+    nothing was simplifiable.
+    """
+    import re
+    global _POLYLINE_RE_TOKEN
+    if _POLYLINE_RE_TOKEN is None:
+        _POLYLINE_RE_TOKEN = re.compile(
+            r"[A-DF-Za-df-z]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+    subs = [c for c in re.split(r"(?=[Mm])", d.strip()) if c.strip()]
+    if len(subs) < 2:
+        return d, 0, 0
+
+    def parse_polyline(sub):
+        """Points of a pure-M/L subpath, else None (curves stay untouched)."""
+        tokens = _POLYLINE_RE_TOKEN.findall(sub)
+        pts, i, cmd = [], 0, None
+        cx = cy = sx = sy = 0.0
+        closed = False
+        while i < len(tokens):
+            t = tokens[i]
+            if t.isalpha():
+                if t in ("Z", "z"):
+                    closed = True
+                    i += 1
+                    continue
+                if t not in ("M", "m", "L", "l"):
+                    return None, False        # curve command — hands off
+                cmd = t
+                i += 1
+                continue
+            if cmd is None or i + 1 >= len(tokens):
+                return None, False
+            x, y = float(t), float(tokens[i + 1])
+            i += 2
+            if cmd in ("m", "l"):
+                x += cx
+                y += cy
+            cx, cy = x, y
+            if cmd in ("M", "m"):
+                sx, sy = x, y
+                cmd = "L" if cmd == "M" else "l"   # implicit lineto chain
+            pts.append((x, y))
+        if closed and pts and math.dist(pts[0], pts[-1]) > 1e-9:
+            pts.append((sx, sy))
+        return pts, closed
+
+    before = after = 0
+    out = []
+    for idx, sub in enumerate(subs):
+        if idx >= 2:                       # rungs: byte-identical passthrough
+            out.append(sub)
+            continue
+        pts, _closed = parse_polyline(sub)
+        if pts is None or len(pts) < 3:
+            out.append(sub)
+            if pts is not None:
+                before += len(pts)
+                after += len(pts)
+            continue
+        deduped = [pts[0]]
+        for p in pts[1:]:
+            if math.dist(p, deduped[-1]) > 1e-6:
+                deduped.append(p)
+        simplified = simplify_polyline(deduped, tolerance=tolerance)
+        before += len(pts)
+        after += len(simplified)
+        out.append("M" + " ".join(f"{x:.3f},{y:.3f}" for x, y in simplified))
+    if after >= before:
+        return d, before, before
+    return " ".join(out), before, after
+
+
 def remove_folds(pts, max_span: int = 60, max_rounds: int = 20):
     """Cut small self-intersection folds out of a polyline.
 

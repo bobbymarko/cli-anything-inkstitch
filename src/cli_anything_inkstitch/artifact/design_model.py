@@ -782,6 +782,10 @@ def _convert_via_engine(proj: ProjectFile, tree, elem, svg_id: str,
     if tol is not None:
         check_scale_drift(ext, art_bbox(tree), art_bbox(new_tree),
                           tolerance=tol)
+    # node economy: simplify rails of satins this conversion produced
+    # (same guard as commands/tools.py — untouched elements pass through)
+    from cli_anything_inkstitch.commands.tools import _simplify_new_satin_rails
+    _simplify_new_satin_rails(ext, before_xml, new_tree)
     tree._setroot(new_root)
     ensure_inkstitch_namespace(tree)
     push(proj.history, make_entry(

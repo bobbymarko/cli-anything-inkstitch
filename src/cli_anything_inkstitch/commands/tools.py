@@ -69,6 +69,47 @@ def _run_tool(ctx, project_path, extension_name, ids, args, *, pre_process=None)
                             pre_process=pre_process))
 
 
+# engine extensions whose output contains satin columns worth simplifying
+_SATIN_PRODUCERS = {"auto_satin", "stroke_to_satin", "fill_to_satin"}
+
+
+def _simplify_new_satin_rails(extension_name: str, before_xml: str,
+                              new_tree) -> dict | None:
+    """RDP-simplify rails of satins the tool created or rewrote.
+
+    Only elements whose d is new or changed vs the pre-tool document are
+    touched — user-authored satins the tool ignored pass through untouched.
+    Full contract in trace/satinize.py simplify_satin_d (bezier rails and
+    rung subpaths are never modified).
+    """
+    if extension_name not in _SATIN_PRODUCERS:
+        return None
+    from cli_anything_inkstitch.trace.satinize import simplify_satin_d
+    ink_satin = "{http://inkstitch.org/namespace}satin_column"
+    before_root = etree.fromstring(before_xml.encode("utf-8"))
+    before_d = {e.get("id"): e.get("d") for e in before_root.iter()
+                if e.get("id") and e.get("d")}
+    total_before = total_after = changed = 0
+    for el in new_tree.getroot().iter():
+        if not isinstance(el.tag, str):
+            continue
+        if (el.get(ink_satin) or "").lower() != "true" or not el.get("d"):
+            continue
+        eid = el.get("id")
+        if eid and before_d.get(eid) == el.get("d"):
+            continue                     # untouched by the tool — hands off
+        new_d, nb, na = simplify_satin_d(el.get("d"))
+        if na < nb:
+            el.set("d", new_d)
+            changed += 1
+            total_before += nb
+            total_after += na
+    if not changed:
+        return None
+    return {"elements": changed, "rail_nodes_before": total_before,
+            "rail_nodes_after": total_after}
+
+
 def run_tool_core(ctx, project_path, extension_name, ids, args, *,
                   pre_process=None) -> dict:
     """Run a binary tool; if it returns SVG, swap it in. Returns the payload.
@@ -144,6 +185,14 @@ def run_tool_core(ctx, project_path, extension_name, ids, args, *,
                     etree.fromstring(before_xml.encode("utf-8")))
                 save_svg(restored, proj.svg_path)
             raise
+        # node economy: engine satin output samples its rails from the input
+        # density — simplify NEW/CHANGED satin rails before they enter the
+        # document (helper contract + reader citation: trace/satinize.py
+        # simplify_satin_d)
+        simplified = _simplify_new_satin_rails(extension_name, before_xml,
+                                               new_tree)
+        if simplified:
+            extra_payload["simplified_rails"] = simplified
         # binary tools rewrite the whole document — record it so undo/redo
         # and the artifact History panel see it like any other edit
         push(proj.history, make_entry(
