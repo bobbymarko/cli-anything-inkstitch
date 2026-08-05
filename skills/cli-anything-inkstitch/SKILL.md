@@ -140,6 +140,7 @@ Binary-backed geometry rewrites — operations that require Ink/Stitch's stitch 
 | `convert-to-satin` | Convert a stroke to a satin column |
 | `suggest-rungs` | Append red rung GUIDE strokes across fill(s) for review — placement imitates a digitizer (perpendicular to the medial axis, sparse on straights, clusters at turns; `--spacing`, `--turn-deg`). Review/edit the guides in the artifact editor, then run `fill-to-satin`. Never converts by itself — the review step is the point (embroidery SKILL §15). |
 | `fill-to-satin` | Engine fill_to_satin on fill(s) + their crossing rung strokes (`--pull-compensation-mm`). Uses keep=none: the engine DELETES fill sections no rung bounds and pops a GUI dialog for fills with zero rungs — convert one shape per run with only its own rungs. Output rails are RDP-simplified automatically. |
+| `optimize-trims` | Strip `trim_after` where the jump is short (`--min-jump-mm`, default 2) or covered by later stitching; always keeps trims at color changes and across exposed fabric. `--dry-run` reports decisions with reasons. On the celtic patch: 37 trims → 30 kept (27 would cross the visible backing), 7 stripped. |
 | `convert-satin-to-stroke` | Convert a satin column back to a stroke |
 | `flip-satin` | Swap rails on a satin column |
 | `auto-run` | Auto-route running-stitch elements. Stale `autorun-underpath` travel from a previous routing pass is dropped automatically (the engine would re-route travel as art, doubling the design); the payload reports `removed_stale_underpaths`, `--keep-underpaths` opts out |

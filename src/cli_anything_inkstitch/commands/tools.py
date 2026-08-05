@@ -368,6 +368,41 @@ def fill_to_satin_cmd(ctx, project_path, ids_csv, pull_compensation_mm):
     })
 
 
+@tools.command("optimize-trims")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--min-jump-mm", type=float, default=2.0, show_default=True,
+              help="Jumps at or under this always walk (no trim).")
+@click.option("--dry-run", is_flag=True,
+              help="Report keep/strip decisions without changing anything.")
+@click.pass_context
+def optimize_trims(ctx, project_path, min_jump_mm, dry_run):
+    """Strip trim_after where the jump is short or covered by later stitching.
+
+    Keeps every trim at a color change and across exposed fabric; strips
+    where the walking thread is invisible (embroidery SKILL §8/§15 —
+    the celtic patch's 37 trims were mostly unnecessary machine dwell).
+    """
+    from cli_anything_inkstitch.embroidery.trims import (
+        apply_trim_economy,
+        plan_trim_economy,
+    )
+    with open_project(ctx, project_path, mutate=not dry_run) as (proj, tree):
+        plan = plan_trim_economy(tree, min_jump_mm=min_jump_mm)
+        stripped = [r for r in plan if r["action"] == "strip"]
+        payload = {"decisions": plan,
+                   "kept": len(plan) - len(stripped),
+                   "stripped": len(stripped), "dry_run": dry_run}
+        if not dry_run and stripped:
+            before_xml = etree.tostring(tree.getroot()).decode("utf-8")
+            apply_trim_economy(tree, plan)
+            push(proj.history, make_entry(
+                command=f"tools optimize-trims ({len(stripped)} stripped)",
+                patch=document_replace(
+                    before_xml,
+                    etree.tostring(tree.getroot()).decode("utf-8"))))
+        emit(ctx, payload)
+
+
 @tools.command("break-apart")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--id", "svg_id", required=True)
