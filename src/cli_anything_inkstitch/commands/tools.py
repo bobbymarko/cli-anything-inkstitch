@@ -10,6 +10,7 @@ from cli_anything_inkstitch.commands._helpers import open_project
 from cli_anything_inkstitch.errors import UserError
 from cli_anything_inkstitch.history import document_replace, make_entry, push
 from cli_anything_inkstitch.output import emit
+from cli_anything_inkstitch.svg.attrs import SVG_NS
 
 
 @click.group("tools")
@@ -281,6 +282,90 @@ def auto_run(ctx, project_path, ids_csv, trim, preserve_order, break_up,
         "preserve_order": str(preserve_order).lower(),
         "break_up": str(break_up).lower(),
     }, pre_process=None if keep_underpaths else _pre)
+
+
+@tools.command("suggest-rungs")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--ids", "ids_csv", required=True,
+              help="Fill element ids to generate rung guides for.")
+@click.option("--spacing", type=float, default=30.0, show_default=True,
+              help="Max arc length between rungs on straights (doc units; "
+                   "30px ≈ 8mm in a px document).")
+@click.option("--turn-deg", type=float, default=20.0, show_default=True,
+              help="Cumulative bend that forces an extra rung (curves get "
+                   "dense clusters, straights stay sparse).")
+@click.pass_context
+def suggest_rungs_cmd(ctx, project_path, ids_csv, spacing, turn_deg):
+    """Append red rung GUIDE strokes for review — does not convert.
+
+    Placement imitates the hand-authored rungs that made the celtic patch
+    work (skills/embroidery-digitization/SKILL.md §15): perpendicular to
+    the medial axis, one per straight stretch, clusters through turns.
+    Review/edit them in the artifact editor, then run
+    `tools fill-to-satin --ids <fill,rung_ids...>`.
+    """
+    from cli_anything_inkstitch.trace.rungs import RUNG_COLOR, suggest_rungs
+    ids = [s.strip() for s in ids_csv.split(",") if s.strip()]
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
+        root = tree.getroot()
+        by_id = {e.get("id"): e for e in root.iter() if e.get("id")}
+        before_xml = etree.tostring(root).decode("utf-8")
+        payload_fills = []
+        n = sum(1 for e in root.iter()
+                if (e.get("id") or "").startswith("rung_"))
+        for fid in ids:
+            elem = by_id.get(fid)
+            if elem is None:
+                raise UserError(f"no element with id={fid!r}")
+            segs = suggest_rungs(elem.get("d") or "",
+                                 spacing=spacing, turn_deg=turn_deg)
+            if not segs:
+                payload_fills.append({"id": fid, "rungs": [],
+                                      "note": "no medial axis found"})
+                continue
+            rung_ids = []
+            for (x1, y1), (x2, y2) in segs:
+                n += 1
+                rid = f"rung_{n}"
+                p = etree.SubElement(root, f"{{{SVG_NS}}}path")
+                p.set("id", rid)
+                p.set("d", f"M{x1:.3f},{y1:.3f} L{x2:.3f},{y2:.3f}")
+                p.set("stroke", RUNG_COLOR)
+                p.set("fill", "none")
+                p.set("stroke-width", "0.5")
+                rung_ids.append(rid)
+            payload_fills.append({"id": fid, "rungs": rung_ids})
+        push(proj.history, make_entry(
+            command=f"tools suggest-rungs --ids {ids_csv}",
+            patch=document_replace(
+                before_xml, etree.tostring(root).decode("utf-8"))))
+        emit(ctx, {"fills": payload_fills,
+                   "note": "review the red guides (edit/delete in the "
+                           "editor), then: tools fill-to-satin"})
+
+
+@tools.command("fill-to-satin")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--ids", "ids_csv", required=True,
+              help="Fill id(s) PLUS the rung stroke ids that cross them.")
+@click.option("--pull-compensation-mm", type=float, default=0.0,
+              show_default=True)
+@click.pass_context
+def fill_to_satin_cmd(ctx, project_path, ids_csv, pull_compensation_mm):
+    """Engine fill_to_satin: fills + crossing rung strokes → satin columns.
+
+    Every selected fill must have at least one rung crossing it — with
+    keep=none the engine DELETES fill sections no rung bounds, and fills
+    with zero rungs pop a GUI dialog (both measured; see SKILL.md §15).
+    Converting one shape per run with only its own rungs is the reliable
+    pattern. Output rails are RDP-simplified (_simplify_new_satin_rails).
+    """
+    ids = [s.strip() for s in ids_csv.split(",") if s.strip()]
+    _run_tool(ctx, project_path, "fill_to_satin", ids, {
+        "keep": "none",
+        "pull_compensation_mm": pull_compensation_mm,
+        "skip_end_section": "false",
+    })
 
 
 @tools.command("break-apart")
