@@ -365,6 +365,44 @@ def branch_to_rails(branch, radii, min_half_width: float = 1.0,
     return rail_a, rail_b, closed
 
 
+def simplify_polyline(pts, tolerance: float = 0.8):
+    """Ramer–Douglas–Peucker: keep points only where the shape needs them.
+
+    Rails built from pixel walks carry a point every ~2px — hundreds per
+    rail.  Hand-drawn vector rails have a handful.  The excess points are
+    pure noise: they jag the rails, seed folds, scatter the zigzag angle,
+    and make hand-editing hopeless (user: "the rails have way too many
+    points. the vector shapes should be kept much simpler").
+    """
+    if len(pts) < 3:
+        return list(pts)
+
+    def rdp(lo, hi, keep):
+        ax, ay = pts[lo]
+        bx, by = pts[hi]
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        best_d = -1.0
+        best_i = -1
+        for i in range(lo + 1, hi):
+            px_, py_ = pts[i]
+            if L == 0:
+                d = math.hypot(px_ - ax, py_ - ay)
+            else:
+                d = abs((px_ - ax) * dy - (py_ - ay) * dx) / L
+            if d > best_d:
+                best_d = d
+                best_i = i
+        if best_d > tolerance:
+            rdp(lo, best_i, keep)
+            keep.add(best_i)
+            rdp(best_i, hi, keep)
+
+    keep = {0, len(pts) - 1}
+    rdp(0, len(pts) - 1, keep)
+    return [pts[i] for i in sorted(keep)]
+
+
 def remove_folds(pts, max_span: int = 60, max_rounds: int = 20):
     """Cut small self-intersection folds out of a polyline.
 
@@ -561,8 +599,8 @@ def boundary_rails(mask: set[tuple[int, int]], min_len: float = 2.0):
     rail_b = [(float(x), float(y))
               for x, y in (boundary[hi:] + boundary[:lo + 1])]
     rail_b = rail_b[::-1]  # both rails run split-point lo -> hi
-    rail_a = _smooth(rail_a, passes=2)
-    rail_b = _smooth(rail_b, passes=2)
+    rail_a = simplify_polyline(_smooth(rail_a, passes=2))
+    rail_b = simplify_polyline(_smooth(rail_b, passes=2))
     if len(rail_a) < 2 or len(rail_b) < 2:
         return None
     return rail_a, rail_b, False
@@ -650,9 +688,9 @@ def satinize_mask(mask: set[tuple[int, int]], min_half_width: float = 1.0,
                 or (p[0], p[1]+1) not in mask or (p[0], p[1]-1) not in mask}
     snapped = []
     for rail_a, rail_b, closed in out:
-        rail_a = remove_folds(_smooth(
-            snap_rails_to_boundary(rail_a, boundary), passes=1))
-        rail_b = remove_folds(_smooth(
-            snap_rails_to_boundary(rail_b, boundary), passes=1))
+        rail_a = simplify_polyline(remove_folds(_smooth(
+            snap_rails_to_boundary(rail_a, boundary), passes=1)))
+        rail_b = simplify_polyline(remove_folds(_smooth(
+            snap_rails_to_boundary(rail_b, boundary), passes=1)))
         snapped.append((rail_a, rail_b, closed))
     return snapped

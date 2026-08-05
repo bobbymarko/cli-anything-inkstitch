@@ -301,11 +301,37 @@ class TestBoundarySnapping:
         mask = rect_mask(0, 0, 60, 12)   # bar: outline at y=0 and y=11
         pairs = satinize_mask(mask)
         rail_a, rail_b, _ = max(pairs, key=lambda p: len(p[0]))
-        # interior rail points (away from the capped ends) must sit on the
-        # drawn edges, not hover half a pixel off them
+        # rails (as polylines — vertices may be sparse after
+        # simplification) must run along the drawn edges, not hover off
+        from cli_anything_inkstitch.artifact.gate import point_to_poly_dist
         for rail in (rail_a, rail_b):
-            ys = [y for x, y in rail if 10 < x < 50]
-            assert ys, "no interior points"
-            mean_y = sum(ys) / len(ys)
-            assert min(abs(mean_y - 0), abs(mean_y - 11)) < 1.0, \
-                f"rail hovers off the outline (mean y {mean_y:.2f})"
+            d_top = sum(point_to_poly_dist((x, 0.0), rail)
+                        for x in range(10, 51, 5)) / 9
+            d_bot = sum(point_to_poly_dist((x, 11.0), rail)
+                        for x in range(10, 51, 5)) / 9
+            assert min(d_top, d_bot) < 1.0, \
+                f"rail hovers off the outline ({d_top:.2f}/{d_bot:.2f})"
+
+
+class TestRailSimplification:
+    def test_rails_have_few_points(self):
+        from cli_anything_inkstitch.trace.satinize import satinize_mask
+        mask = rect_mask(0, 0, 100, 10)
+        pairs = satinize_mask(mask)
+        rail_a, rail_b, _ = max(pairs, key=lambda p: len(p[0]))
+        # a straight 100px bar needs a handful of rail points, not one
+        # per pixel-walk sample
+        assert len(rail_a) <= 12, f"rail A has {len(rail_a)} points"
+        assert len(rail_b) <= 12, f"rail B has {len(rail_b)} points"
+
+    def test_simplification_preserves_shape(self):
+        import math
+        from cli_anything_inkstitch.trace.satinize import simplify_polyline
+        arc = [(50 * math.cos(a), 50 * math.sin(a))
+               for a in [i * math.pi / 200 for i in range(201)]]
+        simple = simplify_polyline(arc, tolerance=0.8)
+        assert len(simple) < 30, f"{len(simple)} points on a smooth arc"
+        # every original point stays within tolerance of the simplified line
+        from cli_anything_inkstitch.artifact.gate import point_to_poly_dist
+        worst = max(point_to_poly_dist(p, simple) for p in arc)
+        assert worst <= 1.0, f"shape deviated {worst:.2f}px"
