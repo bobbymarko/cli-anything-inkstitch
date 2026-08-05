@@ -161,3 +161,16 @@ class TestSmallLoopSplitting:
         mask = ring_mask(40, 40, 30, 22)
         pairs = satinize_mask(mask, split_loops_shorter_than=50)
         assert any(p[2] for p in pairs)
+
+
+class TestTerminalCaps:
+    def test_open_column_covers_stroke_ends(self):
+        from cli_anything_inkstitch.trace.satinize import satinize_mask
+        mask = rect_mask(0, 0, 60, 10)
+        pairs = satinize_mask(mask)
+        rail_a, rail_b, _ = max(pairs, key=lambda p: len(p[0]))
+        xs = [p[0] for p in rail_a] + [p[0] for p in rail_b]
+        # rails must reach (or slightly pass) both bar ends, not stop a
+        # half-width short of them
+        assert min(xs) <= 1.5, f"left terminal uncovered: min x {min(xs):.1f}"
+        assert max(xs) >= 58.5, f"right terminal uncovered: max x {max(xs):.1f}"
