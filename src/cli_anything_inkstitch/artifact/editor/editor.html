@@ -1637,6 +1637,12 @@ canvas.addEventListener("pointerdown", (ev) => {
   if (activeTool === "pen" && ev.button === 0) {
     ev.stopPropagation();
     ev.preventDefault();
+    // preventDefault blocks the browser's normal focus transfer, so focus
+    // could stay in a sidebar input (chat, Reference opacity…) — where
+    // Enter belongs to the input and never finishes the line. The draft
+    // then silently continues and the next trace joins onto it. Blur.
+    if (document.activeElement && document.activeElement !== document.body
+        && document.activeElement.blur) document.activeElement.blur();
     let p = clientToSvg(ev);
     if (!penDraft) penDraft = [];
     // clicking back on the first point closes the shape → fill
@@ -1771,8 +1777,10 @@ async function commitPen(closed) {
     const id = r && r.results && r.results[0] && r.results[0].id;
     showToast(closed
       ? "added fill shape — double-click nodes (A) to smooth corners"
-      : "added running-stitch path — Convert to satin from the Inspect panel");
-    if (id) { setTool("node"); select(id); }
+      : "added running-stitch path — press A to edit its nodes");
+    // STAY in the pen: tracing places many lines back-to-back, and the old
+    // auto-switch to node raced the commit against the NEXT draft, wiping
+    // points the user had already placed (reproduced: 2 clicks vanished)
   } catch (e) { await refresh(); }
 }
 
@@ -2148,7 +2156,7 @@ function renderEditLayer() {
   for (const o of objs) {
     if (o.kind === "satin") renderSatin(o);
     else if (o.kind === "fill") renderFill(o);
-    else el("path", { d: o.d, class: "fillBoundary" }, editLayer);
+    else renderRun(o);
   }
 }
 
@@ -2724,6 +2732,50 @@ function startDrag(ev, desc) {
   window.addEventListener("pointerup", up);
 }
 const satinD = (o) => [...o.rails, ...o.rungs].join(" ");
+/* run/stroke elements (pen-traced lines, auto_run output): the same node
+   editing as fill boundaries. The "fill-node" drag path already commits
+   via set_path on o.d — which is exactly a stroke's geometry too — so
+   only the delete floor differs (an open line is still a line with 2). */
+function renderRun(o) {
+  el("path", { d: o.d, class: "fillBoundary" }, editLayer);
+  const segs = tokenizePath(o.d);
+  anchors(segs).forEach((a, ai) => {
+    const isActive = activeNode && activeNode.objId === o.id &&
+                     activeNode.rail === undefined && activeNode.index === ai;
+    const c = el("circle", { cx: a.x, cy: a.y, r: px(isActive ? 6 : 4.5),
+                             class: "node" + (isActive ? " nodeActive" : "") }, editLayer);
+    c.addEventListener("pointerdown", (ev) =>
+      startDrag(ev, { type: "fill-node", obj: o, anchor: ai, segs }));
+    c.addEventListener("dblclick", (ev) => {
+      ev.stopPropagation();
+      const changed = ev.altKey ? retractAnchor(segs, ai) : smoothAnchor(segs, ai);
+      if (!changed) return;
+      o.d = serializePath(segs);
+      activeNode = { objId: o.id, index: ai };
+      renderEditLayer();
+      postEdit([{ op: "set_path", id: o.id, d: o.d }]).catch(() => refresh());
+    });
+    c.addEventListener("contextmenu", (ev) =>
+      showContextMenu(ev, nodeMenuItems(o, segs, ai, () => {
+        o.d = serializePath(segs);
+        activeNode = { objId: o.id, index: ai };
+        postEdit([{ op: "set_path", id: o.id, d: o.d }]).catch(() => refresh());
+      }, () => deleteRunNode(o, ai))));
+  });
+  if (activeNode && activeNode.objId === o.id && activeNode.rail === undefined)
+    renderBezControls(o, segs, activeNode.index, {});
+}
+async function deleteRunNode(o, ai) {
+  const segs = tokenizePath(o.d);
+  if (!deleteAnchor(segs, ai, 2)) {
+    showToast("can't remove — the line needs at least 2 nodes", true);
+    renderEditLayer();
+    return;
+  }
+  o.d = serializePath(segs);
+  renderEditLayer();
+  await postEdit([{ op: "set_path", id: o.id, d: o.d }]);
+}
 async function deleteFillNode(o, ai) {
   const segs = tokenizePath(o.d);
   if (!deleteAnchor(segs, ai)) {
@@ -2840,7 +2892,8 @@ document.addEventListener("keydown", (ev) => {
     const idx = activeNode.index, rail = activeNode.rail;
     activeNode = null;
     if (o) (rail !== undefined ? deleteRailNode(o, rail, idx)
-                               : deleteFillNode(o, idx));
+            : o.kind === "fill" ? deleteFillNode(o, idx)
+                                : deleteRunNode(o, idx));
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && selection.length) {
     // no rung/node targeted → delete the selected object(s); Cmd+Z restores
     const ids = [...selection];
