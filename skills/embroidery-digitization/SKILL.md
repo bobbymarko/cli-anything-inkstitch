@@ -449,7 +449,54 @@ Note: there's no per-element `inkstitch:thread_color` attribute. Inkstitch reads
 
 ---
 
-## 15. When this skill doesn't have the answer
+## 15. Vector-art → satin patch: the workflow that survived a real deadline
+
+Proven on a 5-inch logo patch (spirals, two text sizes, ring border) that
+stitched out clean on the first physical run. Every automated satinization
+attempt before it failed review; this sequence did not.
+
+1. **Rungs are design decisions — get them from a human, or imitate one.**
+   The breakthrough input was the artist's own rung lines drawn on the
+   source SVG (red strokes): ONE rung across any straight stretch, dense
+   clusters through tight turns. The engine's `fill_to_satin` driven by
+   those rungs beat every skeleton-derived rail set we generated. If
+   generating rungs automatically, reproduce that placement logic
+   (curvature-adaptive spacing, perpendicular to the local axis) and show
+   them for review BEFORE converting.
+2. **One engine run per shape.** Batch `fill_to_satin` runs invite two
+   silent failures: a rung that touches two shapes starves a section in
+   one of them (`keep=none` DELETES unrunged sections), and any fill with
+   no rung pops a GUI dialog on the user's screen. Isolate each fill with
+   only its own intersecting rungs in a temp doc, convert, transplant.
+3. **Column ends and stitch order are explicit, not emergent.** The engine
+   defaults `start_at_nearest_point`/`end_at_nearest_point` to true, so
+   satins enter wherever the previous element finished — visibly
+   mid-column. Attach `starting_point`/`ending_point` commands at the rail
+   ends of every open column (closed rings keep their seam), and order
+   elements left-to-right within each color block. Both changes together
+   also cut stitch count (~1%) by shrinking travel.
+4. **Below ~1.0mm stroke width, satin is the wrong answer.** Measure the
+   art first (this patch's small text was 0.56–0.69mm): run it as
+   bean-stitch centerlines instead — ideally hand-traced over a reference
+   overlay, then routed with `auto_run` (underpaths hide travel inside
+   letterforms) and beaned at ~0.9mm stitch length. Skeleton-extracted
+   centerlines shred at serif junctions; tracing took the user minutes and
+   read perfectly.
+5. **Node economy: never pre-flatten the source.** Flattening beziers to
+   polylines before conversion (this build used 16 segments/curve)
+   multiplies every downstream node count — the engine samples its rails
+   from whatever you feed it, and editing dense rails is miserable. Keep
+   source curves intact through coordinate transforms (`transform_d`), and
+   RDP-simplify engine-emitted rails before storing them.
+6. **Verify with the DST, not the render.** Two shipped-then-caught bugs
+   were invisible in every preview but obvious in the decoded machine
+   file: a duplicated element block (4 color changes instead of 2) and
+   ordering that jumped across the design. Decode stitches, count color
+   changes, check run-start progression.
+
+---
+
+## 16. When this skill doesn't have the answer
 
 Test sew-out. Embroidery is empirical. Take a 5×5cm scrap of the actual fabric you'll use, hoop with the actual stabilizer, run the design at the actual machine speed, then look at it under good light. If it looks wrong, the symptom usually maps to one of the entries in §10 above. Iterate.
 

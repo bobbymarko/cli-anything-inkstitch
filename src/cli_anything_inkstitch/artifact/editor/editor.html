@@ -3728,9 +3728,15 @@ $("helpOverlay").addEventListener("click", (ev) => {
 /* ---------- boot ---------- */
 async function refresh() {
   design = await getDesign();
-  // hover the header title to see WHICH file edits are landing in — easy to
-  // lose track when several designs are open in different tabs
-  if (design.svg_path) $("brand").title = design.svg_path;
+  // the header IS the filename — with several designs open, "which file am
+  // I editing" should never need a hover. Full path stays in the tooltip,
+  // and the tab title matches so the right tab is findable too.
+  if (design.svg_path) {
+    const base = design.svg_path.split("/").pop();
+    $("brand").textContent = base;
+    $("brand").title = design.svg_path;
+    document.title = base + " — Digitizing Artifact";
+  }
   renderAll();
   renderOverview();
   renderLayers();
