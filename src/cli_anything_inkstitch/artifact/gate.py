@@ -328,11 +328,33 @@ def check_satin(obj: dict[str, Any], scale: float) -> list[dict]:
         rails_closed = all(math.dist(f[0], f[-1]) * scale < 0.5 for f in flat)
         interior = widths if rails_closed or len(widths) < 10 \
             else widths[len(widths) // 10: -len(widths) // 10]
+        # a professional column ENDS in a taper — rails converge to the
+        # artwork's true point (engine fill_to_satin output does this) and
+        # the tip is legitimately below stitchable width. Walk in from each
+        # end past any sub-minimum taper (up to a third of the column);
+        # only narrowness that survives in the interior is an error.
+        taper_ends = False
+        if not rails_closed and len(interior) >= 10:
+            # a taper may occupy up to half the column (spiral tips do)
+            cap = len(interior) // 2
+            lo, hi = 0, len(interior)
+            while lo < cap and interior[lo] < SATIN_MIN_WIDTH_MM:
+                lo += 1
+                taper_ends = True
+            while hi > len(interior) - cap and \
+                    interior[hi - 1] < SATIN_MIN_WIDTH_MM:
+                hi -= 1
+                taper_ends = True
+            interior = interior[lo:hi] or interior
         wmin, wmax = min(interior or widths), max(widths)
         if wmin < SATIN_MIN_WIDTH_MM:
             out.append(_finding("error", obj["id"], "width_min",
                                 f"satin narrows to {wmin:.2f}mm (min stitchable "
                                 f"{SATIN_MIN_WIDTH_MM}mm)", width_mm=round(wmin, 2)))
+        elif taper_ends:
+            out.append(_finding("warning", obj["id"], "width_taper_ends",
+                                "column tapers below stitchable width at its "
+                                "tip (normal for pointed terminals)"))
         elif wmin < SATIN_NARROW_WARN_MM:
             out.append(_finding("warning", obj["id"], "width_narrow",
                                 f"satin narrows to {wmin:.2f}mm — consider ≥"

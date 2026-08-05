@@ -309,3 +309,36 @@ class TestClosedPolylineSelfIntersection:
         from cli_anything_inkstitch.artifact.gate import poly_self_intersects
         bowtie = [(0, 0), (10, 10), (10, 0), (0, 10), (0, 0)]
         assert poly_self_intersects(bowtie)
+
+
+class TestTaperedTerminals:
+    """Engine fill_to_satin ends columns in a taper to the artwork's true
+    point — the tip is legitimately below stitchable width. Only interior
+    narrowness is an error (first hit: celtic-patch v9 user-rung satins)."""
+
+    def _obj(self, rail_a, rail_b):
+        return {"id": "t", "kind": "satin", "rails": [rail_a, rail_b],
+                "rungs": [], "params": {}}
+
+    def test_tapered_tip_is_a_warning_not_error(self):
+        from cli_anything_inkstitch.artifact.gate import check_satin
+        # rails converge at the right end (tip), 2mm wide elsewhere
+        # (scale=1: coords are mm)
+        a = "M 0,0 " + " ".join(f"L {x},0" for x in range(1, 21)) \
+            + " L 24,0.9"
+        b = "M 0,2 " + " ".join(f"L {x},2" for x in range(1, 21)) \
+            + " L 24,1.1"
+        findings = check_satin(self._obj(a, b), scale=1.0)
+        checks = {f["check"]: f["severity"] for f in findings}
+        assert checks.get("width_min") is None, findings
+        # short tapers are absorbed by the interior trim; longer ones emit
+        # the width_taper_ends warning — either way, never an error
+
+    def test_interior_pinch_still_errors(self):
+        from cli_anything_inkstitch.artifact.gate import check_satin
+        # 2mm column pinching to 0.2mm in the middle
+        a = "M 0,0 L 8,0 L 12,0.9 L 16,0 L 24,0"
+        b = "M 0,2 L 8,2 L 12,1.1 L 16,2 L 24,2"
+        findings = check_satin(self._obj(a, b), scale=1.0)
+        assert any(f["check"] == "width_min" and f["severity"] == "error"
+                   for f in findings), findings
