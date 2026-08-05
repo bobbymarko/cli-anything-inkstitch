@@ -357,7 +357,12 @@
   .artwork path { opacity: .28; }
   /* fill is set per-element as an attribute (interior clickable for fills,
      edge-only for strokes) — no fill rule here or it overrides the attribute */
-  .obj-hit { stroke: transparent; stroke-width: 6; cursor: pointer; }
+  /* click tolerance is a SCREEN-space affordance: 6 screen px, not 6 user
+     units. A user-unit stroke grows as you zoom in — at tracing zoom the
+     teal spiral's invisible hit stroke was wider than the gaps between its
+     own coils, swallowing every click meant for the yellow shapes behind. */
+  .obj-hit { stroke: transparent; stroke-width: 6; cursor: pointer;
+             vector-effect: non-scaling-stroke; }
   .fillBoundary { fill: none; stroke: var(--accent); stroke-dasharray: 4 3;
                   vector-effect: non-scaling-stroke; }
   .rail { fill: none; stroke: var(--rail); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
@@ -969,7 +974,8 @@ async function fetchTier2() {
   const gen = ++tier2Gen;
   $("viewModes").classList.add("loading");    // pulse on the active mode button
   try {
-    const r = await fetch(api("/stitches"));
+    const r = await fetch(api("/stitches") + (hiddenIds.size
+      ? "?exclude=" + encodeURIComponent([...hiddenIds].join(",")) : ""));
     const data = await r.json();
     if (gen !== tier2Gen) return;            // superseded by a newer edit
     if (!r.ok || data.error) {
@@ -1829,9 +1835,17 @@ function renderAll() {
     // (selection flattens it into the geometry so editing stays in root
     // coordinates)
     const tAttr = o.transform ? { transform: o.transform } : {};
+    // evenodd on BOTH paths: a spiral satin's band polygon wraps the gaps
+    // between its own coils, so the default nonzero rule fills them — the
+    // artwork looks wrong and, worse, the transparent hit path swallows
+    // clicks meant for shapes visible through those gaps. Evenodd leaves
+    // ribbon gaps and subpath holes empty, matching how the engine reads
+    // nested subpaths (containment = hole), so clicks fall through.
     el("path", { d: displayD, fill: displayFill || "none",
+      "fill-rule": "evenodd",
       stroke: displayStroke || "none", "stroke-width": .4, ...tAttr }, artworkLayer);
     const hit = el("path", { d: displayD, class: "obj-hit",
+      "fill-rule": "evenodd",
       fill: displayFill ? "rgba(0,0,0,0)" : "none", ...tAttr }, artworkLayer);
     hit.addEventListener("pointerdown", (ev) => {
       if (spaceHeld) return;                      // hand tool wins
@@ -3199,6 +3213,7 @@ function renderLayers() {
       else hiddenIds.add(o.id);
       renderAll();
       renderLayers();
+      scheduleTier2();   // stitch/realistic views re-plan the visible subset
     });
     if (hiddenIds.has(o.id)) r.classList.add("hiddenRow");
     if (usesIgnoredMethod(o)) {

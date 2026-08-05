@@ -213,6 +213,43 @@ class TestStitchPlan:
         assert b"<svg" in svg or b"<?xml" in svg
 
 
+class TestStitchSequenceExclude:
+    """Layers-panel eye toggles re-plan the visible subset: exclude=ids maps
+    to a stitch_plan_preview selection of every OTHER stitchable element.
+    The engine call is faked — what's under test is the include-list math."""
+
+    def _capture(self, monkeypatch):
+        from cli_anything_inkstitch.artifact import design_model as dm
+        captured = {}
+        def fake_plan(project_file, *, binary_override=None, ids=None):
+            captured["ids"] = ids
+            return TestExtractStitchBlocks.PLAN
+        monkeypatch.setattr(dm, "stitch_plan_svg", fake_plan)
+        return captured
+
+    def test_exclude_selects_the_others(self, project, monkeypatch):
+        from cli_anything_inkstitch.artifact.design_model import stitch_sequence
+        captured = self._capture(monkeypatch)
+        out = stitch_sequence(project, exclude=["elem_satin"])
+        # command <use> markers must not leak into the selection
+        assert captured["ids"] == ["elem_fill", "elem_run"]
+        assert out["total_stitches"] == 8
+
+    def test_no_exclude_keeps_whole_document_call(self, project, monkeypatch):
+        from cli_anything_inkstitch.artifact.design_model import stitch_sequence
+        captured = self._capture(monkeypatch)
+        stitch_sequence(project)
+        assert captured["ids"] is None
+
+    def test_everything_hidden_skips_the_engine(self, project, monkeypatch):
+        from cli_anything_inkstitch.artifact.design_model import stitch_sequence
+        captured = self._capture(monkeypatch)
+        out = stitch_sequence(
+            project, exclude=["elem_fill", "elem_satin", "elem_run"])
+        assert "ids" not in captured          # engine never invoked
+        assert out == {"blocks": [], "total_stitches": 0}
+
+
 class TestExtractStitchBlocks:
     """Parser for the binary's stitch-plan SVG → ordered stitch polylines.
 

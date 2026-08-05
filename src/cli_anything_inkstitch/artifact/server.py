@@ -231,7 +231,7 @@ class ArtifactHandler(BaseHTTPRequestHandler):
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "preview":
                 self._handle_preview(parts[1], parse_qs(parsed.query))
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "stitches":
-                self._handle_stitches(parts[1])
+                self._handle_stitches(parts[1], parse_qs(parsed.query))
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "history":
                 self._handle_history(parts[1])
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "gate":
@@ -710,13 +710,20 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _handle_stitches(self, key: str) -> None:
+    def _handle_stitches(self, key: str, query: dict | None = None) -> None:
         session = self.state.store.find_by_key(key)
         if not session:
             self._json({"error": "session not found"}, 404)
             return
         from cli_anything_inkstitch.artifact.design_model import stitch_sequence
-        self._json(stitch_sequence(session["file"]))
+        # ?exclude=id1,id2 — plan WITHOUT those elements (Layers eye toggles:
+        # the engine's plan SVG groups by color block, not source element, so
+        # hiding honestly means re-planning the visible subset)
+        exclude = set()
+        for raw in (query or {}).get("exclude", []):
+            exclude.update(x for x in raw.split(",") if x)
+        self._json(stitch_sequence(session["file"],
+                                   exclude=sorted(exclude) or None))
 
     def _handle_gate(self, key: str) -> None:
         session = self.state.store.find_by_key(key)

@@ -983,10 +983,33 @@ def extract_stitch_blocks(svg_bytes: bytes) -> dict[str, Any]:
     return {"blocks": blocks, "total_stitches": total}
 
 
-def stitch_sequence(project_file: str, *, binary_override: str | None = None) -> dict[str, Any]:
-    """Authoritative stitch order for the editor's plan display + timeline."""
+def stitch_sequence(project_file: str, *, binary_override: str | None = None,
+                    exclude: list[str] | None = None) -> dict[str, Any]:
+    """Authoritative stitch order for the editor's plan display + timeline.
+
+    `exclude` drops elements from the plan by re-planning the visible
+    subset: stitch_plan_preview accepts a selection (--id per element), so
+    the include list is every stitchable element id minus the excluded
+    ones. Passing no ids keeps whole-document behavior byte-identical.
+    """
+    ids: list[str] | None = None
+    if exclude:
+        dropped = set(exclude)
+        shape_tags = ("path", "rect", "circle", "ellipse", "line",
+                      "polygon", "polyline")
+        with _open_locked(project_file) as (_proj, tree):
+            all_ids = [
+                elem.get("id") for elem in tree.getroot().iter()
+                if isinstance(elem.tag, str)
+                and etree.QName(elem.tag).localname in shape_tags
+                and elem.get("id")
+                and not _is_command_use(elem)
+                and not _is_command_plumbing(elem)]
+        ids = [i for i in all_ids if i not in dropped]
+        if not ids:
+            return {"blocks": [], "total_stitches": 0}
     return extract_stitch_blocks(
-        stitch_plan_svg(project_file, binary_override=binary_override))
+        stitch_plan_svg(project_file, binary_override=binary_override, ids=ids))
 
 
 # -- Tier-2: authoritative stitch plan ------------------------------------------
