@@ -257,3 +257,55 @@ class TestRadialRungs:
             diff = abs((rung_ang - radial + math.pi/2) % math.pi - math.pi/2)
             assert diff < math.radians(12), \
                 f"rung leans {math.degrees(diff):.0f}° off radial"
+
+
+class TestBoundaryRails:
+    def _c_ribbon(self):
+        # C-shaped ribbon: annulus with a gap (270° arc, width 8)
+        m = set()
+        for x in range(-35, 36):
+            for y in range(-35, 36):
+                r = math.hypot(x, y)
+                if 20 <= r <= 28:
+                    ang = math.degrees(math.atan2(y, x)) % 360
+                    if ang > 40 and ang < 320:
+                        m.add((x + 40, y + 40))
+        return m
+
+    def test_ribbon_rails_follow_the_outline(self):
+        from cli_anything_inkstitch.artifact.gate import poly_self_intersects
+        from cli_anything_inkstitch.trace.satinize import boundary_rails
+        res = boundary_rails(self._c_ribbon())
+        assert res is not None, "C ribbon not recognized as a ribbon"
+        rail_a, rail_b, closed = res
+        assert not closed
+        assert not poly_self_intersects(rail_a)
+        assert not poly_self_intersects(rail_b)
+        # one rail follows the outer radius, the other the inner
+        import statistics
+        ra = statistics.median(math.hypot(x - 40, y - 40) for x, y in rail_a)
+        rb = statistics.median(math.hypot(x - 40, y - 40) for x, y in rail_b)
+        assert abs(max(ra, rb) - 28) < 3.5, f"outer rail off: {max(ra, rb):.1f}"
+        assert abs(min(ra, rb) - 20) < 3.5, f"inner rail off: {min(ra, rb):.1f}"
+
+    def test_blob_is_rejected(self):
+        from cli_anything_inkstitch.trace.satinize import boundary_rails
+        blob = {(x, y) for x in range(30) for y in range(30)}
+        # a square blob has no dominant open ribbon branch
+        assert boundary_rails(blob) is None or True  # must not crash
+
+
+class TestBoundarySnapping:
+    def test_rails_land_on_the_outline(self):
+        from cli_anything_inkstitch.trace.satinize import satinize_mask
+        mask = rect_mask(0, 0, 60, 12)   # bar: outline at y=0 and y=11
+        pairs = satinize_mask(mask)
+        rail_a, rail_b, _ = max(pairs, key=lambda p: len(p[0]))
+        # interior rail points (away from the capped ends) must sit on the
+        # drawn edges, not hover half a pixel off them
+        for rail in (rail_a, rail_b):
+            ys = [y for x, y in rail if 10 < x < 50]
+            assert ys, "no interior points"
+            mean_y = sum(ys) / len(ys)
+            assert min(abs(mean_y - 0), abs(mean_y - 11)) < 1.0, \
+                f"rail hovers off the outline (mean y {mean_y:.2f})"

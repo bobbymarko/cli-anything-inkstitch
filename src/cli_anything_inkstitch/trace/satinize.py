@@ -488,6 +488,114 @@ def rails_to_satin_d(rail_a, rail_b, transform=None,
     return " ".join(parts)
 
 
+def trace_boundary(mask: set[tuple[int, int]]):
+    """Ordered outer boundary polygon of a component (Moore tracing)."""
+    start = min(mask, key=lambda p: (p[1], p[0]))
+    # Moore neighborhood in clockwise order starting from W
+    ring = ((-1, 0), (-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1))
+    boundary = [start]
+    prev_dir = 0
+    cur = start
+    while True:
+        found = False
+        for k in range(8):
+            d = (prev_dir + 6 + k) % 8  # backtrack then clockwise sweep
+            nb = (cur[0] + ring[d][0], cur[1] + ring[d][1])
+            if nb in mask:
+                if nb == start and len(boundary) > 2:
+                    return boundary
+                boundary.append(nb)
+                prev_dir = d
+                cur = nb
+                found = True
+                break
+        if not found:
+            return boundary  # single pixel / line
+        if len(boundary) > 8 * len(mask):
+            return boundary  # safety
+
+
+def boundary_rails(mask: set[tuple[int, int]], min_len: float = 2.0):
+    """Rails for a ribbon-like component straight from its OUTLINE.
+
+    For long smooth ribbons (spirals, swashes) the medial axis is the
+    wrong tool: junction noise shreds them into fragments and offset
+    rails fold at the curls (user-visible on the celtic spirals through
+    three iterations).  The shape's boundary IS the two rails — split the
+    outline at the ribbon's two ends (nearest boundary points to the
+    skeleton's farthest endpoint pair) and the taper, curls and joints
+    come out exactly as drawn, with zero derived geometry.
+
+    Returns (rail_a, rail_b, False) or None when the component doesn't
+    read as a single ribbon (its skeleton has no dominant open branch).
+    """
+    skel = skeletonize(mask)
+    if not skel:
+        return None
+    radii = distance_transform(mask)
+    skel_radii = {p: radii.get(p, 1.0) for p in skel}
+    branches = merge_collinear_branches(
+        extract_branches(skel, skel_radii, min_spur_factor=1.2))
+    open_branches = [b for b in branches if b[0] != b[-1]]
+    if not open_branches:
+        return None
+    main = max(open_branches, key=len)
+    total = sum(len(b) for b in branches)
+    if len(main) < 0.6 * total or len(main) < min_len:
+        return None  # not ribbon-like; caller should use the medial axis
+    e1, e2 = main[0], main[-1]
+
+    boundary = trace_boundary(mask)
+    if len(boundary) < 8:
+        return None
+
+    def nearest_idx(pt):
+        return min(range(len(boundary)),
+                   key=lambda i: (boundary[i][0]-pt[0])**2
+                               + (boundary[i][1]-pt[1])**2)
+    i1, i2 = nearest_idx(e1), nearest_idx(e2)
+    if i1 == i2:
+        return None
+    lo, hi = min(i1, i2), max(i1, i2)
+    rail_a = [(float(x), float(y)) for x, y in boundary[lo:hi + 1]]
+    rail_b = [(float(x), float(y))
+              for x, y in (boundary[hi:] + boundary[:lo + 1])]
+    rail_b = rail_b[::-1]  # both rails run split-point lo -> hi
+    rail_a = _smooth(rail_a, passes=2)
+    rail_b = _smooth(rail_b, passes=2)
+    if len(rail_a) < 2 or len(rail_b) < 2:
+        return None
+    return rail_a, rail_b, False
+
+
+def snap_rails_to_boundary(rail, boundary: set[tuple[int, int]],
+                           tolerance: float = 3.0):
+    """Snap rail points onto the component's true outline where close.
+
+    Offset rails approximate the boundary; snapping makes the satin flank
+    EXACTLY the drawn edge (the celtic spirals visibly wobbled off their
+    outline).  Points far from any boundary (interior joints where two
+    columns meet) keep their offset position — that interior seam is
+    where a neighboring column continues.
+    """
+    out = []
+    t = int(math.ceil(tolerance))
+    for x, y in rail:
+        ix, iy = int(round(x)), int(round(y))
+        best = None
+        best_d = tolerance * tolerance
+        for dx in range(-t, t + 1):
+            for dy in range(-t, t + 1):
+                q = (ix + dx, iy + dy)
+                if q in boundary:
+                    d = (q[0] - x) ** 2 + (q[1] - y) ** 2
+                    if d < best_d:
+                        best_d = d
+                        best = q
+        out.append((float(best[0]), float(best[1])) if best else (x, y))
+    return out
+
+
 def satinize_mask(mask: set[tuple[int, int]], min_half_width: float = 1.0,
                   min_spur_factor: float = 1.2,
                   split_loops_shorter_than: float = 0.0):
@@ -535,4 +643,16 @@ def satinize_mask(mask: set[tuple[int, int]], min_half_width: float = 1.0,
         rails = branch_to_rails(branch, skel_radii, min_half_width)
         if rails is not None:
             out.append(rails)
-    return out
+
+    # snap flanks onto the drawn outline (see snap_rails_to_boundary)
+    boundary = {p for p in mask
+                if (p[0]+1, p[1]) not in mask or (p[0]-1, p[1]) not in mask
+                or (p[0], p[1]+1) not in mask or (p[0], p[1]-1) not in mask}
+    snapped = []
+    for rail_a, rail_b, closed in out:
+        rail_a = remove_folds(_smooth(
+            snap_rails_to_boundary(rail_a, boundary), passes=1))
+        rail_b = remove_folds(_smooth(
+            snap_rails_to_boundary(rail_b, boundary), passes=1))
+        snapped.append((rail_a, rail_b, closed))
+    return snapped
