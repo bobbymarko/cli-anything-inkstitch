@@ -323,6 +323,7 @@ def read_design(project_file: str) -> dict[str, Any]:
             # of whoever is correcting the design
             "context": proj.session.get("context") or {},
             "reference": proj.session.get("reference") or None,
+            "svg_path": proj.svg_path,
             "session": {k: proj.session.get(k)
                         for k in ("hoop", "thread_palette", "machine_target")
                         if proj.session.get(k)},

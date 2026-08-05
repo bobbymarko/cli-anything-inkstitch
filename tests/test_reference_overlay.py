@@ -100,7 +100,10 @@ def test_design_payload_carries_reference(workdir, project_path):
     """The editor learns about the overlay through read_design — pin it."""
     from cli_anything_inkstitch.artifact.design_model import read_design
     runner, _svg = _open(workdir, project_path)
-    assert read_design(project_path)["reference"] is None
+    first = read_design(project_path)
+    assert first["reference"] is None
+    # the editor's header tooltip (which file am I editing?) reads this
+    assert first["svg_path"] == str(workdir / "design.svg")
     img = _ref_image(workdir)
     _run(runner, "document", "set-reference", "--project", project_path,
          "--image", str(img), "--opacity", "0.6")

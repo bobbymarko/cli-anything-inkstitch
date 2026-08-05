@@ -192,7 +192,18 @@ def poly_self_intersects(pts: list[tuple[float, float]]) -> bool:
     rails from a letter outline) the closing segment is adjacent to the
     first segment: they legitimately share an endpoint and must not count
     as a crossing.  Index distance alone can't see that adjacency.
+
+    Consecutive duplicate points are dropped first: the engine's
+    fill_to_satin emits rails whose closure point repeats 2-3 times, which
+    shifts the true closing segment away from the last index and defeats
+    the adjacency exemption (a celtic border ring false-positived exactly
+    this way).
     """
+    deduped = [pts[0]] if pts else []
+    for p in pts[1:]:
+        if abs(p[0] - deduped[-1][0]) > 1e-6 or abs(p[1] - deduped[-1][1]) > 1e-6:
+            deduped.append(p)
+    pts = deduped
     n = len(pts) - 1
     closed = (n >= 2 and abs(pts[0][0] - pts[n][0]) < 1e-6
               and abs(pts[0][1] - pts[n][1]) < 1e-6)

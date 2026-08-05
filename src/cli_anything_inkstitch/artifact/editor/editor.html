@@ -151,6 +151,11 @@
   .refNum { width: 64px; font-size: 11px; }
   .refName { font-size: 11px; padding: 2px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
+  .eyeBtn { background: none; border: none; cursor: pointer; padding: 0 2px;
+            font-size: 11px; line-height: 1; opacity: .75; }
+  .eyeBtn:hover { opacity: 1; }
+  .eyeBtn.off { opacity: .35; }
+  .layerRow.hiddenRow .nm { opacity: .4; text-decoration: line-through; }
   .ovRow { display: flex; justify-content: space-between; gap: 8px;
            padding: 2px 0; font-size: 12px; }
   .ovRow .k { color: var(--muted); }
@@ -392,7 +397,7 @@
 </head>
 <body>
 <div id="bar">
-  <div class="brand">Digitizing Artifact</div>
+  <div class="brand" id="brand">Digitizing Artifact</div>
   <button class="chip" id="helpBtn" type="button" title="How to use"
           aria-label="How to use">?</button>
   <div class="spacer"></div>
@@ -1643,6 +1648,10 @@ function el(tag, attrs, parent) {
   return e;
 }
 let artworkLayer, planLayer, editLayer, refLayer;
+// editor-local canvas visibility (Layers panel eye toggles). Deliberately NOT
+// persisted anywhere: hiding is a tracing aid, and the design must stitch
+// identically whether or not something is hidden on screen.
+const hiddenIds = new Set();
 function renderAll() {
   canvas.textContent = "";
   parseViewBox();
@@ -1664,6 +1673,7 @@ function renderAll() {
   drawRulers();
   for (const o of design.objects) {
     if (!o.d) continue;
+    if (hiddenIds.has(o.id)) continue;   // eye toggle (view-only, still stitches)
     // satins preview as the FILLED column between the rails — the thread
     // mass they become — not as hairline rail strokes (and never with the
     // rungs, which are editing scaffolding). Rail A + rail B reversed forms
@@ -3030,13 +3040,30 @@ function renderLayers() {
     const kd = document.createElement("span");
     kd.className = "kd";
     kd.textContent = o.kind;
+    // eye toggle: editor-local visibility for tracing over the reference —
+    // NEVER written to the SVG (display:none would silently drop the element
+    // from the stitch plan; hiding here is a view aid, not a design edit)
+    const eye = document.createElement("button");
+    eye.type = "button";
+    eye.className = "eyeBtn" + (hiddenIds.has(o.id) ? " off" : "");
+    eye.textContent = hiddenIds.has(o.id) ? "◡" : "👁";
+    eye.title = hiddenIds.has(o.id)
+      ? "Show on canvas" : "Hide on canvas (view only — still stitches)";
+    eye.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (hiddenIds.has(o.id)) hiddenIds.delete(o.id);
+      else hiddenIds.add(o.id);
+      renderAll();
+      renderLayers();
+    });
+    if (hiddenIds.has(o.id)) r.classList.add("hiddenRow");
     if (usesIgnoredMethod(o)) {
       const warn = document.createElement("span");
       warn.className = "warnBadge";
       warn.textContent = "⚠";
       warn.title = ignoredMethodNote();
-      r.append(num, sw, nm, warn, kd);
-    } else r.append(num, sw, nm, kd);
+      r.append(num, sw, nm, warn, eye, kd);
+    } else r.append(num, sw, nm, eye, kd);
     r.addEventListener("click", (ev) =>
       select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey));
     r.addEventListener("contextmenu", (ev) =>
@@ -3484,6 +3511,9 @@ $("helpOverlay").addEventListener("click", (ev) => {
 /* ---------- boot ---------- */
 async function refresh() {
   design = await getDesign();
+  // hover the header title to see WHICH file edits are landing in — easy to
+  // lose track when several designs are open in different tabs
+  if (design.svg_path) $("brand").title = design.svg_path;
   renderAll();
   renderOverview();
   renderLayers();

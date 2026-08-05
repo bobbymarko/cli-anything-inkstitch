@@ -305,6 +305,20 @@ class TestClosedPolylineSelfIntersection:
         from cli_anything_inkstitch.artifact.gate import poly_self_intersects
         assert not poly_self_intersects([(0, 0), (10, 0), (10, 10), (0, 10)])
 
+    def test_duplicate_closure_points_are_not_a_crossing(self):
+        """fill_to_satin emits ring rails whose closure point repeats 2-3
+        times; the stale duplicates shift the closing segment away from the
+        last index and used to defeat the adjacency exemption (celtic border
+        ring, v2 build)."""
+        from cli_anything_inkstitch.artifact.gate import poly_self_intersects
+        ring = [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0), (0, 0), (0, 0)]
+        assert not poly_self_intersects(ring)
+
+    def test_duplicates_do_not_hide_real_crossing(self):
+        from cli_anything_inkstitch.artifact.gate import poly_self_intersects
+        bowtie = [(0, 0), (10, 10), (10, 0), (0, 10), (0, 0), (0, 0)]
+        assert poly_self_intersects(bowtie)
+
     def test_real_crossing_still_detected_when_closed(self):
         from cli_anything_inkstitch.artifact.gate import poly_self_intersects
         bowtie = [(0, 0), (10, 10), (10, 0), (0, 10), (0, 0)]
