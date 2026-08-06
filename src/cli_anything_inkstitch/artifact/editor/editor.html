@@ -331,6 +331,17 @@
                  color: var(--accent); border: 1px solid rgba(110,168,254,.4);
                  border-radius: 999px; padding: 2px 8px; }
   #pills .pill button { all: unset; cursor: pointer; color: var(--muted); }
+  #pills .pillSummary { cursor: pointer; user-select: none; }
+  #pillPopover { position: fixed; z-index: 60; display: flex; flex-wrap: wrap;
+                 gap: 4px; max-width: 340px; max-height: 40vh; overflow-y: auto;
+                 background: #14161a; border: 1px solid var(--line);
+                 border-radius: 10px; padding: 8px;
+                 box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+  #pillPopover .pill { display: inline-flex; gap: 6px; align-items: center;
+                 font-size: 11px; color: var(--accent);
+                 border: 1px solid rgba(110,168,254,.4);
+                 border-radius: 999px; padding: 2px 8px; }
+  #pillPopover .pill button { all: unset; cursor: pointer; color: var(--muted); }
   #inputWrap { position: relative; }
   #input { width: 100%; min-height: 60px; resize: vertical; background: #14161a;
            color: var(--text); border: 1px solid var(--line); border-radius: 10px;
@@ -395,6 +406,9 @@
   .penDraft { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
               vector-effect: non-scaling-stroke; pointer-events: none; }
   .node.penFirst { fill: var(--start); }
+  .selMarquee { fill: rgba(110,168,254,.06); stroke: var(--accent);
+                stroke-dasharray: 4 3; vector-effect: non-scaling-stroke;
+                pointer-events: none; }
   .zoomMarquee { fill: rgba(110,168,254,.08); stroke: var(--accent);
                  stroke-dasharray: 5 4; vector-effect: non-scaling-stroke;
                  pointer-events: none; }
@@ -464,6 +478,17 @@
           <path d="M8.9 3.5 L12.5 7.1"/>
         </svg>
         <span class="kbd">P</span>
+      </button>
+      <button class="tool" id="toolPan" type="button"
+              title="Pan (H) — drag to move the view; hold Space for a temporary pan with any tool">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+          <path d="M5.2 7.2 V3.4 a1.1 1.1 0 0 1 2.2 0 V6.6 M7.4 6.2 V2.6
+                   a1.1 1.1 0 0 1 2.2 0 V6.6 M9.6 6.4 V3.6 a1.1 1.1 0 0 1 2.2 0
+                   V9.4 c0 3-1.8 5-4.4 5 -2.2 0 -3.4-1.2-4.6-3.6
+                   l-1-2 a1 1 0 0 1 1.7-1 l1.3 1.6"/>
+        </svg>
+        <span class="kbd">H</span>
       </button>
       <span class="tbSep"></span>
       <div id="viewModes" role="group" aria-label="View mode">
@@ -1878,7 +1903,14 @@ function renderAll() {
   // background pan target
   const bg = el("rect", { x: baseVb.x - baseVb.w, y: baseVb.y - baseVb.h,
     width: baseVb.w * 3, height: baseVb.h * 3, fill: "transparent" }, canvas);
-  bg.addEventListener("pointerdown", startPan);
+  // Illustrator model: with the Select tool, empty-canvas drag draws a
+  // selection marquee; panning is the Pan tool (H) or held Space. Other
+  // tools keep drag-to-pan (pen clicks never reach here — the canvas
+  // capture handler stops them).
+  bg.addEventListener("pointerdown", (ev) => {
+    if (activeTool === "select" && !spaceHeld) return startMarquee(ev);
+    return startPan(ev);
+  });
   gridLayer = el("g", {}, canvas);
   refLayer = el("g", {}, canvas);   // reference art under the design, over grid
   artworkLayer = el("g", { class: "artwork" }, canvas);
@@ -2337,6 +2369,7 @@ function renderTransformGizmo(objs) {
       if (spaceHeld) return;
       const anchor = corners[(i + 2) % 4];
       startDrag(ev, { type: "g-scale", snap: snapshotObjs(objs), anchor,
+                      from: c, cx, cy,
                       diag0: Math.hypot(c[0] - anchor[0], c[1] - anchor[1]) || 1 });
     });
   });
@@ -2354,7 +2387,7 @@ function renderTransformGizmo(objs) {
     h.addEventListener("pointerdown", (ev) => {
       if (spaceHeld) return;
       startDrag(ev, { type: "g-squish", snap: snapshotObjs(objs),
-                      anchor: m.anchor, from: m.at, axis: m.axis });
+                      anchor: m.anchor, from: m.at, axis: m.axis, cx, cy });
     });
   }
 }
@@ -2652,6 +2685,45 @@ function select(id, additive = false) {
     ? selection.filter(x => x !== id)
     : [...selection, id]);
 }
+/* Select-tool rubber band: drag on empty canvas selects everything the
+   rectangle touches (intersects-only — Illustrator's direction-dependent
+   enclosed-vs-touched nuance deliberately not replicated yet). A plain
+   click still deselects, matching startPan's old behavior. */
+function startMarquee(ev0) {
+  const from = clientToSvg(ev0);
+  let rect = null, moved = false;
+  const move = (e) => {
+    if (Math.hypot(e.clientX - ev0.clientX, e.clientY - ev0.clientY) > 4) moved = true;
+    if (!moved) return;
+    const p = clientToSvg(e);
+    if (!rect) rect = el("rect", { class: "selMarquee" }, canvas);
+    rect.setAttribute("x", Math.min(from.x, p.x));
+    rect.setAttribute("y", Math.min(from.y, p.y));
+    rect.setAttribute("width", Math.abs(p.x - from.x) || 0.001);
+    rect.setAttribute("height", Math.abs(p.y - from.y) || 0.001);
+  };
+  const up = (e) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (rect) rect.remove();
+    if (!moved) { setSelection([]); return; }     // plain click deselects
+    const p = clientToSvg(e);
+    const x0 = Math.min(from.x, p.x), x1 = Math.max(from.x, p.x);
+    const y0 = Math.min(from.y, p.y), y1 = Math.max(from.y, p.y);
+    const hits = [];
+    for (const o of design.objects) {
+      if (!o.d || hiddenIds.has(o.id)) continue;
+      const bb = selectionBBox([o]);
+      if (!isFinite(bb.minx)) continue;
+      if (bb.maxx >= x0 && bb.minx <= x1 && bb.maxy >= y0 && bb.miny <= y1)
+        hits.push(o.id);
+    }
+    // shift adds to the existing selection (Illustrator)
+    setSelection(e.shiftKey ? [...new Set([...selection, ...hits])] : hits);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
 function startPan(ev) {
   const from = { x: ev.clientX, y: ev.clientY, vb: { ...vb } };
   const rect = canvas.getBoundingClientRect();
@@ -2666,8 +2738,9 @@ function startPan(ev) {
   const up = () => {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
-    // Illustrator: a plain click on empty canvas deselects everything
-    if (!moved && !spaceHeld) { setSelection([]); return; }
+    // Illustrator: a plain click on empty canvas deselects — but not for
+    // the Hand tool, whose clicks are view gestures, not selection ones
+    if (!moved && !spaceHeld && activeTool !== "pan") { setSelection([]); return; }
     renderEditLayer();
   };
   window.addEventListener("pointermove", move);
@@ -2714,10 +2787,23 @@ function startDrag(ev, desc) {
       desc.ty += dy;
       applyAffine(desc.snap, M_MOVE(desc.tx, desc.ty));
     } else if (desc.type === "g-scale") {
-      const s = Math.max(0.05,
-        Math.hypot(p.x - desc.anchor[0], p.y - desc.anchor[1]) / desc.diag0);
-      desc.s = s;
-      applyAffine(desc.snap, M_SCALE(s, s, desc.anchor[0], desc.anchor[1]));
+      // Illustrator modifiers: Alt scales about the selection center
+      // instead of the opposite corner; Shift makes the corner drag free
+      // (non-uniform). Default stays uniform-from-opposite-corner.
+      const ax = e.altKey ? desc.cx : desc.anchor[0];
+      const ay = e.altKey ? desc.cy : desc.anchor[1];
+      if (e.shiftKey) {
+        let sx = (p.x - ax) / ((desc.from[0] - ax) || 1);
+        let sy = (p.y - ay) / ((desc.from[1] - ay) || 1);
+        if (Math.abs(sx) < 0.05) sx = 0.05 * (sx < 0 ? -1 : 1);
+        if (Math.abs(sy) < 0.05) sy = 0.05 * (sy < 0 ? -1 : 1);
+        applyAffine(desc.snap, M_SCALE(sx, sy, ax, ay));
+      } else {
+        const d0 = Math.hypot(desc.from[0] - ax, desc.from[1] - ay) || 1;
+        const s = Math.max(0.05, Math.hypot(p.x - ax, p.y - ay) / d0);
+        desc.s = s;
+        applyAffine(desc.snap, M_SCALE(s, s, ax, ay));
+      }
     } else if (desc.type === "g-rotate") {
       let ang = Math.atan2(p.y - desc.cy, p.x - desc.cx) - desc.a0;
       if (e.shiftKey) ang = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4);
@@ -2725,15 +2811,18 @@ function startDrag(ev, desc) {
       applyAffine(desc.snap, M_ROTATE(ang, desc.cx, desc.cy));
     } else if (desc.type === "g-squish") {
       // scale along one axis only, anchored at the opposite side; crossing
-      // the anchor mirrors the shape (Illustrator behavior)
+      // the anchor mirrors the shape. Alt anchors at the selection CENTER
+      // (symmetric squish, Illustrator behavior).
       const i = desc.axis === "x" ? 0 : 1;
       const cur = desc.axis === "x" ? p.x : p.y;
-      const denom = desc.from[i] - desc.anchor[i] || 1;
-      let k = (cur - desc.anchor[i]) / denom;
+      const anchorV = e.altKey ? (desc.axis === "x" ? desc.cx : desc.cy)
+                               : desc.anchor[i];
+      const denom = desc.from[i] - anchorV || 1;
+      let k = (cur - anchorV) / denom;
       if (Math.abs(k) < 0.05) k = 0.05 * (k < 0 ? -1 : 1);
       applyAffine(desc.snap, desc.axis === "x"
-        ? M_SCALE(k, 1, desc.anchor[0], desc.anchor[1])
-        : M_SCALE(1, k, desc.anchor[0], desc.anchor[1]));
+        ? M_SCALE(k, 1, anchorV, desc.anchor[1])
+        : M_SCALE(1, k, desc.anchor[0], anchorV));
     } else if (desc.type === "fill-node") {
       moveAnchor(desc.segs, desc.anchor, dx, dy);
       desc.obj.d = serializePath(desc.segs);
@@ -2959,6 +3048,8 @@ document.addEventListener("keydown", (ev) => {
     setTool("node");
   } else if (!mod && k === "p") {
     setTool("pen");
+  } else if (!mod && k === "h") {
+    setTool("pan");
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeRung) {
     const o = byId(activeRung.objId);
     const idx = activeRung.index;
@@ -3011,22 +3102,62 @@ window.addEventListener("blur", () => {
 
 /* ---------- chat / feedback ---------- */
 /* pills mirror the canvas selection — removing a pill deselects the object */
+const PILL_COLLAPSE_AT = 6;   // above this, one summary pill + popover
+function _pillFor(id) {
+  const pill = document.createElement("span");
+  pill.className = "pill";
+  const obj = design ? byId(id) : null;
+  pill.textContent = ((obj && obj.label) || id) + " ";
+  pill.title = id;
+  const x = document.createElement("button");
+  x.textContent = "×";
+  x.onclick = () => setSelection(selection.filter(s => s !== id));
+  pill.appendChild(x);
+  return pill;
+}
 function renderPills() {
   const box = $("pills");
   box.textContent = "";
-  for (const id of selection) {
+  closePillPopover();
+  if (selection.length > PILL_COLLAPSE_AT) {
+    // large selections overflowed the prompt row off-screen — collapse to
+    // one summary pill; clicking it lists the members with their × buttons
     const pill = document.createElement("span");
-    pill.className = "pill";
-    const obj = design ? byId(id) : null;
-    pill.textContent = ((obj && obj.label) || id) + " ";
-    pill.title = id;
-    const x = document.createElement("button");
-    x.textContent = "×";
-    x.onclick = () => setSelection(selection.filter(s => s !== id));
-    pill.appendChild(x);
+    pill.className = "pill pillSummary";
+    pill.textContent = `${selection.length} selected ▾`;
+    pill.title = "Click to list the selected objects";
+    pill.onclick = (ev) => {
+      ev.stopPropagation();
+      openPillPopover(pill);
+    };
     box.appendChild(pill);
+  } else {
+    for (const id of selection) box.appendChild(_pillFor(id));
   }
   $("send").disabled = !selection.length && !$("input").value.trim();
+}
+let _pillPop = null;
+function openPillPopover(anchor) {
+  closePillPopover();
+  const pop = document.createElement("div");
+  pop.id = "pillPopover";
+  for (const id of selection) pop.appendChild(_pillFor(id));
+  document.body.appendChild(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = r.left + "px";
+  pop.style.bottom = (window.innerHeight - r.top + 6) + "px";
+  _pillPop = pop;
+  setTimeout(() =>
+    document.addEventListener("pointerdown", _pillOutside, true), 0);
+}
+function _pillOutside(ev) {
+  if (_pillPop && !_pillPop.contains(ev.target)) closePillPopover();
+}
+function closePillPopover() {
+  if (!_pillPop) return;
+  _pillPop.remove();
+  _pillPop = null;
+  document.removeEventListener("pointerdown", _pillOutside, true);
 }
 $("input").addEventListener("input", renderPills);
 /* "agent is working…" bubble — presence, shown where the user is looking.
@@ -3173,15 +3304,18 @@ function setTool(t) {
   $("toolSelect").classList.toggle("on", t === "select");
   $("toolNode").classList.toggle("on", t === "node");
   $("toolPen").classList.toggle("on", t === "pen");
+  $("toolPan").classList.toggle("on", t === "pan");
   activeRung = null;
   activeNode = null;
   if (t !== "pen") { penDraft = null; penSel = null; penHover = null; }
-  canvas.style.cursor = t === "pen" ? "crosshair" : "";
+  canvas.style.cursor = t === "pen" ? "crosshair"
+                      : t === "pan" ? "grab" : "";
   renderEditLayer();
 }
 $("toolSelect").onclick = () => setTool("select");
 $("toolNode").onclick = () => setTool("node");
 $("toolPen").onclick = () => setTool("pen");
+$("toolPan").onclick = () => setTool("pan");
 
 function setViewMode(mode) {
   viewMode = mode;
