@@ -1905,6 +1905,12 @@ let artworkLayer, planLayer, editLayer, refLayer, densityLayer;
 // persisted anywhere: hiding is a tracing aid, and the design must stitch
 // identically whether or not something is hidden on screen.
 const hiddenIds = new Set();
+function _railLen(pts) {
+  let s = 0;
+  for (let i = 1; i < pts.length; i++)
+    s += Math.hypot(pts[i][0] - pts[i-1][0], pts[i][1] - pts[i-1][1]);
+  return s;
+}
 function renderAll() {
   canvas.textContent = "";
   parseViewBox();
@@ -1941,28 +1947,60 @@ function renderAll() {
     // rungs, which are editing scaffolding). Rail A + rail B reversed forms
     // the closed band polygon; works for open columns and closed rings.
     let displayD = o.d, displayFill = o.fill, displayStroke = o.stroke;
+    let displayRule = o.kind === "fill" ? "evenodd" : null;
     if (o.kind === "satin" && o.rails && o.rails.length === 2) {
       const a = flatten(tokenizePath(o.rails[0]));
-      const b = flatten(tokenizePath(o.rails[1])).reverse();
-      if (a.length > 1 && b.length > 1) {
-        displayD = "M" + [...a, ...b].map(p => fmt(p[0]) + "," + fmt(p[1])).join(" ") + "Z";
+      const b = flatten(tokenizePath(o.rails[1]));
+      const closed = (r) => r.length > 2 &&
+        Math.hypot(r[0][0] - r[r.length-1][0], r[0][1] - r[r.length-1][1]) < 0.05;
+      const pts = (r) => r.map(p => fmt(p[0]) + "," + fmt(p[1])).join(" ");
+      if (a.length > 1 && b.length > 1 && closed(a) && closed(b)) {
+        // CLOSED-RING column (a b's bowl, the border): two subpaths +
+        // evenodd. Concatenating the rings into one subpath threads a
+        // seam segment through the band — it self-intersects, and the
+        // "hole" wound solid ("b renders as a disc with a spike").
+        displayD = "M" + pts(a) + "Z M" + pts(b.slice().reverse()) + "Z";
+        displayRule = "evenodd";
+        displayFill = o.stroke || o.fill || "#888";
+        displayStroke = null;
+      } else if (a.length > 1 && b.length > 1 &&
+                 _railLen(a) < _railLen(b) * 4 &&
+                 _railLen(b) < _railLen(a) * 4) {
+        // open column with COMPARABLE rails: rail A out, rail B back =
+        // the thread band. Rails aren't guaranteed parallel (the engine
+        // reorients internally) — close the band across the short edges.
+        const dd = (p, q) => Math.hypot(p[0]-q[0], p[1]-q[1]);
+        const parallel = dd(a[a.length-1], b[b.length-1]) +
+                         dd(a[0], b[0])
+                       <= dd(a[a.length-1], b[0]) +
+                          dd(a[0], b[b.length-1]);
+        const back = parallel ? b.slice().reverse() : b;
+        displayD = "M" + [...a, ...back]
+          .map(p => fmt(p[0]) + "," + fmt(p[1])).join(" ") + "Z";
         displayFill = o.stroke || o.fill || "#888";
         displayStroke = null;
       } else {
+        // pathological topology (hand-digitized ring bowls: one rail is a
+        // 2-point seam edge, the other the ENTIRE bowl outline looping
+        // outer+inner arcs — measured on small_font's b). Its stitched
+        // region has no fillable band polygon; every fill rule lies (solid
+        // disc under nonzero, bitten ring under evenodd). Render the rails
+        // as strokes — an honest outline beats a wrong fill.
         displayD = o.rails.join(" ");
+        displayFill = null;
+        displayStroke = o.stroke || o.fill || "#888";
       }
     }
     // engine-emitted elements can carry a transform; honor it for display
     // (selection flattens it into the geometry so editing stays in root
     // coordinates)
     const tAttr = o.transform ? { transform: o.transform } : {};
-    // fill rule is per KIND: fills render evenodd (engine-faithful — the
-    // engine treats nested subpaths as holes by containment regardless of
-    // winding), but satin BAND polygons must stay nonzero: a band that
-    // self-overlaps (a b's bowl meeting its stem) gets evenodd holes
-    // punched wherever it crosses itself — "the b's used to be good but
-    // now they're ugly", outline view only, realistic unaffected.
-    const ruleAttr = o.kind === "fill" ? { "fill-rule": "evenodd" } : {};
+    // fill rule is per SHAPE, decided above: fills render evenodd
+    // (engine-faithful — nested subpaths are holes by containment),
+    // closed-ring satin bands render as two subpaths + evenodd, open
+    // satin bands stay nonzero (their band may legitimately self-overlap
+    // where a bowl meets a stem — evenodd would punch holes there).
+    const ruleAttr = displayRule ? { "fill-rule": displayRule } : {};
     el("path", { d: displayD, fill: displayFill || "none", ...ruleAttr,
       stroke: displayStroke || "none", "stroke-width": .4, ...tAttr }, artworkLayer);
     // stroke-only elements (running stitches) have no fill area to grab —
