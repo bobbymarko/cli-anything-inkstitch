@@ -103,14 +103,32 @@ def find_by_id(tree, svg_id: str):
 
 
 def all_addressable_elements(tree):
-    """Iterate elements that could be embroidery targets: paths, rects, circles, ellipses, lines, polygons, polylines, use, image, text, g."""
+    """Iterate elements that could be embroidery targets.
+
+    Two classes of lookalikes are excluded to match what the engine
+    actually stitches (FINDINGS-stitch-geometry.md Bugs 2+3):
+    * contents of defs/symbol/marker/... — the engine's own
+      <symbol id="inkstitch_trim"> icon glyphs are styled paths that read
+      exactly like design fills but are template data the engine never
+      traverses (they showed up as `auto_fill: 2` in a zero-fill design);
+    * command-connector paths (inkscape:connection-start/-end — engine
+      reader inkstitch/lib/commands.py is_command): stroked, fill-less,
+      classified running_stitch, addressable via params set… and never
+      stitched. Command plumbing belongs to the `commands` group, not
+      element enumeration.
+    """
+    from cli_anything_inkstitch.svg.attrs import (
+        in_nonrendered_container,
+        is_command_connector,
+    )
     root = tree.getroot()
     tags = {"path", "rect", "circle", "ellipse", "line", "polygon", "polyline", "use", "image", "text"}
     for elem in root.iter():
         if not isinstance(elem.tag, str):
             continue
         local = etree.QName(elem.tag).localname
-        if local in tags:
+        if local in tags and not is_command_connector(elem) \
+                and not in_nonrendered_container(elem):
             yield elem
 
 

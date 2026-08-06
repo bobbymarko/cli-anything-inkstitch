@@ -25,6 +25,36 @@ def qname(local: str, ns: str = INKSTITCH_NS) -> str:
 
 INKSTITCH_PREFIX = qname("", INKSTITCH_NS)  # "{http://inkstitch.org/namespace}"
 
+# Command-connector detection, mirroring the engine exactly:
+# inkstitch/lib/commands.py:303-304 is_command(node) — a node is command
+# plumbing iff it carries inkscape:connection-start or -end. The engine
+# NEVER stitches these (lib/elements/utils/nodes.py node_to_elements only
+# builds a Stroke `elif not is_command(...)`); they are metadata linking a
+# command icon to its attachment point, and they deliberately stretch
+# across the canvas — treating one as art overstated a design's height by
+# 58% (FINDINGS-stitch-geometry.md, rose-bag).
+CONNECTION_START = qname("connection-start", INKSCAPE_NS)
+CONNECTION_END = qname("connection-end", INKSCAPE_NS)
+
+# containers whose contents don't render in place — template shapes (e.g.
+# the engine's own <symbol id="inkstitch_trim"> icon glyphs) live at the
+# origin and are referenced, never traversed, by the engine
+NONRENDERED_CONTAINERS = {"defs", "symbol", "marker", "pattern",
+                          "clipPath", "mask"}
+
+
+def is_command_connector(elem) -> bool:
+    return CONNECTION_START in elem.attrib or CONNECTION_END in elem.attrib
+
+
+def in_nonrendered_container(elem) -> bool:
+    node = elem.getparent()
+    while node is not None and isinstance(node.tag, str):
+        if etree.QName(node.tag).localname in NONRENDERED_CONTAINERS:
+            return True
+        node = node.getparent()
+    return False
+
 
 def get_inkstitch(node, name: str, default=None):
     return node.get(qname(name), default)

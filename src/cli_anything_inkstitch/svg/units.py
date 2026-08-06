@@ -179,9 +179,13 @@ def bake_transforms(tree) -> int:
 
 _ART_TAGS = {"path", "rect", "circle", "ellipse", "line", "polygon", "polyline"}
 
-# containers whose contents don't render in place — symbol/marker template
-# shapes live at the origin and would poison the union bbox
-_NONRENDERED = {"defs", "symbol", "marker", "pattern", "clipPath", "mask"}
+# shared with svg/document.py enumeration — see svg/attrs.py for the
+# engine citations behind both exclusions
+from cli_anything_inkstitch.svg.attrs import (  # noqa: E402
+    NONRENDERED_CONTAINERS as _NONRENDERED,
+    in_nonrendered_container,
+    is_command_connector,
+)
 
 
 def art_bbox(tree):
@@ -193,17 +197,15 @@ def art_bbox(tree):
     reference placement and the template shapes would read as art growth
     (measured +9% on a small design routed with --trim), which is marker
     plumbing, not a geometry rescale.
+
+    Also excludes command-CONNECTOR paths (inkscape:connection-start/-end,
+    engine reader inkstitch/lib/commands.py is_command): they stretch from
+    the command icon to its attachment point by design, and counting one
+    as art overstated the rose-bag design's height by 58% — which then fed
+    a resize computation (FINDINGS-stitch-geometry.md Bug 1).
     """
     from lxml import etree as _etree
     from cli_anything_inkstitch.svg.geometry import element_bbox_in_root
-
-    def in_nonrendered(elem) -> bool:
-        node = elem.getparent()
-        while node is not None and isinstance(node.tag, str):
-            if _etree.QName(node.tag).localname in _NONRENDERED:
-                return True
-            node = node.getparent()
-        return False
 
     boxes = []
     for elem in tree.getroot().iter():
@@ -211,7 +213,9 @@ def art_bbox(tree):
             continue
         if _etree.QName(elem.tag).localname not in _ART_TAGS:
             continue
-        if in_nonrendered(elem):
+        if is_command_connector(elem):
+            continue
+        if in_nonrendered_container(elem):
             continue
         bb, _meta = element_bbox_in_root(elem)
         if bb is not None:
