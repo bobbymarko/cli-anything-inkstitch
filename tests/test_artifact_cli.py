@@ -75,6 +75,17 @@ class TestArtifactCLI:
         result = _run("artifact", "reply", "--project", project, "--text", "done")
         assert result["status"] == "sent"
 
+    def test_ask_stores_question_with_options(self, server, project):
+        opened = _run("artifact", "open", "--project", project, "--no-browser")
+        result = _run("artifact", "ask", "--project", project,
+                      "--text", "Wider border?",
+                      "--option", "yes, 50%", "--option", "keep as is")
+        assert result["status"] == "sent"
+        session = server.state.store.find_by_key(opened["key"])
+        q = session["chat"][-1]
+        assert q["role"] == "agent"
+        assert q["options"] == ["yes, 50%", "keep as is"]
+
     def test_end_then_reopen(self, server, project):
         _run("artifact", "open", "--project", project, "--no-browser")
         assert _run("artifact", "end", "--project", project)["status"] == "ended"

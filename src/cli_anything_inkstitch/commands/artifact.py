@@ -192,6 +192,31 @@ def reply_cmd(ctx, project_path, text):
     emit(ctx, _request(f"{base}/api/{key}/agent-reply", payload={"text": text}))
 
 
+@artifact.command("ask")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--text", required=True, help="The question to show in the "
+              "artifact chat.")
+@click.option("--option", "options", multiple=True,
+              help="Clickable answer (repeatable). Clicking one sends it "
+                   "back through the normal feedback queue.")
+@click.pass_context
+def ask_cmd(ctx, project_path, text, options):
+    """Ask the user a question IN the artifact chat, with answer buttons.
+
+    Questions must reach the surface the user is looking at: a decision
+    prompt that renders only in the agent's own app while the artifact
+    sits at 'working' reads as a hang from the editor. Follow with
+    `artifact poll` — the clicked option (or a typed reply) arrives as
+    ordinary feedback.
+    """
+    from cli_anything_inkstitch.artifact.sessions import canonical_file, session_key
+    project = get_project_path(ctx, project_path)
+    base = _ensure_server(_state_dir())
+    key = session_key(canonical_file(project))
+    emit(ctx, _request(f"{base}/api/{key}/agent-reply",
+                       payload={"text": text, "options": list(options)}))
+
+
 @artifact.command("status")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--text", required=True)

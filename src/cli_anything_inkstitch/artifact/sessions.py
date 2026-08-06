@@ -196,12 +196,21 @@ class SessionStore:
                 return {"status": "ended", "ended_by": session.get("ended_by")}
             return {"status": "waiting"}
 
-    def add_agent_reply(self, key: str, text: str) -> dict[str, Any] | None:
+    def add_agent_reply(self, key: str, text: str,
+                        options: list[str] | None = None) -> dict[str, Any] | None:
+        """Agent chat message; `options` marks it a QUESTION with clickable
+        answers. Questions must reach the surface the user is looking at —
+        a decision prompt that renders only in the agent's own app while
+        the artifact sits at 'working' reads as a hang from the editor."""
         with self._lock:
             session = self._sessions.get(key)
             if not session:
                 return None
-            session["chat"].append({"role": "agent", "text": text, "at": _now_iso()})
+            msg: dict[str, Any] = {"role": "agent", "text": text,
+                                   "at": _now_iso()}
+            if options:
+                msg["options"] = list(options)
+            session["chat"].append(msg)
             session["unacked_feedback"] = []      # reply acknowledges delivery
             session["updated_at"] = _now_iso()
             self._save()

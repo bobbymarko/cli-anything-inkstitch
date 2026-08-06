@@ -387,10 +387,14 @@ class ArtifactHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_reply(self, key: str, body: dict) -> None:
         text = str(body.get("text") or "")
-        if not self.state.store.add_agent_reply(key, text):
+        options = [str(o) for o in (body.get("options") or []) if str(o).strip()]
+        if not self.state.store.add_agent_reply(key, text, options or None):
             self._json({"error": "session not found"}, 404)
             return
-        self.state.hub.publish(key, {"event": "agent-reply", "text": text})
+        event: dict = {"event": "agent-reply", "text": text}
+        if options:
+            event["options"] = options
+        self.state.hub.publish(key, event)
         self._json({"status": "sent"})
 
     def _handle_agent_status(self, key: str, body: dict) -> None:

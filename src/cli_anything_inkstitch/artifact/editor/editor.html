@@ -332,6 +332,14 @@
                  border-radius: 999px; padding: 2px 8px; }
   #pills .pill button { all: unset; cursor: pointer; color: var(--muted); }
   #pills .pillSummary { cursor: pointer; user-select: none; }
+  .askRow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .askOpt { font-size: 12px; color: var(--accent); background: transparent;
+            border: 1px solid rgba(110,168,254,.5); border-radius: 999px;
+            padding: 4px 12px; cursor: pointer; }
+  .askOpt:hover:not(:disabled) { background: rgba(110,168,254,.12); }
+  .askOpt:disabled { opacity: .45; cursor: default; }
+  .askOpt.picked { background: rgba(110,168,254,.2); opacity: 1;
+                   border-color: var(--accent); }
   #pillPopover { position: fixed; z-index: 60; display: flex; flex-wrap: wrap;
                  gap: 4px; max-width: 340px; max-height: 40vh; overflow-y: auto;
                  background: #14161a; border: 1px solid var(--line);
@@ -3191,7 +3199,7 @@ function setWorkingStatus(text) {
   if (workingText) workingText.textContent = " " + text;
   $("chat").scrollTop = $("chat").scrollHeight;
 }
-function addMsg(role, text, objects) {
+function addMsg(role, text, objects, options, answered) {
   const div = document.createElement("div");
   div.className = "msg " + role;
   div.textContent = text || "(annotation)";
@@ -3200,6 +3208,28 @@ function addMsg(role, text, objects) {
     o.className = "objs";
     o.textContent = "→ " + objects.join(", ");
     div.appendChild(o);
+  }
+  // agent QUESTION: clickable answers, so a decision the agent needs never
+  // strands the artifact at "working" while the prompt sits in another app
+  if (role === "agent" && options && options.length) {
+    const row = document.createElement("div");
+    row.className = "askRow";
+    for (const opt of options) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "askOpt";
+      b.textContent = opt;
+      b.disabled = !!answered;
+      b.onclick = async () => {
+        row.querySelectorAll("button").forEach(x => x.disabled = true);
+        b.classList.add("picked");
+        addMsg("user", opt);
+        setWorking(true);
+        await postFeedback({ text: opt, objects: [] });
+      };
+      row.appendChild(b);
+    }
+    div.appendChild(row);
   }
   $("chat").appendChild(div);
   // the working bubble always reads as "what happens next" — keep it last
@@ -3337,11 +3367,19 @@ function connectSSE() {
   es.addEventListener("chat-sync", (ev) => {
     $("chat").textContent = "";
     workingBubble = null;      // chat rebuild orphans the bubble node
-    for (const m of JSON.parse(ev.data).chat) addMsg(m.role, m.text, m.objects);
+    const chat = JSON.parse(ev.data).chat;
+    chat.forEach((m, i) => {
+      // a question is "answered" once any later user message exists —
+      // rebuilt buttons stay disabled instead of resurrecting the prompt
+      const answered = m.options &&
+        chat.slice(i + 1).some(x => x.role === "user");
+      addMsg(m.role, m.text, m.objects, m.options, answered);
+    });
   });
   es.addEventListener("agent-reply", (ev) => {
     setWorking(false);
-    addMsg("agent", JSON.parse(ev.data).text);
+    const d = JSON.parse(ev.data);
+    addMsg("agent", d.text, null, d.options);
   });
   es.addEventListener("agent-status", (ev) => {
     setWorkingStatus(JSON.parse(ev.data).text);

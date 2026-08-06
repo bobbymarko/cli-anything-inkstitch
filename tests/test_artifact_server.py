@@ -316,6 +316,40 @@ class TestWatchSurvivesRestart:
             t2.join(timeout=5)
 
 
+class TestAskQuestion:
+    def test_options_flow_through_sse_and_chat_sync(self, server, project):
+        """A question posted with options must reach the editor twice over:
+        live (agent-reply SSE carries options) and on reload (chat-sync
+        preserves them) — otherwise a decision prompt strands the artifact
+        at 'working' while the question renders only in the agent's app."""
+        opened = _open_session(server, project)
+        key = opened["key"]
+        events, done = _read_sse_until(server, key, "agent-reply")
+        time.sleep(0.3)
+        status, body = _post(server, f"/api/{key}/agent-reply",
+                             {"text": "Bean or satin for the small text?",
+                              "options": ["bean", "satin", "you decide"]})
+        assert status == 200
+        assert done.wait(15)
+        reply = next(d for name, d in events if name == "agent-reply")
+        assert reply["options"] == ["bean", "satin", "you decide"]
+        # chat-sync (what a reloaded tab sees) keeps the options
+        events2, done2 = _read_sse_until(server, key, "chat-sync")
+        assert done2.wait(15)
+        sync = next(d for name, d in events2 if name == "chat-sync")
+        q = [m for m in sync["chat"] if m.get("options")]
+        assert q and q[-1]["options"][0] == "bean"
+
+    def test_plain_reply_has_no_options_key(self, server, project):
+        opened = _open_session(server, project)
+        key = opened["key"]
+        _post(server, f"/api/{key}/agent-reply", {"text": "done"})
+        events, done = _read_sse_until(server, key, "chat-sync")
+        assert done.wait(15)
+        sync = next(d for name, d in events if name == "chat-sync")
+        assert all("options" not in m for m in sync["chat"])
+
+
 class TestPollSupersede:
     def test_new_poll_supersedes_old(self, server, project):
         """One poll per session: a second poll takes over; the first stands
