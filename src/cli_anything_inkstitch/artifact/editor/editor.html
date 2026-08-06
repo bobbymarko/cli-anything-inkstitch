@@ -1525,6 +1525,7 @@ $("toggleGrid").onclick = () => {
    (calibrated against the celtic sew-out, which peaked at 32 and
    stitched clean — rail edges concentrate penetrations, so hot CELLS
    are normal; hot AREAS are what to look at). */
+let lastPresence = "waiting";   // authoritative agent state, from SSE presence
 let densityOn = false;
 $("toggleDensity").onclick = () => {
   densityOn = !densityOn;
@@ -1955,21 +1956,20 @@ function renderAll() {
     // (selection flattens it into the geometry so editing stays in root
     // coordinates)
     const tAttr = o.transform ? { transform: o.transform } : {};
-    // evenodd on BOTH paths: a spiral satin's band polygon wraps the gaps
-    // between its own coils, so the default nonzero rule fills them — the
-    // artwork looks wrong and, worse, the transparent hit path swallows
-    // clicks meant for shapes visible through those gaps. Evenodd leaves
-    // ribbon gaps and subpath holes empty, matching how the engine reads
-    // nested subpaths (containment = hole), so clicks fall through.
-    el("path", { d: displayD, fill: displayFill || "none",
-      "fill-rule": "evenodd",
+    // fill rule is per KIND: fills render evenodd (engine-faithful — the
+    // engine treats nested subpaths as holes by containment regardless of
+    // winding), but satin BAND polygons must stay nonzero: a band that
+    // self-overlaps (a b's bowl meeting its stem) gets evenodd holes
+    // punched wherever it crosses itself — "the b's used to be good but
+    // now they're ugly", outline view only, realistic unaffected.
+    const ruleAttr = o.kind === "fill" ? { "fill-rule": "evenodd" } : {};
+    el("path", { d: displayD, fill: displayFill || "none", ...ruleAttr,
       stroke: displayStroke || "none", "stroke-width": .4, ...tAttr }, artworkLayer);
     // stroke-only elements (running stitches) have no fill area to grab —
     // their whole click target is the invisible hit stroke, so give them a
     // wider band than filled shapes (inline style: the class rule would
     // otherwise win). Still screen-px via non-scaling-stroke.
-    const hit = el("path", { d: displayD, class: "obj-hit",
-      "fill-rule": "evenodd",
+    const hit = el("path", { d: displayD, class: "obj-hit", ...ruleAttr,
       fill: displayFill ? "rgba(0,0,0,0)" : "none",
       ...(displayFill ? {} : { style: "stroke-width:14" }), ...tAttr }, artworkLayer);
     hit.addEventListener("pointerdown", (ev) => {
@@ -3224,7 +3224,11 @@ function addMsg(role, text, objects, options, answered) {
         row.querySelectorAll("button").forEach(x => x.disabled = true);
         b.classList.add("picked");
         addMsg("user", opt);
-        setWorking(true);
+        // only claim "working" when the agent is actually listening —
+        // an optimistic bubble with no poll behind it sticks forever
+        // and reads as a hang ("stuck saying working"). Otherwise the
+        // not-listening banner stays visible instead.
+        if (lastPresence === "listening") setWorking(true);
         await postFeedback({ text: opt, objects: [] });
       };
       row.appendChild(b);
@@ -3386,6 +3390,7 @@ function connectSSE() {
   });
   es.addEventListener("agent-presence", (ev) => {
     const state = JSON.parse(ev.data).state;
+    lastPresence = state;
     $("presence").className = state;
     $("presenceText").textContent = state;
     $("presenceBanner").classList.toggle("show", state === "waiting");
