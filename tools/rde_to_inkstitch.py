@@ -56,7 +56,7 @@ import sys
 sys.path.insert(0, __file__.rsplit('/', 1)[0])
 
 from rde_decode import (OBJECT_TAGS, decrypt, read_colors,  # noqa: E402
-                        read_sections, satin_runs)
+                        read_sections, read_wstr, satin_runs)
 
 # .rde coordinates are float32 in 0.1 mm; Inkscape user units are px at 96 dpi.
 PX_PER_UNIT = 0.1 * 96.0 / 25.4
@@ -90,6 +90,29 @@ SLIVER_COMPACTNESS = 0.15
 # A contour must hold at least this share of the object's own stitches to be
 # treated as the shape being filled; below it, it is a guide or a thin detail.
 FILL_MIN_COVERAGE = 0.15
+# Segments longer than this are jumps between shapes, not stitching, and must
+# not be counted as thread laid down anywhere (also the cutoff in _thread_mm).
+JUMP_MM = 15.0
+# A nested contour is a counter (a hole) rather than a stitched detail when the
+# thread inside it runs at this fraction of the parent's density or less.
+# Chroma travels ACROSS a counter rather than around it, so a counter's
+# interior is never empty: the nine counters in Lake Superior carry 0.00x-0.17x
+# the surrounding fill's density. Measured over the 346 nested area-enclosing
+# contours in 104 designs the split is bimodal -- 263 sit below 0.10x and the
+# stitched ones cluster from 0.30x up -- so the cut goes in the gap between
+# them, where only two contours in the whole corpus lie.
+HOLE_THREAD_DENSITY_MAX = 0.25
+# Cap on segments sampled for that density. Sampling every k-th segment scales
+# the numerator and denominator alike, so the ratio is unaffected.
+HOLE_SAMPLE_SEGMENTS = 3000
+# Trim the thread when the move to the next object is longer than this. It is
+# Ink/Stitch's own collapse_len default (lib/stitch_plan/stitch_plan.py:32-33),
+# the distance above which the engine stops stitching through a gap and starts
+# jumping it -- exactly the moves that leave a float on the finished piece.
+# Trimming shorter moves as well is what Chroma's object list would imply, and
+# it is wrong: in Flower Adult Hat 938 of 1139 moves are under 2 mm, so
+# trimming per object would put a thousand needless trims in the file.
+TRIM_MIN_JUMP_MM = 3.0
 # Chroma overlaps adjacent shapes so their fills meet; Ink/Stitch does not by
 # default, which leaves hairline gaps along every shared petal edge. expand_mm
 # exists for exactly this ("compensate for gaps between shapes",
@@ -148,7 +171,23 @@ def _fill_flag(p, after):
 
 
 def _read_contours(p, off, tag):
-    q = off + 8
+    # The stitch stream is followed by the object's NAME -- a length-prefixed
+    # UTF-16 string, the same encoding read_wstr already reads for the thread
+    # table -- and then four bytes, before the contour block. Treating that
+    # prefix as a fixed 8 bytes only works while the name is empty, which is
+    # why two letters of Lake Superior lost their outlines and came through as
+    # a trace of their own stitches. Across 15476 objects in 104 designs the
+    # signature sits at exactly 8 + 2*len(name) every time (14026 unnamed, 35
+    # one-character names such as "l" or "k", 2 named "P2").
+    if off + 4 > len(p):
+        return [], None
+    if struct.unpack_from('<I', p, off)[0] > 64:
+        return [], None
+    try:
+        _name, q = read_wstr(p, off)
+    except (struct.error, UnicodeDecodeError):
+        return [], None
+    q += 4
     if q + 19 > len(p):
         return [], None
     if struct.unpack_from('<I', p, q)[0] != 2:
@@ -262,7 +301,17 @@ def _area_mm2(nodes):
     return abs(a) / 2 / 100.0
 
 
-def _row_spacing_mm(shapes, stitches):
+def _net_area_mm2(shapes, holes):
+    """Area a fill actually covers: the outer shapes minus their counters.
+
+    Counting a counter as filled area inflates the shape and makes both the
+    fill test and the row spacing read a denser design than Chroma stitched.
+    """
+    return (sum(_area_mm2(c) for c in shapes)
+            - sum(_area_mm2(c) for c in holes))
+
+
+def _row_spacing_mm(area, stitches):
     """Row spacing implied by the thread Chroma actually spent on this shape.
 
     A fill of area A at spacing s consumes about A/s of thread, so s = A/thread.
@@ -271,7 +320,6 @@ def _row_spacing_mm(shapes, stitches):
     times over. Read by lib/elements/fill_stitch.py:364-379,
     get_float_param("row_spacing_mm", 0.25).
     """
-    area = sum(_area_mm2(c) for c in shapes)
     thread = _thread_mm(stitches)
     if area <= 0.5 or thread <= 0.5:
         return None
@@ -288,21 +336,76 @@ def _row_spacing_mm(shapes, stitches):
     return derived
 
 
-def _stitched_as_fill(shapes, stitches):
+def _stitched_as_fill(area, stitches):
     """Did Chroma actually FILL this shape, or only outline it?
 
     A shape's area implies how much thread a fill needs; if the object's own
     stitches carry far less than that, it was never filled and turning it into
     one is a large over-stitch.
     """
-    area = sum(_area_mm2(c) for c in shapes)
     if area <= 0.5:
         return True
     return _thread_mm(stitches) / (area / 0.25) >= FILL_DENSITY_MIN
 
 
+def _thread_density(poly, area_mm2, stitches, outside=None):
+    """Thread laid down inside a region, in mm per mm^2.
+
+    Stitch POINTS cannot answer this: a counter is crossed by travel, and a few
+    travel points inside it read the same as the tail of a sparse fill. Length
+    can -- travel crosses a counter once, while a fill sweeps it end to end.
+    """
+    if area_mm2 <= 0:
+        return 0.0
+    step = max(1, len(stitches) // HOLE_SAMPLE_SEGMENTS)
+    total = 0.0
+    for a, b in zip(stitches[::step], stitches[step::step]):
+        d = math.hypot(b[0] - a[0], b[1] - a[1]) / 10.0
+        # A jump lays no thread; counting it would credit a counter with the
+        # whole diagonal of whatever the machine crossed to get there.
+        if d > JUMP_MM * step:
+            continue
+        mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        if not _point_in(poly, mid):
+            continue
+        if outside is not None and _point_in(outside, mid):
+            continue
+        total += d
+    return total * step / area_mm2
+
+
+def _is_hole(cand, shapes, flats, stitches):
+    """Is this contour a counter cut out of one of the shapes?
+
+    Letters are the reason this exists: the bowl of an A, R, O or B is a
+    contour nested in the letter's outline that Chroma never stitches, and
+    filling it turns every counter solid. It cannot be told from a stitched
+    detail by stitch COVERAGE -- neither holds many of the object's stitches --
+    so the test is thread DENSITY inside it against the density of the rest of
+    its parent. Nesting and _is_area come first because the details this used
+    to protect (a flower's stamens, Chroma's direction fan) are thin open
+    paths, and measured across 104 designs not one of them is nested inside a
+    shape contour at all.
+    """
+    if not _is_area(cand):
+        return False
+    cf = flats[id(cand)]
+    inside = [s for s in shapes
+              if s is not cand and _point_in(flats[id(s)], cf[0])]
+    if not inside:
+        return False
+    parent = min(inside, key=_area_mm2)   # the immediate parent, not the outermost
+    ca, pa = _area_mm2(cand), _area_mm2(parent)
+    if ca <= 0.05 or pa - ca <= 0.5:
+        return False
+    ring = _thread_density(flats[id(parent)], pa - ca, stitches, outside=cf)
+    if ring <= 0:
+        return False
+    return _thread_density(cf, ca, stitches) / ring <= HOLE_THREAD_DENSITY_MAX
+
+
 def _split_shapes(contours, stitches):
-    """Separate an object's fillable shapes from its thin detail lines.
+    """Split an object's contours into fillable shapes, counters, and details.
 
     Detail contours (a flower's stamens, Chroma's direction fan) sit INSIDE the
     outline, so they must never be handed to _group_contours: nesting logic
@@ -310,18 +413,26 @@ def _split_shapes(contours, stitches):
     which is what cut radial gaps through the flowers. They are real stitching
     though -- the original stitches them as lines -- so they come back as
     strokes rather than being dropped.
+
+    Counters reach _group_contours instead: they are the same low-coverage
+    contours (a hole holds none of the object's stitches either), separated
+    from details by _is_hole.
     """
-    shapes, details = [], []
+    shapes, rest = [], []
     for c in contours:
         if _contour_coverage(c, stitches) >= FILL_MIN_COVERAGE:
             shapes.append(c)
         else:
-            details.append(c)
+            rest.append(c)
     if not shapes and contours:
         best = max(contours, key=lambda c: _contour_coverage(c, stitches))
         shapes = [best]
-        details = [c for c in contours if c is not best]
-    return shapes, details
+        rest = [c for c in contours if c is not best]
+    flats = {id(c): _flatten(c) for c in contours}
+    holes, details = [], []
+    for c in rest:
+        (holes if _is_hole(c, shapes, flats, stitches) else details).append(c)
+    return shapes, holes, details
 
 
 def _group_contours(contours):
@@ -536,7 +647,7 @@ def convert(path):
     def Y(v):
         return (v[1] - miny) * PX_PER_UNIT
 
-    counts = {'satin': 0, 'fill': 0, 'run': 0}
+    counts = {'satin': 0, 'fill': 0, 'run': 0, 'trim': 0}
     # One layer per thread, each holding its objects in stitch order.
     layers = {}
     order = []
@@ -548,11 +659,43 @@ def convert(path):
             order.append(color_index)
         layers[color_index].append(markup)
 
-    for obj in objects:
-        stitches = obj['stitches']
-        if len(stitches) < 4:
-            continue
-        color = colors[obj['color']]['rgb'] if colors else '#000000'
+    def emit_shapes(obj, stitches, color):
+        """Emit one object's contours: filled areas (counters cut out) and,
+        separately, the thin details Chroma stitches as lines."""
+        shapes, holes, details = _split_shapes(
+            _choose_contours(obj['contours'], stitches), stitches)
+        area = _net_area_mm2(shapes, holes)
+        if not _stitched_as_fill(area, stitches):
+            # Never filled, only outlined -- every contour is a line.
+            shapes, holes, details = [], [], shapes + holes + details
+        rs = _row_spacing_mm(area, stitches)
+        rsa = f' inkstitch:row_spacing_mm="{rs:.2f}"' if rs else ''
+        # Counters ride along as subpaths of their parent so fill-rule evenodd
+        # cuts them out; _group_contours pairs each one with the shape it sits
+        # in by nesting depth.
+        for group in _group_contours(shapes + holes):
+            subpaths = [d for d in (_contour_path(n, X, Y)
+                                    for n in group) if d]
+            if not subpaths:
+                continue
+            uid[0] += 1
+            add(obj['color'],
+                f'<path id="rde{uid[0]}" d="{" ".join(subpaths)}" '
+                f'style="fill:{color};fill-rule:evenodd;stroke:none" '
+                f'inkstitch:angle="{_dominant_angle(stitches):.1f}" '
+                f'inkstitch:expand_mm="{FILL_EXPAND_MM}"{rsa}/>')
+            counts['fill'] += 1
+        for c in details:
+            d = _contour_path(c, X, Y)
+            if not d:
+                continue
+            uid[0] += 1
+            add(obj['color'],
+                f'<path id="rde{uid[0]}" d="{d}" '
+                f'style="fill:none;stroke:{color};stroke-width:1"/>')
+            counts['run'] += 1
+
+    def emit_object(obj, stitches, color):
 
         # Prefer Chroma's own flag; fall back to measuring the stitches only
         # where the parameter block could not be located (~32% of objects).
@@ -567,34 +710,8 @@ def convert(path):
             # of the flowers. For a fill object the stitches ARE the fill, so
             # a contour that does not hold the object's stitches is metadata
             # and gets dropped rather than stitched.
-            joined = _choose_contours(obj['contours'], stitches)
-            shapes, details = _split_shapes(joined, stitches)
-            if not _stitched_as_fill(shapes, stitches):
-                shapes, details = [], shapes + details
-            for group in _group_contours(shapes):
-                subpaths = [d for d in (_contour_path(n, X, Y)
-                                        for n in group) if d]
-                if not subpaths:
-                    continue
-                uid[0] += 1
-                rs = _row_spacing_mm(shapes, stitches)
-                rsa = f' inkstitch:row_spacing_mm="{rs:.2f}"' if rs else ''
-                add(obj['color'],
-                    f'<path id="rde{uid[0]}" d="{" ".join(subpaths)}" '
-                    f'style="fill:{color};fill-rule:evenodd;stroke:none" '
-                    f'inkstitch:angle="{_dominant_angle(stitches):.1f}" '
-                    f'inkstitch:expand_mm="{FILL_EXPAND_MM}"{rsa}/>')
-                counts['fill'] += 1
-            for c in details:
-                d = _contour_path(c, X, Y)
-                if not d:
-                    continue
-                uid[0] += 1
-                add(obj['color'],
-                    f'<path id="rde{uid[0]}" d="{d}" '
-                    f'style="fill:none;stroke:{color};stroke-width:1"/>')
-                counts['run'] += 1
-            continue
+            emit_shapes(obj, stitches, color)
+            return
 
         runs = list(satin_runs(stitches))
         covered = sum(b - a for a, b, _, _ in runs)
@@ -631,7 +748,7 @@ def convert(path):
                 counts['satin'] += 1
                 emitted = True
             if emitted:
-                continue
+                return
 
         # A Chroma object that owns a closed contour is a solid area -- either a
         # fill or a satin. It is never a bare outline. So once satin detection
@@ -639,34 +756,8 @@ def convert(path):
         # flowers as hollow outlines. Bare running stitch is only correct for
         # objects that carry no contour at all.
         if obj['contours']:
-            shapes, details = _split_shapes(
-                _choose_contours(obj['contours'], stitches), stitches)
-            if not _stitched_as_fill(shapes, stitches):
-                shapes, details = [], shapes + details
-            for group in _group_contours(shapes):
-                subpaths = [d for d in (_contour_path(n, X, Y)
-                                        for n in group) if d]
-                if not subpaths:
-                    continue
-                uid[0] += 1
-                rs = _row_spacing_mm(shapes, stitches)
-                rsa = f' inkstitch:row_spacing_mm="{rs:.2f}"' if rs else ''
-                add(obj['color'],
-                    f'<path id="rde{uid[0]}" d="{" ".join(subpaths)}" '
-                    f'style="fill:{color};fill-rule:evenodd;stroke:none" '
-                    f'inkstitch:angle="{_dominant_angle(stitches):.1f}" '
-                    f'inkstitch:expand_mm="{FILL_EXPAND_MM}"{rsa}/>')
-                counts['fill'] += 1
-            for c in details:
-                d = _contour_path(c, X, Y)
-                if not d:
-                    continue
-                uid[0] += 1
-                add(obj['color'],
-                    f'<path id="rde{uid[0]}" d="{d}" '
-                    f'style="fill:none;stroke:{color};stroke-width:1"/>')
-                counts['run'] += 1
-            continue
+            emit_shapes(obj, stitches, color)
+            return
 
         pts = _simplify([(X(p), Y(p)) for p in stitches], SIMPLIFY_PX)
         if len(pts) >= 2:
@@ -676,6 +767,46 @@ def convert(path):
                 f'<path id="rde{uid[0]}" d="{d}" '
                 f'style="fill:none;stroke:{color};stroke-width:1"/>')
             counts['run'] += 1
+
+
+    def trim_last(color_index):
+        """Trim the thread after the last element an object emitted.
+
+        Ink/Stitch reads inkstitch:trim_after per element
+        (lib/elements/element.py:455-462, get_boolean_param("trim_after",
+        False)); element.py:772 carries it into the stitch group and
+        lib/stitch_plan/stitch_plan.py:97-98 turns it into a real trim. Without
+        it the engine only ties off and jumps -- collapse_len never inserts a
+        trim -- so the move shows as a float on the finished piece. It goes on
+        the LAST element of the object, not every element: an object that
+        becomes a run of satins is one continuous piece of stitching.
+        """
+        markup = layers[color_index][-1]
+        layers[color_index][-1] = markup.replace(
+            '/>', ' inkstitch:trim_after="true"/>', 1)
+
+    # Trims are decided by the move to the NEXT object, so each object is held
+    # until the following one is known. The final object needs no trim -- the
+    # design ends there.
+    pending = None
+    for obj in objects:
+        stitches = obj['stitches']
+        if len(stitches) < 4:
+            continue
+        color = colors[obj['color']]['rgb'] if colors else '#000000'
+        if pending is not None and pending[0] == obj['color']:
+            # Across a color change the machine trims anyway, so no command is
+            # needed -- the engine's own jump_to_trim skips those moves too
+            # (lib/extensions/jump_to_trim.py, the color != color continue).
+            gap = math.hypot(stitches[0][0] - pending[1][0],
+                             stitches[0][1] - pending[1][1]) / 10.0
+            if gap > TRIM_MIN_JUMP_MM:
+                trim_last(pending[0])
+                counts['trim'] += 1
+        before = len(layers.get(obj['color'], ()))
+        emit_object(obj, stitches, color)
+        if len(layers.get(obj['color'], ())) > before:
+            pending = (obj['color'], stitches[-1])
 
     out = [f'<?xml version="1.0" encoding="UTF-8"?>',
            f'<svg xmlns="http://www.w3.org/2000/svg" '
@@ -720,4 +851,4 @@ if __name__ == '__main__':
     open(dst, 'w').write(svg)
     print(f'{src} -> {dst}')
     print(f'  satin columns: {counts["satin"]}  fills: {counts["fill"]}  '
-          f'runs: {counts["run"]}')
+          f'runs: {counts["run"]}  trims: {counts["trim"]}')
