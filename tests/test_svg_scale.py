@@ -47,3 +47,37 @@ def test_a_transform_is_refused():
     """A transform would scale twice or not at all, depending where it sits."""
     with pytest.raises(SystemExit):
         scale_svg(SVG.replace('<path id="a"', '<path id="a" transform="translate(5)"'), 0.5)
+
+
+SVG_WITH_COMMAND = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+    'version="1.1" width="378.000" height="189.000" viewBox="0 0 378.000 189.000">\n'
+    '  <defs><symbol id="inkstitch_starting_point">'
+    '<path d="M 0,0 L 4,4" transform="scale(2)"/></symbol></defs>\n'
+    '  <path id="a" d="M 0.000,0.000 L 100.000,50.000 Z" style="fill:#048dad"/>\n'
+    '  <g><use id="u" xlink:href="#inkstitch_starting_point" x="40.000" y="20.000"/>'
+    '<path id="c" d="M 40.000,20.000 50.000,25.000"/></g>\n'
+    '</svg>\n'
+)
+
+
+def test_command_markers_move_with_the_design():
+    """A design must stay resizable after commands are attached to it."""
+    out = scale_svg(SVG_WITH_COMMAND, 0.5)
+    assert 'x="20.000" y="10.000"' in out          # the marker
+    assert 'd="M 20.000,10.000 25.000,12.500"' in out  # its connector
+
+
+def test_marker_artwork_is_left_alone():
+    """The symbols in <defs> are fixed-size icons, and they carry transforms of
+    their own -- scaling them would resize the icon with the design, and
+    refusing the document because of them would make it unresizable."""
+    out = scale_svg(SVG_WITH_COMMAND, 0.5)
+    assert '<path d="M 0,0 L 4,4" transform="scale(2)"/>' in out
+
+
+def test_a_transform_outside_defs_is_still_refused():
+    with pytest.raises(SystemExit):
+        scale_svg(SVG_WITH_COMMAND.replace('<path id="a"',
+                                           '<path id="a" transform="translate(5)"'), 0.5)

@@ -27,23 +27,44 @@ def _scale_path(d, k):
     return NUMBER.sub(lambda m: f'{float(m.group()) * k:.3f}', d)
 
 
+DEFS = re.compile(r'<defs\b.*?</defs>', re.S)
+
+
 def scale_svg(svg, k):
-    """Scale every coordinate, the canvas, and nothing else."""
-    if 'transform=' in svg:
-        # A transform would scale twice, or not at all, depending where it sits.
-        # The converter never emits one; anything else is out of contract.
+    """Scale every coordinate, the canvas, and nothing else.
+
+    <defs> is left alone deliberately. Ink/Stitch command markers live there as
+    symbols drawn at a fixed size, carrying transforms of their own; scaling
+    them would resize the little scissors icon along with the design, and
+    refusing the whole document because they exist would mean a design can
+    never be resized once it has commands on it.
+    """
+    defs = DEFS.findall(svg)
+    body = DEFS.sub('\x00DEFS\x00', svg)
+
+    if 'transform=' in body:
+        # Outside defs a transform would scale twice, or not at all, depending
+        # where it sits. The converter never emits one.
         raise SystemExit('refusing to scale: document contains a transform')
 
     def head(m):
         attr, value = m.group(1), float(m.group(2))
         return f'{attr}="{value * k:.3f}"'
 
-    svg = re.sub(r'\b(width|height)="([\d.]+)"', head, svg, count=2)
-    svg = re.sub(r'viewBox="([^"]*)"',
-                 lambda m: 'viewBox="' + _scale_path(m.group(1), k) + '"',
-                 svg, count=1)
-    return re.sub(r'\sd="([^"]*)"',
-                  lambda m: ' d="' + _scale_path(m.group(1), k) + '"', svg)
+    body = re.sub(r'\b(width|height)="([\d.]+)"', head, body, count=2)
+    body = re.sub(r'viewBox="([^"]*)"',
+                  lambda m: 'viewBox="' + _scale_path(m.group(1), k) + '"',
+                  body, count=1)
+    body = re.sub(r'\sd="([^"]*)"',
+                  lambda m: ' d="' + _scale_path(m.group(1), k) + '"', body)
+    # Command markers are positioned by x/y on a <use>, not by a path.
+    body = re.sub(r'(<use\b[^>]*?)\sx="([-\d.]+)"\s+y="([-\d.]+)"',
+                  lambda m: f'{m.group(1)} x="{float(m.group(2))*k:.3f}"'
+                            f' y="{float(m.group(3))*k:.3f}"', body)
+
+    for d in defs:
+        body = body.replace('\x00DEFS\x00', d, 1)
+    return body
 
 
 def document_mm(svg):
