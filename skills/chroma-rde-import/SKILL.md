@@ -61,6 +61,33 @@ green while the output was visibly wrong. So:
    `python3 tools/rde_regress.py record base.json tests/fixtures/rde`, make the
    change, then `check`. Name every design that moved.
 
+## Carrying over the digitiser's routing
+
+Chroma does not store "start here, end there" as a setting -- it IS the
+object's stitch stream, so the first and last stitch are the two points the
+digitiser chose. Ink/Stitch reads them as commands, so they survive:
+
+```bash
+python3 tools/rde_start_end.py design.rde design.svg     # also works on a scaled copy
+```
+
+This fixes where each fill ENTERS and LEAVES (verified honoured to two decimal
+places, at full size and scaled). It does not reproduce Chroma's section
+ORDER in between: `auto_fill` decomposes a concave shape into sections and
+routes them itself, and there is no knob for that. The travel between them is
+underpath (`underpath` defaults True in fill_stitch.py), so it runs inside the
+shape under the fill -- a stitch-count cost, not a visible one. Reproducing the
+order means splitting the shape the way the digitiser would have, which is
+re-digitising, not a parameter.
+
+**Before believing a fill is broken, turn its underlay off and look again.**
+Cross-hatch underlay covers the shape at +45 then -45 before the top fill
+arrives, and in a preview that reads exactly like "it fills halfway then
+finishes from the other direction". A sun that looked badly routed turned out
+to be a single clean sweep with two underlay passes over it; the shapes that
+really were splitting were the concave ones. Isolating the passes takes one
+`params set --fill_underlay false` and costs less than an hour of theorising.
+
 ## Known limits
 
 - **Jump estimates are approximate on dense designs.** Trims are decided from
