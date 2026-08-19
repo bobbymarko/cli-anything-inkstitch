@@ -258,6 +258,12 @@ cli-anything-inkstitch commands attach --project $PROJ --id <id> --command trim
 
 Set `trim_after=True` on all elements **except the last one stitched**. The last element needs no trim — there is no subsequent travel.
 
+On a design converted from Chroma, the converter has already set `trim_after`
+everywhere the gap to the next object exceeds the 3 mm threshold above — the
+geometric half of this rubric. What it cannot judge is the "crosses open
+fabric" half, so run `tools optimize-trims --dry-run` to strip the ones later
+stitching covers. See the **chroma-rde-import** skill.
+
 ### Verifying trims in the stitch plan
 
 After setting trims, regenerate the preview and check that the stitch plan contains one separate path segment per trimmed group:
