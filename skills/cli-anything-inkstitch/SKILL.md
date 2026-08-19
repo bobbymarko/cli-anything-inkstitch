@@ -8,6 +8,11 @@ description: >-
 
 A stateful command-line interface for machine-embroidery digitization, following the same patterns as `cli-anything-inkscape`. Sits between vector preparation and stitch generation: writes `inkstitch:` namespace attributes onto SVG path elements via lxml (the digitization step has no native CLI in Ink/Stitch), then delegates to the Ink/Stitch binary for stitch-plan preview and machine-format export.
 
+> **Starting from a Melco/Chroma `.rde` file?** Convert it first with
+> `python3 tools/rde_to_inkstitch.py design.rde design.svg`, then `document
+> open` the result. See the **chroma-rde-import** skill for what the converter
+> decides and how to verify it.
+
 ## Installation
 
 ```bash

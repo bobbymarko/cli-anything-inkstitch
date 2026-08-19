@@ -51,6 +51,37 @@ stitch counts, and our own unit tests. The engine source is checked out at
    (`lib/stitches/auto_run.py autorun`) and re-routes travel, doubling the
    design; `tools auto-run` strips them (`_strip_stale_underpaths`).
 
+## Chroma .rde conversion (`tools/rde_to_inkstitch.py`)
+
+Same discipline, different source of truth. The converter reads a proprietary
+format that no spec exists for, so its facts are **mined from the 127-design
+corpus**, not reasoned out — and, like the engine, the format fails silent: a
+wrong guess produces a valid SVG that is quietly the wrong design (a hand-set
+name-field width cost two letters their outlines, and they came out as hairy
+traces of their own stitches without erroring anywhere).
+
+1. **The tuned constants are measurements. Do not round them.**
+   `HOLE_THREAD_DENSITY_MAX` (0.25) sits in a gap in a bimodal distribution
+   over 346 nested contours; `TRIM_MIN_JUMP_MM` (3.0) is the engine's own
+   `collapse_len` default; the contour block's `8 + 2*len(name)` offset holds
+   for all 15476 objects in the corpus. Changing any of them means re-running
+   the measurement, not picking a rounder number.
+2. **Re-measure the corpus before and after every change.**
+   `tools/rde_regress.py record` then `check` reports which designs moved.
+   Every moved design should be one you can name.
+3. **Prefer the engine's own tool over a rule of our own.** Where Ink/Stitch
+   ships the same decision — `lib/extensions/jump_to_trim.py` for trims — the
+   converter's output is expected to match it element for element, and
+   `tests/test_rde_convert.py::TestAgainstTheEngine` asserts that.
+4. **Look at the art, not the stitch count.** Judge output against the source
+   artwork (the .ai/.svg the design was drawn from), rendered as vectors. A
+   stitch-plan render hides geometry bugs, and a plausible count proved
+   nothing when every counter in the design was filled solid.
+
+`tests/rde_synth.py` builds .rde files from source so the rules stay under
+test in CI; the corpus itself is licensed artwork and is gitignored, so every
+corpus-backed test skips there.
+
 ## Running tests
 
 ```bash
