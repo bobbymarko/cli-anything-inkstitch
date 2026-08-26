@@ -34,7 +34,29 @@ stitch counts, and our own unit tests. The engine source is checked out at
 4. **Verify by looking, not counting.** For geometry/visual output, check the
    produced stitch geometry (segment-length distributions, rendered plan)
    or a screenshot — a plausible stitch count proved nothing when a satin's
-   zigzag swept across the whole shape.
+   zigzag swept across the whole shape. **Look at the whole design, not a
+   crop**: two defects shipped from three-letter zooms (protruding lock tails
+   on all 60 elements; a period rebuilt on the wrong axis).
+4a. **A measurement of engine output is itself unverified code.** Run it
+   against a control whose answer you already know before quoting a number
+   from it. One session produced six confident, wrong measurements, each of
+   which read as plausible:
+   * counting only `JUMP` misses travel the engine **stitches through** —
+     anything shorter than `collapse_len` never becomes a jump, so the thread
+     it lays between shapes appears in no jump or trim count;
+   * a satin's own zigzag looks exactly like long travel;
+   * filtering `JUMP` records out of the command stream makes the stitches
+     either side of a jump look adjacent (a 46 mm "connector" that was a jump);
+   * lock stitches are short, so they drag any local-median test down and make
+     ordinary stitches look like outliers — more trims then "found" more
+     defects;
+   * mapping CSV (0.1 mm) to SVG (px) by bounding box is far too coarse for a
+     1 mm column and reported most of a design as thread on bare fabric;
+   * grid "revisited late" tests false-positive on arcs, whose two ends fall in
+     the same cell.
+   The density map is not a correctness check either: it passed a twisted satin
+   column and preferred the lock style with the most visible tails. It answers
+   "will this damage the fabric", not "is this right".
 5. **Engine tools write px space; never read raw `d` from their output.**
    Extensions compute geometry in px and attach the inverse viewBox/ancestor
    transform (`lib/svg/path.py get_correction_transform`); some carry it as a
@@ -81,6 +103,14 @@ traces of their own stitches without erroring anywhere).
 `tests/rde_synth.py` builds .rde files from source so the rules stay under
 test in CI; the corpus itself is licensed artwork and is gitignored, so every
 corpus-backed test skips there.
+
+5. **Settings the engine reads live in the SVG's `<metadata>`, not our project
+   JSON.** `collapse_len_mm` and `min_stitch_len_mm` are read as
+   `self.metadata[...]` (`lib/extensions/density_map.py:41-42`, same in
+   `element_info.py`, `batch_lettering.py`). Recording them in `proj.session`
+   alone is a no-op the engine never sees — and a silent one, because a gap
+   under the default `collapse_len` is stitched through rather than jumped.
+   `tests/test_engine_settings.py` pins the contract.
 
 ## Running tests
 

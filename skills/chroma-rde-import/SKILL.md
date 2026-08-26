@@ -88,6 +88,60 @@ to be a single clean sweep with two underlay passes over it; the shapes that
 really were splitting were the concave ones. Isolating the passes takes one
 `params set --fill_underlay false` and costs less than an hour of theorising.
 
+## Travel between shapes: the part that is invisible to counting
+
+`collapse_len` (3 mm by default) decides what happens to the move from one
+element to the next. **Longer than it, the machine jumps. Shorter, the machine
+never lifts the needle and stitches straight through** — which lays real thread
+across the garment between letters, and appears in no jump count, no trim
+count, and nowhere in the editor's plan, because there is no gap there to draw.
+In one 60-element crest, 46 of 59 transitions were stitched through like this
+while every jump was correctly trimmed.
+
+The engine reads it from the SVG's `<metadata>` (see CLAUDE.md rule 5), so it
+only takes effect if it is written there. Lowering it converts those
+stitched-through links into jumps, which `jump_to_trim` can then cut.
+
+That is a trade with no free side, and it is worth stating to whoever is
+paying for the sew-out:
+
+* eliminating thread between letters needs a trim at each gap;
+* every trim adds a tie-off and a tie-in, so the needle penetrations pile up at
+  the start and end of each shape (32/mm² with no hotspots became 44/mm² in
+  seven cells at 40 trims);
+* fewer trims means less density and more thread on the front.
+
+Lock style decides whether those ties are visible. `half_stitch` (the default)
+doubles back along stitching that is already there. `simple`, `zigzag`, `arrow`
+and the rest are protruding paths scaled by `lock_start_scale_mm` — 0.7 mm of
+stitching sticking out of every shape, repeated at every tie point. `zigzag`
+scored the best density of any style and looked the worst.
+
+## Satins recovered from stitches
+
+Rails are reconstructed by reading which side of the column each needle landed
+on, so:
+
+* a width that varies along a column is often **correct** — the crest's arch
+  genuinely tapers 2.1 to 5.3 mm, and "the rails must be mis-paired" was wrong;
+* pieces that abut in the artwork should stay separate. Joining two columns
+  across a real gap fills it with a tapering sliver of satin that is not in the
+  design. Chroma's own file keeps them separate for the same reason;
+* if you do join, orientation must be chosen by testing all four combinations
+  (either column reversed, rails swapped or not) and rejecting any where the
+  two connecting segments **cross** — that is a twisted column, its zigzag
+  doubles back over itself, and the density map cannot see it.
+
+## Fonts
+
+Chroma stores lettering as a font reference rather than an outline, which is
+why those objects convert with no contours. The font name is recoverable: scan
+the decrypted object payload for length-prefixed UTF-16 strings. The STS crest
+gave up `DIN Condensed` (top arc) and `Avenir` (bottom arc), alongside `Satin`
+and `100`. Useful when a row looks too light — a lighter face digitised at its
+natural weight is not a digitising error, and rebuilding the text from the real
+font beats widening rails traced from needle positions.
+
 ## Known limits
 
 - **Jump estimates are approximate on dense designs.** Trims are decided from

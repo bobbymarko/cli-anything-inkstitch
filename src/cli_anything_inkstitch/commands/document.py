@@ -278,9 +278,21 @@ def list_thread_colors(ctx, project_path):
 @click.option("--mm", "mm", type=float, required=True)
 @click.pass_context
 def set_collapse_len(ctx, project_path, mm):
-    with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+    """Distance below which the engine stitches through a gap instead of jumping.
+
+    This MUST reach the SVG's <metadata>: the engine reads it there
+    (lib/extensions/density_map.py:41 self.metadata['collapse_len_mm'], and the
+    same in element_info.py and batch_lettering.py), never from our project
+    JSON. Recording it only in the session left every design running the 3.0 mm
+    default however it was set — silently, because a gap under the default is
+    stitched through rather than jumped, and stitched-through travel shows up
+    in no jump count at all.
+    """
+    from cli_anything_inkstitch.svg.document import set_inkstitch_metadata
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
         before = {"collapse_len_mm": proj.session.get("collapse_len_mm")}
         proj.session["collapse_len_mm"] = float(mm)
+        set_inkstitch_metadata(tree, "collapse_len_mm", float(mm))
         _record_session_change(proj, "document set-collapse-len",
                                before, {"collapse_len_mm": float(mm)})
         emit(ctx, {"collapse_len_mm": float(mm)})
@@ -291,9 +303,13 @@ def set_collapse_len(ctx, project_path, mm):
 @click.option("--mm", "mm", type=float, required=True)
 @click.pass_context
 def set_min_stitch_len(ctx, project_path, mm):
-    with open_project(ctx, project_path, mutate=True) as (proj, _tree):
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
+        # Same contract as collapse_len: the engine reads this from metadata
+        # (lib/extensions/density_map.py:42), not from our project JSON.
+        from cli_anything_inkstitch.svg.document import set_inkstitch_metadata
         before = {"min_stitch_len_mm": proj.session.get("min_stitch_len_mm")}
         proj.session["min_stitch_len_mm"] = float(mm)
+        set_inkstitch_metadata(tree, "min_stitch_len_mm", float(mm))
         _record_session_change(proj, "document set-min-stitch-len",
                                before, {"min_stitch_len_mm": float(mm)})
         emit(ctx, {"min_stitch_len_mm": float(mm)})

@@ -52,9 +52,6 @@
                background: rgba(38,16,16,.96); border: 1px solid rgba(229,83,75,.55);
                color: #f4d7d4; font-size: 12px; line-height: 1.5; }
   #planError[hidden] { display: none; }
-  #planError.pending { background: rgba(18,24,34,.96);
-                       border-color: rgba(110,168,254,.5); color: #d7e3f4; }
-  #planError.pending .pe-head { color: var(--accent); }
   #planError .pe-head { font-weight: 600; color: var(--end); }
   #planError .pe-detail { margin-top: 3px; }
   #planError .pe-diag { margin-top: 6px; font-family: ui-monospace, Menlo, monospace;
@@ -404,9 +401,14 @@
   .rung.active { stroke: var(--accent); stroke-width: 2.4; }
   .zig { fill: none; stroke: var(--zig); stroke-width: .6; opacity: .75;
          vector-effect: non-scaling-stroke; pointer-events: none; }
+  /* A trimmed move leaves nothing behind; a float is thread lying on the
+     garment. Drawing both as the same grey dash is why "will this stitch
+     out?" could not be answered from the screen. */
   .jumpLine { stroke: #8a8f9c; stroke-width: 1; stroke-dasharray: 4 3;
               opacity: .55; vector-effect: non-scaling-stroke;
               pointer-events: none; }
+  .floatLine { stroke: var(--end); stroke-width: 2; opacity: .95;
+               vector-effect: non-scaling-stroke; pointer-events: none; }
   .node { fill: var(--rail); stroke: #14161a; stroke-width: 1.5;
           vector-effect: non-scaling-stroke; cursor: grab; }
   .node.nodeActive { fill: var(--accent); stroke: #fff; }
@@ -1026,17 +1028,11 @@ async function postFeedback(payload) {
    that simply has no stitches, so a server error, a checksum mismatch and a
    zero-size canvas all looked identical -- and the only clue vanished after
    four seconds. */
-function setPlanState(head, detail, diag) {   // in progress, not a failure
-  const el = $("planError");
-  el.classList.add("pending");
-  el.querySelector(".pe-head").textContent = head;
-  el.querySelector(".pe-detail").textContent = detail || "";
-  el.querySelector(".pe-diag").textContent = diag || "";
-  el.hidden = false;
-}
+/* Banners are for failures only. Progress is the view-mode button pulsing --
+   a banner that appears every time the plan refreshes is noise on top of the
+   work you are actually looking at. */
 function setPlanError(head, detail, diag) {
   const el = $("planError");
-  el.classList.remove("pending");
   el.querySelector(".pe-head").textContent = head;
   el.querySelector(".pe-detail").textContent = detail || "";
   el.querySelector(".pe-diag").textContent = diag || "";
@@ -1044,11 +1040,7 @@ function setPlanError(head, detail, diag) {
   console.error("[stitch plan] " + head + (detail ? " — " + detail : "")
                 + (diag ? "  {" + diag + "}" : ""));
 }
-function clearPlanError() {
-  const el = $("planError");
-  el.hidden = true;
-  el.classList.remove("pending");
-}
+function clearPlanError() { $("planError").hidden = true; }
 function planDiag(extra) {
   const rc = $("realCanvas"), wrap = $("canvasWrap").getBoundingClientRect();
   return [`view=${viewMode}`, `plan=${planOn}`,
@@ -1074,12 +1066,7 @@ let stitchData = null;          // {blocks: [{color, paths: [[[x,y],...]]}], tot
 let timelinePos = null;         // stitches currently shown; null = all
 async function fetchTier2() {
   const gen = ++tier2Gen;
-  $("viewModes").classList.add("loading");
-  setPlanState("Building the stitch plan…",
-               "Ink/Stitch is generating it; this takes a second or two on a "
-               + "design this size. If this notice stays up, the request is "
-               + "not completing — check the Network tab for /stitches.",
-               planDiag("endpoint=/stitches  started"));    // pulse on the active mode button
+  $("viewModes").classList.add("loading");   // the button pulses; that is enough    // pulse on the active mode button
   try {
     const r = await fetch(api("/stitches") + (hiddenIds.size
       ? "?exclude=" + encodeURIComponent([...hiddenIds].join(",")) : ""));
@@ -1180,7 +1167,11 @@ function renderPlanLayer() {
       if (remaining <= 0) return;
       if (pi > 0 && block.jumps && block.jumps[pi - 1]) {
         const [x1, y1, x2, y2] = block.jumps[pi - 1];
-        el("line", { x1, y1, x2, y2, class: "jumpLine" }, planLayer);
+        // jumps_cut comes from the machine command stream: false = the thread
+        // was NOT cut, so this move drags thread across the garment
+        const cut = !block.jumps_cut || block.jumps_cut[pi - 1] !== false;
+        el("line", { x1, y1, x2, y2, class: cut ? "jumpLine" : "floatLine" },
+           planLayer);
       }
       const pts = block.paths[pi];
       const take = Math.min(pts.length, remaining);
@@ -1351,13 +1342,15 @@ function drawRealistic() {
     for (let pi = 0; pi < block.paths.length; pi++) {
       if (remaining <= 0) return;
       if (pi > 0 && block.jumps && block.jumps[pi - 1]) {
-        // needle-up travel: thin dashed gray, no thread body
+        // needle-up travel. Cut before travelling: thin dashed grey, nothing
+        // is there. Not cut: real thread on the garment, drawn as such.
         const [jx1, jy1, jx2, jy2] = block.jumps[pi - 1];
+        const cut = !block.jumps_cut || block.jumps_cut[pi - 1] !== false;
         ctx.save();
-        ctx.strokeStyle = "#8a8f9c";
-        ctx.globalAlpha = 0.55;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = cut ? "#8a8f9c" : "#e5534b";
+        ctx.globalAlpha = cut ? 0.55 : 0.95;
+        ctx.lineWidth = cut ? 1 : 2;
+        ctx.setLineDash(cut ? [4, 4] : []);
         ctx.beginPath();
         ctx.moveTo(jx1 * s + ox, jy1 * s + oy);
         ctx.lineTo(jx2 * s + ox, jy2 * s + oy);
