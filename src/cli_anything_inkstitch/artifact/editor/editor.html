@@ -52,6 +52,9 @@
                background: rgba(38,16,16,.96); border: 1px solid rgba(229,83,75,.55);
                color: #f4d7d4; font-size: 12px; line-height: 1.5; }
   #planError[hidden] { display: none; }
+  #planError.pending { background: rgba(18,24,34,.96);
+                       border-color: rgba(110,168,254,.5); color: #d7e3f4; }
+  #planError.pending .pe-head { color: var(--accent); }
   #planError .pe-head { font-weight: 600; color: var(--end); }
   #planError .pe-detail { margin-top: 3px; }
   #planError .pe-diag { margin-top: 6px; font-family: ui-monospace, Menlo, monospace;
@@ -1023,8 +1026,17 @@ async function postFeedback(payload) {
    that simply has no stitches, so a server error, a checksum mismatch and a
    zero-size canvas all looked identical -- and the only clue vanished after
    four seconds. */
+function setPlanState(head, detail, diag) {   // in progress, not a failure
+  const el = $("planError");
+  el.classList.add("pending");
+  el.querySelector(".pe-head").textContent = head;
+  el.querySelector(".pe-detail").textContent = detail || "";
+  el.querySelector(".pe-diag").textContent = diag || "";
+  el.hidden = false;
+}
 function setPlanError(head, detail, diag) {
   const el = $("planError");
+  el.classList.remove("pending");
   el.querySelector(".pe-head").textContent = head;
   el.querySelector(".pe-detail").textContent = detail || "";
   el.querySelector(".pe-diag").textContent = diag || "";
@@ -1032,7 +1044,11 @@ function setPlanError(head, detail, diag) {
   console.error("[stitch plan] " + head + (detail ? " — " + detail : "")
                 + (diag ? "  {" + diag + "}" : ""));
 }
-function clearPlanError() { $("planError").hidden = true; }
+function clearPlanError() {
+  const el = $("planError");
+  el.hidden = true;
+  el.classList.remove("pending");
+}
 function planDiag(extra) {
   const rc = $("realCanvas"), wrap = $("canvasWrap").getBoundingClientRect();
   return [`view=${viewMode}`, `plan=${planOn}`,
@@ -1058,7 +1074,12 @@ let stitchData = null;          // {blocks: [{color, paths: [[[x,y],...]]}], tot
 let timelinePos = null;         // stitches currently shown; null = all
 async function fetchTier2() {
   const gen = ++tier2Gen;
-  $("viewModes").classList.add("loading");    // pulse on the active mode button
+  $("viewModes").classList.add("loading");
+  setPlanState("Building the stitch plan…",
+               "Ink/Stitch is generating it; this takes a second or two on a "
+               + "design this size. If this notice stays up, the request is "
+               + "not completing — check the Network tab for /stitches.",
+               planDiag("endpoint=/stitches  started"));    // pulse on the active mode button
   try {
     const r = await fetch(api("/stitches") + (hiddenIds.size
       ? "?exclude=" + encodeURIComponent([...hiddenIds].join(",")) : ""));
@@ -1139,7 +1160,8 @@ function renderPlanLayer() {
   // replaces it. fetchTier2 reports its own failures; reaching here with no
   // data and no error showing means the plan was never requested.
   if (planOn && viewMode !== "outline" && !stitchData) {
-    if ($("planError").hidden)
+    const inFlight = $("viewModes").classList.contains("loading");
+    if ($("planError").hidden && !inFlight)
       setPlanError("No stitch plan is loaded, so this view has nothing to draw.",
                    "The artwork below is dimmed to 12% because the plan is "
                    + "meant to be on top of it. Switch to Outline to see the "
@@ -3477,8 +3499,11 @@ function setViewMode(mode) {
   $("canvasWrap").classList.toggle("showPlan", planOn);
   $("timelineBar").classList.toggle("show", planOn && !!stitchData);
   stopTimelinePlay();
-  renderPlanLayer();
+  // Ask for the plan FIRST. Rendering first meant the "no plan loaded" notice
+  // was written in the instant before the request started, so it reported
+  // waiting=false and then never corrected itself.
   if (planOn && !stitchData) fetchTier2();
+  renderPlanLayer();
 }
 for (const b of document.querySelectorAll("#viewModes button"))
   b.addEventListener("click", () => setViewMode(b.dataset.mode));
