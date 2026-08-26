@@ -44,6 +44,18 @@
            max-width: 60ch; z-index: 3; }
   #toast.show { display: block; }
   #toast.error { border-color: rgba(229,83,75,.5); color: var(--end); }
+  /* The stitch plan failing used to be a 4-second toast over artwork dimmed to
+     12% -- miss it and the canvas just looks broken for ever, with no way to
+     tell a failed plan from an empty one. This says so, and stays said. */
+  #planError { position: absolute; left: 50%; top: 24px; transform: translateX(-50%);
+               max-width: 560px; z-index: 20; padding: 10px 13px; border-radius: 8px;
+               background: rgba(38,16,16,.96); border: 1px solid rgba(229,83,75,.55);
+               color: #f4d7d4; font-size: 12px; line-height: 1.5; }
+  #planError[hidden] { display: none; }
+  #planError .pe-head { font-weight: 600; color: var(--end); }
+  #planError .pe-detail { margin-top: 3px; }
+  #planError .pe-diag { margin-top: 6px; font-family: ui-monospace, Menlo, monospace;
+                        font-size: 11px; opacity: .75; word-break: break-all; }
   #viewModes.loading button.on { animation: pulse 1.2s infinite; }
   #gateBanner { position: absolute; left: 10px; right: 10px; top: 10px; display: none;
                 background: rgba(46,22,24,.95); border: 1px solid rgba(229,83,75,.5);
@@ -459,6 +471,11 @@
     <canvas id="rulerTop" title="Drag down to pull out a horizontal guide"></canvas>
     <canvas id="rulerLeft" title="Drag right to pull out a vertical guide"></canvas>
     <div id="rulerCorner"></div>
+    <div id="planError" hidden>
+      <div class="pe-head"></div>
+      <div class="pe-detail"></div>
+      <div class="pe-diag"></div>
+    </div>
     <div id="toast"></div>
     <div id="toolbar" role="toolbar" aria-label="Tools">
       <button class="tool on" id="toolSelect" type="button"
@@ -998,6 +1015,33 @@ async function postFeedback(payload) {
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 }
 
+/* Why the stitch plan is not on screen, stated where it happened.
+
+   Every failure below used to end in the same place: stitchData stays null,
+   renderPlanLayer draws nothing, and .artwork sits at 12% opacity because the
+   plan is meant to be the truth. The result is indistinguishable from a design
+   that simply has no stitches, so a server error, a checksum mismatch and a
+   zero-size canvas all looked identical -- and the only clue vanished after
+   four seconds. */
+function setPlanError(head, detail, diag) {
+  const el = $("planError");
+  el.querySelector(".pe-head").textContent = head;
+  el.querySelector(".pe-detail").textContent = detail || "";
+  el.querySelector(".pe-diag").textContent = diag || "";
+  el.hidden = false;
+  console.error("[stitch plan] " + head + (detail ? " — " + detail : "")
+                + (diag ? "  {" + diag + "}" : ""));
+}
+function clearPlanError() { $("planError").hidden = true; }
+function planDiag(extra) {
+  const rc = $("realCanvas"), wrap = $("canvasWrap").getBoundingClientRect();
+  return [`view=${viewMode}`, `plan=${planOn}`,
+          `stitchData=${stitchData ? stitchData.total_stitches + " stitches" : "null"}`,
+          `wrap=${Math.round(wrap.width)}x${Math.round(wrap.height)}`,
+          `canvas=${rc.width}x${rc.height}`, `dpr=${window.devicePixelRatio || 1}`,
+          extra].filter(Boolean).join("  ");
+}
+
 /* ---------- tier-2 overlay (debounced, coalescing) ---------- */
 let tier2Timer = null;
 function scheduleTier2() {
@@ -1021,9 +1065,16 @@ async function fetchTier2() {
     const data = await r.json();
     if (gen !== tier2Gen) return;            // superseded by a newer edit
     if (!r.ok || data.error) {
+      // The server's own words matter here: "SVG modified outside
+      // cli-anything-inkstitch" is a checksum mismatch with a known fix, and
+      // it reads nothing like a crash.
+      setPlanError("The stitch plan could not be built.",
+                   data.error || ("HTTP " + r.status),
+                   planDiag("endpoint=/stitches"));
       showToast("stitch plan failed: " + (data.error || r.status), true);
       return;
     }
+    clearPlanError();
     const tl = $("timeline");
     // preserve the scrub position across plan refreshes — resetting to the
     // end after every edit makes deep-timeline stitch-order debugging
@@ -1045,7 +1096,12 @@ async function fetchTier2() {
     renderDensity();                   // heat overlay tracks the fresh plan
     renderOverview();                  // stitch count + block colors just landed
   } catch (e) {
-    if (gen === tier2Gen) showToast("stitch plan: server unreachable", true);
+    if (gen === tier2Gen) {
+      setPlanError("Could not reach the artifact server.",
+                   String(e && e.message || e),
+                   planDiag("endpoint=/stitches"));
+      showToast("stitch plan: server unreachable", true);
+    }
   } finally {
     if (gen === tier2Gen) $("viewModes").classList.remove("loading");
   }
@@ -1078,6 +1134,19 @@ function renderPlanLayer() {
   planLayer.textContent = "";
   const realOn = planOn && viewMode === "realistic" && !!stitchData;
   $("realCanvas").style.display = realOn ? "block" : "none";
+  // Asking for stitches or realistic while the plan is missing is the state
+  // that reads as "the editor is frozen": the artwork dims and nothing
+  // replaces it. fetchTier2 reports its own failures; reaching here with no
+  // data and no error showing means the plan was never requested.
+  if (planOn && viewMode !== "outline" && !stitchData) {
+    if ($("planError").hidden)
+      setPlanError("No stitch plan is loaded, so this view has nothing to draw.",
+                   "The artwork below is dimmed to 12% because the plan is "
+                   + "meant to be on top of it. Switch to Outline to see the "
+                   + "artwork at full strength.",
+                   planDiag("waiting=" + $("viewModes").classList.contains("loading")));
+    return;
+  }
   if (realOn) { drawRealistic(); return; }
   if (!planOn || !stitchData) return;
   // stitches mode — hairline vectors; jumps/trims (needle-up travel between
@@ -1215,12 +1284,23 @@ function drawRealistic() {
   const rect = $("canvasWrap").getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const pw = Math.round(rect.width * dpr), ph = Math.round(rect.height * dpr);
+  // A zero-size wrapper gives the canvas a zero backing store, and every draw
+  // below then succeeds into nothing -- silent, and indistinguishable from a
+  // plan that failed to load.
+  if (pw < 1 || ph < 1) {
+    setPlanError("The canvas has no size, so the realistic view cannot draw.",
+                 "This is a layout problem rather than a stitch problem — the "
+                 + "drawing area measured zero pixels.",
+                 planDiag());
+    return;
+  }
   if (rc.width !== pw) rc.width = pw;
   if (rc.height !== ph) rc.height = ph;
   const ctx = rc.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, rect.width, rect.height);
   if (!planOn || viewMode !== "realistic" || !stitchData) return;
+  clearPlanError();
   // svg viewBox (preserveAspectRatio meet, centered) → screen px
   const s = Math.min(rect.width / vb.w, rect.height / vb.h);
   const ox = (rect.width - vb.w * s) / 2 - vb.x * s;
