@@ -987,6 +987,60 @@ def extract_stitch_blocks(svg_bytes: bytes) -> dict[str, Any]:
     return {"blocks": blocks, "total_stitches": total}
 
 
+def _cut_moves(project_file: str, *, binary_override: str | None = None,
+               ids: list[str] | None = None) -> list[bool] | None:
+    """For each needle-up move, in order: was the thread cut before it?
+
+    The plan SVG cannot answer this. It splits the stitching at every needle-up
+    move, so a trim and a float look identical in it -- which is why the canvas
+    drew both the same and nobody could tell a clean design from one dragging
+    thread between letters. Only the machine command stream carries TRIM, so
+    this costs a second engine call.
+    """
+    from cli_anything_inkstitch.binary import require, run_extension
+    with _open_locked(project_file) as (proj, _tree):
+        binary = require(binary_override, proj.session)
+        svg_path = proj.svg_path
+    try:
+        out = run_extension(binary, "output", svg_path,
+                            args={"format": "csv"}, ids=list(ids or []),
+                            capture_stdout=True)
+    except Exception:
+        return None                      # never let this break the plan
+    if not out:
+        return None
+    seq = [m.group(1) for m in re.finditer(
+        r'"\*","\d+","(\w+)"', out.decode("utf-8", "replace"))]
+    cut: list[bool] = []
+    for i, cmd in enumerate(seq):
+        if cmd != "JUMP":
+            continue
+        window = seq[max(0, i - 3):i]
+        cut.append("TRIM" in window or "COLOR_CHANGE" in window)
+    return cut
+
+
+def _mark_cut(blocks: list[dict[str, Any]], cut: list[bool] | None) -> None:
+    """Attach per-gap cut flags to the blocks, aligned by stitch order.
+
+    The command stream has one move the blocks do not: the initial jump into
+    the design. Each colour change is likewise a move between blocks rather
+    than a gap inside one. Walk both in step.
+    """
+    if cut is None:
+        return
+    i = 1                                 # skip the jump into the design
+    for b_index, block in enumerate(blocks):
+        if b_index:
+            i += 1                        # the colour change between blocks
+        n = len(block.get("jumps", []))
+        flags = cut[i:i + n]
+        if len(flags) != n:
+            return                        # counts disagree; say nothing
+        block["jumps_cut"] = flags
+        i += n
+
+
 def stitch_sequence(project_file: str, *, binary_override: str | None = None,
                     exclude: list[str] | None = None) -> dict[str, Any]:
     """Authoritative stitch order for the editor's plan display + timeline.
@@ -1012,8 +1066,11 @@ def stitch_sequence(project_file: str, *, binary_override: str | None = None,
         ids = [i for i in all_ids if i not in dropped]
         if not ids:
             return {"blocks": [], "total_stitches": 0}
-    return extract_stitch_blocks(
+    out = extract_stitch_blocks(
         stitch_plan_svg(project_file, binary_override=binary_override, ids=ids))
+    _mark_cut(out["blocks"],
+              _cut_moves(project_file, binary_override=binary_override, ids=ids))
+    return out
 
 
 # -- Tier-2: authoritative stitch plan ------------------------------------------

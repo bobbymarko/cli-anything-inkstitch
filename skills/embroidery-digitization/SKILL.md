@@ -264,6 +264,41 @@ geometric half of this rubric. What it cannot judge is the "crosses open
 fabric" half, so run `tools optimize-trims --dry-run` to strip the ones later
 stitching covers. See the **chroma-rde-import** skill.
 
+### The trap: a gap shorter than collapse_len is not a jump at all
+
+Everything above concerns jumps. A move **shorter** than `collapse_len` never
+becomes one — the needle stays down and the machine stitches from one shape
+into the next, laying thread across the garment. It appears in no jump count,
+no trim count, and not in a stitch-plan preview, because the plan only splits
+at needle-up moves and there is no gap there to draw. If someone reports
+"strings between the letters" and your trim audit says the file is clean, this
+is why. Check `collapse_len` before you check anything else, and remember the
+engine reads it from the SVG metadata rather than any project setting.
+
+### Trims, threads and density are one trade
+
+You cannot have all three. Measured on a 55 mm crest:
+
+| collapse | trims | stitched-through links | density |
+| --- | --- | --- | --- |
+| 3.0 mm (default) | 13 | 46 | 32/mm², no hotspots |
+| 0.6 mm + trims | 40 | 19 (letters that genuinely touch) | 44/mm², 7 cells |
+
+Eliminating thread on the front costs trims; every trim adds a tie-off and a
+tie-in, and those penetrations land on top of stitching that is already there.
+Decide which the customer is judging — the front of the garment or the back —
+and say so out loud, because the two requirements are in direct conflict.
+
+### Lock stitches are visible unless they double back
+
+`lock_start` / `lock_end` default to `half_stitch`, which ties by retracing
+existing stitching and leaves nothing on the surface. The alternatives
+(`simple`, `zigzag`, `arrow`, `triangle`, `cross`, …) are little SVG paths
+scaled by `lock_start_scale_mm` (0.7 mm default) that stick **out** of the
+shape — fine at two tie points, obvious at forty. Judge them on a full-design
+render, never on density: `zigzag` gave the best density figure of every style
+tested and the worst appearance.
+
 ### Verifying trims in the stitch plan
 
 After setting trims, regenerate the preview and check that the stitch plan contains one separate path segment per trimmed group:
