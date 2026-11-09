@@ -778,3 +778,222 @@ def _style_autorun_tops(ctx, project_path, stitch_length_mm, bean_repeats):
                    f"tools digitize-lineart style ({len(styled)} tops)",
                    multi_patch(patches))
     return {"styled_tops": len(styled), "style_errors": errors}
+
+
+# ---------------------------------------------------------------- lettering
+
+def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float) -> dict:
+    """Satin params for one planned column, from its median width.
+
+    Underlay by width, the usual digitizing ladder (ES's automatic
+    underlay does the same): a centre walk under thin columns, an edge
+    walk (contour) from 1.5 mm, edge walk plus zigzag from 4 mm. Columns
+    wider than SPLIT_SATIN_MM get the engine's split satin
+    (max_stitch_length_mm), because one long stitch snags. Every name here
+    is checked against the mined schema by _apply_params_to_element.
+    """
+    from cli_anything_inkstitch.trace.glyph_columns import SPLIT_SATIN_MM
+
+    w = sorted(widths_mm)[len(widths_mm) // 2] if widths_mm else 0.0
+    p = {"pull_compensation_mm": f"{pull_comp_mm:g}"}
+    if w < 1.5:
+        p["center_walk_underlay"] = "true"
+    else:
+        p["contour_underlay"] = "true"
+        if w >= 4.0:
+            p["zigzag_underlay"] = "true"
+    if max(widths_mm or [0.0]) > SPLIT_SATIN_MM:
+        p["max_stitch_length_mm"] = f"{SPLIT_SATIN_MM:g}"
+    return p
+
+
+@tools.command("text-to-satin")
+@click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--font", "font_path", type=click.Path(exists=True, dir_okay=False),
+              required=True, help="TrueType/OpenType font file.")
+@click.option("--text", required=True, help="One line of text.")
+@click.option("--height-mm", type=float, required=True,
+              help="Capital height in mm (the font's cap height, as "
+                   "EmbroideryStudio's lettering Height).")
+@click.option("--wght", type=float, default=None,
+              help="Weight for a variable font (e.g. 600).")
+@click.option("--letter-spacing-pct", type=float, default=None,
+              help="Extra space between letters, % of the height.")
+@click.option("--width-mm", type=float, default=None,
+              help="Fit the text to this ink width by letter spacing "
+                   "(overrides --letter-spacing-pct).")
+@click.option("--cx-mm", type=float, default=None,
+              help="Centre of the text, mm from the document's left edge "
+                   "(default: the page centre).")
+@click.option("--cy-mm", type=float, default=None,
+              help="Centre of the text, mm from the document's top edge.")
+@click.option("--rotate-deg", type=float, default=0.0,
+              help="Counter-clockwise tilt in degrees (+5 = slight upward tilt).")
+@click.option("--merge-joins", is_flag=True,
+              help="Script fonts: union touching letters and plan each "
+                   "connected piece as one shape, so joins are one stroke.")
+@click.option("--fallback", type=click.Choice(["fill", "satin"]), default="fill",
+              show_default=True,
+              help="A letter whose plan fails its check: tatami fill of the "
+                   "outline, or keep the failing satin plan anyway.")
+@click.option("--color", default="#ffffff", show_default=True)
+@click.option("--pull-comp-mm", type=float, default=0.2, show_default=True)
+@click.option("--auto-params/--no-auto-params", default=True, show_default=True,
+              help="Underlay, pull compensation and split satin chosen per "
+                   "column (see _lettering_satin_params).")
+@click.option("--route/--no-route", default=True, show_default=True,
+              help="Route letters whose planned order would leave travel "
+                   "on bare fabric (an E's arms) with the engine's "
+                   "auto_satin, so travel runs under columns not yet sewn. "
+                   "--no-route keeps the planned order everywhere.")
+@click.pass_context
+def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
+                  letter_spacing_pct, width_mm, cx_mm, cy_mm, rotate_deg, merge_joins,
+                  fallback, color, pull_comp_mm, auto_params, route):
+    """Set TEXT from a TTF as per-stroke satin columns: no rung review.
+
+    Each letter is cut at its junctions into strokes, and each stroke gets
+    its own satin column with rails paired by construction
+    (trace/glyph_columns.py). Every letter is checked against its outline:
+    bare area, overhang, overlap between columns, twisted pairs. A letter
+    that fails becomes a tatami fill (--fallback fill), and the payload
+    says which letters and why. Letters sew left to right, with a trim
+    after each one.
+
+    Routing (default): a letter whose planned order would lay travel on
+    bare fabric (an E's arms) goes through the engine's auto_satin, which
+    re-orders and cuts its columns so travel runs under strokes still to
+    come. Letters are trimmed apart either way.
+    """
+    from cli_anything_inkstitch.binary import installed_version
+    from cli_anything_inkstitch.commands.params import _apply_params_to_element
+    from cli_anything_inkstitch.schema.cache import load_schema
+    from cli_anything_inkstitch.svg.attrs import INKSCAPE_NS, qname
+    from cli_anything_inkstitch.svg.units import document_scale
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+
+    font = gc.static_font(font_path, wght)
+    letters = gc.plan_text(font, text, height_mm,
+                           letter_spacing_pct=letter_spacing_pct,
+                           width_mm=width_mm, merge_joins=merge_joins)
+    schema = load_schema(prefer_version=installed_version(
+        ctx.obj.get("binary_override") if ctx.obj else None))
+
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
+        if tree is None:
+            raise UserError("the project has no SVG: document open --svg first")
+        root = tree.getroot()
+        scale = document_scale(root) or (1.0, 1.0)
+        uu_per_mm = gc.PX_PER_MM / scale[0]
+        vb = [float(v) for v in (root.get("viewBox") or "").replace(",", " ").split()] or None
+        if vb and len(vb) == 4:
+            cx = vb[0] + (cx_mm * uu_per_mm if cx_mm is not None else vb[2] / 2)
+            cy = vb[1] + (cy_mm * uu_per_mm if cy_mm is not None else vb[3] / 2)
+        else:
+            cx = (cx_mm or 0.0) * uu_per_mm
+            cy = (cy_mm or 0.0) * uu_per_mm
+        tx = gc.make_transform(uu_per_mm, cx, cy, rotate_deg)
+        before_xml = etree.tostring(root).decode("utf-8")
+        taken = {e.get("id") for e in root.iter() if e.get("id")}
+        n = 0
+        while f"text{n}" in taken:
+            n += 1
+        top = etree.SubElement(root, f"{{{SVG_NS}}}g")
+        top.set("id", f"text{n}")
+        top.set(f"{{{INKSCAPE_NS}}}label", text)
+        report, last_elems, param_errors = [], [], []
+        to_route, groups = [], []
+        stroke_w = f"{0.1 * uu_per_mm:.3f}"
+        for li, lt in enumerate(letters):
+            g = etree.SubElement(top, f"{{{SVG_NS}}}g")
+            g.set("id", f"text{n}_l{li}")
+            g.set(f"{{{INKSCAPE_NS}}}label", lt.char)
+            as_fill = (not lt.ok and fallback == "fill") or not lt.columns
+            made = []
+            if as_fill:
+                for k, d in enumerate(gc.fill_ds(lt.contours, tx)):
+                    p = etree.SubElement(g, f"{{{SVG_NS}}}path")
+                    p.set("id", f"text{n}_l{li}_f{k}")
+                    p.set("d", d)
+                    p.set("style", f"fill:{color};stroke:none")
+                    made.append((p, "auto_fill", {}))
+            else:
+                for k, c in enumerate(lt.columns):
+                    p = etree.SubElement(g, f"{{{SVG_NS}}}path")
+                    p.set("id", f"text{n}_l{li}_c{k}")
+                    p.set("d", gc.satin_d(c, tx))
+                    p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
+                    extra = (_lettering_satin_params(c.widths(), pull_comp_mm)
+                             if auto_params else {})
+                    made.append((p, "satin_column", extra))
+            for p, st, extra in made:
+                try:
+                    _apply_params_to_element(p, st, extra, schema, force=True)
+                except UserError as exc:
+                    param_errors.append({"id": p.get("id"), "error": str(exc)})
+            if made:
+                last_elems.append(made[-1][0])
+            ids_here = [p.get("id") for p, st, _ in made if st == "satin_column"]
+            travel = 0.0 if as_fill else gc.exposed_travel_mm(lt)
+            if route and len(ids_here) >= 2 and travel > gc.EXPOSED_TRAVEL_MM:
+                to_route.append(ids_here)
+            groups.append(g.get("id"))
+            chk = lt.check or {}
+            report.append({
+                "letter": lt.char, "group": g.get("id"),
+                "stitch": "fill" if as_fill else "satin",
+                "columns": 0 if as_fill else len(lt.columns),
+                "plan_ok": lt.ok,
+                "routed": bool(to_route and to_route[-1] == ids_here) if not as_fill else False,
+                **({"error": lt.error} if lt.error else {}),
+                **{k: chk[k] for k in ("sewable_bare_pct", "outside_pct",
+                                       "overlap_mm2", "crossed_pairs")
+                   if k in chk},
+            })
+        push(proj.history, make_entry(
+            command=f"tools text-to-satin --text {text!r} --height-mm {height_mm:g}",
+            patch=document_replace(
+                before_xml, etree.tostring(root).decode("utf-8"))))
+        failed = [r["letter"] for r in report if not r["plan_ok"]]
+        payload = {"group": top.get("id"), "font": str(font),
+                   "letters": report, "failed_plans": failed,
+                   "fallback": fallback if failed else None}
+        if param_errors:
+            payload["param_errors"] = param_errors
+    # route the letters whose planned order would lay travel on bare fabric
+    # (trace/glyph_columns.py exposed_travel_mm says why only those): one
+    # engine run per letter, so routing never reaches across letters
+    for ids_here in to_route:
+        run_tool_core(ctx, project_path, "auto_satin", ids_here,
+                      {"trim": "false", "preserve_order": "false",
+                       "keep_originals": "false"})
+    # then a trim after each letter but the last. The engine reads
+    # trim_after per element (mined schema param; lib/elements/element.py
+    # Element.trim_after); set after routing, because auto_satin cuts and
+    # re-orders a letter's columns and an earlier trim would land mid-letter.
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
+        root = tree.getroot()
+        before_xml = etree.tostring(root).decode("utf-8")
+        sat, ptype = qname("satin_column"), qname("path_type")
+        for gid in groups[:-1]:
+            g = next((e for e in root.iter() if e.get("id") == gid), None)
+            if g is None:
+                continue
+            sewn = [e for e in g.iter(f"{{{SVG_NS}}}path")
+                    if not e.get(ptype)
+                    and ((e.get(sat) or "").lower() == "true"
+                         or "fill:none" not in (e.get("style") or ""))]
+            if not sewn:
+                continue
+            try:
+                _apply_params_to_element(sewn[-1], None, {"trim_after": "true"},
+                                         schema, force=True)
+            except UserError as exc:
+                param_errors.append({"id": sewn[-1].get("id"), "error": str(exc)})
+        push(proj.history, make_entry(
+            command="tools text-to-satin (trims between letters)",
+            patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
+    payload["routed_letters"] = len(to_route)
+    if param_errors:
+        payload["param_errors"] = param_errors
+    emit(ctx, payload)
