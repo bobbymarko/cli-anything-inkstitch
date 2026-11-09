@@ -424,7 +424,13 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
       closed rings stay exactly closed and rung↔rail intersections at the
       ends survive;
     * consecutive duplicate points are dropped first (the engine repeats a
-      ring's closure point 2-3 times — the gate false-positive lesson).
+      ring's closure point 2-3 times — the gate false-positive lesson);
+    * a satin with exactly two subpaths (no rungs) passes through untouched.
+      The engine pairs such rails node for node (`SatinColumn.rungs` →
+      `_synthesize_rungs`), so simplifying the rails separately changes
+      which points pair up. Measured: auto_satin passed an unconnected
+      old-style S through, simplification left its rails at 18 and 17
+      nodes, and the S came out twisted.
 
     Returns (new_d, nodes_before, nodes_after); new_d is `d` unchanged when
     nothing was simplifiable.
@@ -435,7 +441,7 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
         _POLYLINE_RE_TOKEN = re.compile(
             r"[A-DF-Za-df-z]|[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
     subs = [c for c in re.split(r"(?=[Mm])", d.strip()) if c.strip()]
-    if len(subs) < 2:
+    if len(subs) <= 2:
         return d, 0, 0
 
     def parse_polyline(sub):

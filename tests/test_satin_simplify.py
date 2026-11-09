@@ -62,7 +62,11 @@ class TestSimplifySatinD:
     def test_closed_ring_stays_exactly_closed(self):
         ring = _arc_pts(0, 0, 10, 0, 2 * math.pi, 180)
         ring += [ring[0], ring[0]]           # engine-style duplicated closure
-        d = _poly_d(ring) + " " + _poly_d(_arc_pts(0, 0, 12, 0, 2 * math.pi, 180))
+        # with a rung: a rung-less (two-subpath) satin is paired node for
+        # node by the engine and passes through untouched
+        # (tests/test_glyph_columns.py TestOldStyleSatinSurvivesSimplify)
+        d = (_poly_d(ring) + " " + _poly_d(_arc_pts(0, 0, 12, 0, 2 * math.pi, 180))
+             + " M9,0 L13,0")
         new_d, before, after = simplify_satin_d(d)
         assert after < before
         first_sub = new_d.split(" M")[0]
