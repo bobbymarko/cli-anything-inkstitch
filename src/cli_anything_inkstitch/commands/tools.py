@@ -807,6 +807,168 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float) -> dict
     return p
 
 
+def _path_contours_mm(el, uu_per_mm: float, step_mm: float = 0.2) -> list[list[tuple[float, float]]]:
+    """A filled path's subpaths as polygons in mm, y up (the planner's frame), with the
+    transforms of the path and its ancestors applied. Curves are sampled every ~step_mm."""
+    import svgelements as se
+
+    m = se.Matrix()
+    chain, e = [], el
+    while e is not None and isinstance(e.tag, str):
+        if e.get("transform"):
+            chain.append(e.get("transform"))
+        e = e.getparent()
+    for t in chain:                      # the path's own first, then each ancestor's (svgelements:
+        m = m * se.Matrix(t)             # a * b applies a, then b)
+    path = se.Path(el.get("d") or "", transform=m)
+    path = path.reified() if hasattr(path, "reified") else path
+    out = []
+    for sp in path.as_subpaths():
+        sp = se.Path(sp)
+        if not len(sp):
+            continue
+        n = max(16, int(sp.length() / (step_mm * uu_per_mm)))
+        pts = []
+        for i in range(n):
+            q = sp.point(i / n)
+            pts.append((q.x / uu_per_mm, -q.y / uu_per_mm))
+        if len(pts) >= 3:
+            out.append(pts)
+    out.sort(key=lambda c: -abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(c, c[1:] + c[:1]))))
+    return out
+
+
+@tools.command("shapes-to-satin")
+@click.option("--project", "project_path", type=click.Path())
+@click.option("--ids", default=None,
+              help="Comma-separated ids of filled paths to convert (default: every filled path "
+                   "that isn't already a satin).")
+@click.option("--fallback", type=click.Choice(["fill", "satin"]), default="fill", show_default=True,
+              help="A shape whose plan fails its check: keep it as its fill, or use the failing "
+                   "satin plan anyway.")
+@click.option("--pull-comp-mm", type=float, default=0.2, show_default=True)
+@click.option("--route/--no-route", default=True, show_default=True,
+              help="Route shapes whose planned order would leave travel on bare fabric through "
+                   "the engine's auto_satin, as text-to-satin does for letters.")
+@click.pass_context
+def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route):
+    """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
+
+    The planner that text-to-satin uses for letters, applied to any filled
+    outline (stitchpilot art_columns.plan_shape): each shape is cut into
+    strokes at its junctions, each stroke becomes a satin column with its
+    rails paired by construction, and the shape is checked against its
+    outline (bare area, overhang, overlap, crossed pairs). A shape that
+    fails stays a fill (--fallback fill). Each shape's columns replace the
+    path in place, keeping its colour and its place in the sewing order,
+    with a trim after each shape. Underlay, pull compensation and split
+    satin are chosen per column as for lettering.
+    """
+    from cli_anything_inkstitch.binary import installed_version
+    from cli_anything_inkstitch.commands.params import _apply_params_to_element
+    from cli_anything_inkstitch.schema.cache import load_schema
+    from cli_anything_inkstitch.svg.attrs import INKSCAPE_NS, qname
+    from cli_anything_inkstitch.svg.units import document_scale
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+    import re as _re
+
+    schema = load_schema(prefer_version=installed_version(
+        ctx.obj.get("binary_override") if ctx.obj else None))
+    want = {i.strip() for i in ids.split(",")} if ids else None
+    report, param_errors, to_route, groups = [], [], [], []
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
+        if tree is None:
+            raise UserError("the project has no SVG: document open --svg first")
+        root = tree.getroot()
+        scale = document_scale(root) or (1.0, 1.0)
+        uu_per_mm = gc.PX_PER_MM / scale[0]
+        tx = gc.make_transform(uu_per_mm, 0.0, 0.0)
+        before_xml = etree.tostring(root).decode("utf-8")
+        sat = qname("satin_column")
+        targets = []
+        for el in root.iter(f"{{{SVG_NS}}}path"):
+            style = el.get("style") or ""
+            fill = _re.search(r"fill:\s*(#[0-9a-fA-F]{3,6})", style) or (
+                _re.match(r"#[0-9a-fA-F]{3,6}", el.get("fill") or "") and
+                _re.match(r"(#[0-9a-fA-F]{3,6})", el.get("fill")))
+            if want is not None and el.get("id") not in want:
+                continue
+            if (el.get(sat) or "").lower() == "true" or not fill:
+                if want is not None:
+                    raise UserError(f"{el.get('id')}: not a filled path")
+                continue
+            targets.append((el, fill.group(1)))
+        if want is not None and len(targets) != len(want):
+            missing = want - {el.get("id") for el, _ in targets}
+            raise UserError(f"no such filled path(s): {', '.join(sorted(missing))}")
+        planned = gc.plan_shapes([(el.get("id"), _path_contours_mm(el, uu_per_mm)) for el, _ in targets])
+        stroke_w = f"{0.1 * uu_per_mm:.3f}"
+        for (el, color), lt in zip(targets, planned):
+            parent = el.getparent()
+            g = etree.Element(f"{{{SVG_NS}}}g")
+            g.set("id", f"{el.get('id')}_sat")
+            g.set(f"{{{INKSCAPE_NS}}}label", el.get(f"{{{INKSCAPE_NS}}}label") or el.get("id"))
+            as_fill = (not lt.ok and fallback == "fill") or not lt.columns
+            made = []
+            if as_fill:
+                g.append(el.__copy__())
+                made.append((g[-1], None, {}))
+            else:
+                for k, c in enumerate(lt.columns):
+                    p = etree.SubElement(g, f"{{{SVG_NS}}}path")
+                    p.set("id", f"{el.get('id')}_c{k}")
+                    p.set("d", gc.satin_d(c, tx))
+                    p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
+                    made.append((p, "satin_column", _lettering_satin_params(c.widths(), pull_comp_mm)))
+            parent.replace(el, g)
+            for p, st, extra in made:
+                if st is None:
+                    continue
+                try:
+                    _apply_params_to_element(p, st, extra, schema, force=True)
+                except UserError as exc:
+                    param_errors.append({"id": p.get("id"), "error": str(exc)})
+            ids_here = [p.get("id") for p, st, _ in made if st == "satin_column"]
+            if route and len(ids_here) >= 2 and gc.exposed_travel_mm(lt) > gc.EXPOSED_TRAVEL_MM:
+                to_route.append(ids_here)
+            groups.append(g.get("id"))
+            chk = lt.check or {}
+            report.append({"shape": lt.char, "group": g.get("id"),
+                           "stitch": "fill" if as_fill else "satin",
+                           "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
+                           **({"error": lt.error} if lt.error else {}),
+                           **{k: chk[k] for k in ("sewable_bare_pct", "outside_pct", "overlap_mm2",
+                                                  "crossed_pairs") if k in chk}})
+        push(proj.history, make_entry(command="tools shapes-to-satin",
+                                      patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
+    for ids_here in to_route:
+        run_tool_core(ctx, project_path, "auto_satin", ids_here,
+                      {"trim": "false", "preserve_order": "false", "keep_originals": "false"})
+    with open_project(ctx, project_path, mutate=True) as (proj, tree):
+        root = tree.getroot()
+        before_xml = etree.tostring(root).decode("utf-8")
+        sat, ptype = qname("satin_column"), qname("path_type")
+        for gid in groups:
+            g = next((e for e in root.iter() if e.get("id") == gid), None)
+            if g is None:
+                continue
+            sewn = [e for e in g.iter(f"{{{SVG_NS}}}path")
+                    if not e.get(ptype) and ((e.get(sat) or "").lower() == "true"
+                                             or "fill:none" not in (e.get("style") or ""))]
+            if sewn:
+                try:
+                    _apply_params_to_element(sewn[-1], None, {"trim_after": "true"}, schema, force=True)
+                except UserError as exc:
+                    param_errors.append({"id": sewn[-1].get("id"), "error": str(exc)})
+        push(proj.history, make_entry(command="tools shapes-to-satin (trims between shapes)",
+                                      patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
+    payload = {"shapes": report, "failed_plans": [r["shape"] for r in report if not r["plan_ok"]],
+               "routed_shapes": len(to_route)}
+    if param_errors:
+        payload["param_errors"] = param_errors
+    emit(ctx, payload)
+
+
 @tools.command("text-to-satin")
 @click.option("--project", "project_path", type=click.Path(), default=None)
 @click.option("--font", "font_path", type=click.Path(exists=True, dir_okay=False),

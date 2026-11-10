@@ -272,6 +272,34 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
     return out
 
 
+def plan_shapes(shapes: list[tuple[str, list]]) -> list[PlannedLetter]:
+    """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
+    outlines) as satin columns, one shape at a time: stitchpilot's
+    `art_columns.plan_shape`, the same planner the rig used for the HIDA chest
+    logo's all-satin v5-v9 in EmbroideryStudio. Each item is (label, contours),
+    contours in mm, y up, outer ring first then holes. A shape the planner
+    can't do, or whose check fails, comes back ok=False for the caller's
+    fallback."""
+    import numpy as np
+
+    ac, _ = require_planner()
+    out = []
+    for i, (label, contours) in enumerate(shapes):
+        arrs = [np.asarray(c, float) for c in contours if len(c) >= 3]
+        try:
+            sc = ac.plan_shape(i, arrs)
+        except Exception as exc:  # noqa: BLE001 - one unplannable shape falls back alone
+            out.append(PlannedLetter(label, [], [[tuple(map(float, q)) for q in c] for c in arrs],
+                                     False, {}, f"no column plan ({type(exc).__name__}: {str(exc)[:80]})"))
+            continue
+        if sc.letter is None:
+            out.append(PlannedLetter(label, [], [[tuple(map(float, q)) for q in c] for c in arrs],
+                                     False, {}, sc.error or "no column plan"))
+            continue
+        out.append(_from_letter(sc.letter, bool(sc.ok), sc.check or {}, label))
+    return out
+
+
 # ---------------------------------------------------------------- SVG output
 
 def make_transform(uu_per_mm: float, cx: float, cy: float, rotate_deg: float = 0.0):

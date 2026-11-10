@@ -202,3 +202,57 @@ class TestEngineSewsThePlan:
         # DST is centred on the design, like the plan (0, 0)
         pts = _stitches(_export(proj, tmp_path, "e"), with_jumps=True)
         assert off_letter(pts) == 0
+
+
+# ---------------------------------------------------------------- artwork shapes (tools shapes-to-satin)
+# Why: a logo's knots, crown, heart and outlined letters are filled shapes, not font text. The same
+# planner (stitchpilot art_columns.plan_shape) digitizes them stroke by stroke; the HIDA chest logo
+# head-to-head (2026-11-10) planned all 17 of its shapes as satin this way.
+
+def _ring_d(cx, cy, r_out, r_in, n=48):
+    out = [(cx + r_out * math.cos(2 * math.pi * i / n), cy + r_out * math.sin(2 * math.pi * i / n)) for i in range(n)]
+    inn = [(cx + r_in * math.cos(-2 * math.pi * i / n), cy + r_in * math.sin(-2 * math.pi * i / n)) for i in range(n)]
+    f = lambda pts: "M " + " L ".join(f"{x:.3f},{y:.3f}" for x, y in pts) + " Z"
+    return f(out) + " " + f(inn)
+
+
+@needs_planner
+class TestPlanShapes:
+    def test_ring_is_satin_and_a_bar_too(self):
+        from cli_anything_inkstitch.trace.glyph_columns import plan_shapes
+        n = 48
+        ring = [[(10 * math.cos(2 * math.pi * i / n), 10 * math.sin(2 * math.pi * i / n)) for i in range(n)],
+                [(7 * math.cos(-2 * math.pi * i / n), 7 * math.sin(-2 * math.pi * i / n)) for i in range(n)]]
+        bar = [[(0, 0), (30, 0), (30, 3), (0, 3)]]
+        r, b = plan_shapes([("ring", ring), ("bar", bar)])
+        assert r.ok and r.columns and b.ok and len(b.columns) == 1
+        w = sorted(b.columns[0].widths())
+        assert abs(w[len(w) // 2] - 3.0) < 0.3
+
+
+@needs_planner
+@needs_binary
+class TestShapesToSatinEngine:
+    def test_transformed_ring_keeps_size_place_and_colour(self, tmp_path):
+        """A filled ring inside a translated, scaled group: the satins replace it at its
+        drawn size (transforms applied), in its colour, with nothing left as fill."""
+        k = 96 / 25.4
+        svg = tmp_path / "t.svg"
+        d = _ring_d(0, 0, 10 * k, 7 * k)
+        svg.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkstitch="http://inkstitch.org/namespace" '
+                       f'width="80mm" height="40mm" viewBox="0 0 {80 * k:.4f} {40 * k:.4f}">'
+                       f'<g transform="translate({40 * k:.4f},{20 * k:.4f}) scale(1.5)">'
+                       f'<path id="ring" d="{d}" style="fill:#ffdd00;fill-rule:evenodd;stroke:none"/></g></svg>')
+        proj = tmp_path / "t.json"
+        r = CliRunner().invoke(root, ["document", "open", "--project", str(proj), "--svg", str(svg)])
+        assert r.exit_code == 0, r.output
+        r = CliRunner().invoke(root, ["--json", "tools", "shapes-to-satin", "--project", str(proj)])
+        assert r.exit_code == 0, r.output
+        out = json.loads(r.output)
+        assert out["failed_plans"] == [] and out["shapes"][0]["stitch"] == "satin"
+        tree = etree.parse(str(svg))
+        paths = tree.getroot().findall(".//{http://www.w3.org/2000/svg}path")
+        assert paths and all("fill:none" in (p.get("style") or "") and "#ffdd00" in p.get("style") for p in paths)
+        pts = _stitches(_export(proj, tmp_path, "ring"))
+        w = max(x for x, _ in pts) - min(x for x, _ in pts)
+        assert abs(w - 30.0) < 1.2          # 20 mm ring x scale(1.5), within pull compensation
