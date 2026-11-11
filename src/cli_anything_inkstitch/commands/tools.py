@@ -787,13 +787,41 @@ def _style_autorun_tops(ctx, project_path, stitch_length_mm, bean_repeats):
 # columns, an edge walk (contour) above that, edge walk plus zigzag on wide ones). "standard" is the
 # ladder text-to-satin has always used (the engine's default spacing). Stable woven fabric (twill,
 # canvas) needs less underlay and pull compensation than fleece or knit, which stretch and sink.
+#
+# Short stitches (short_inset, short_dist_mm; reader lib/elements/satin_column.py _get_offset_px): where
+# a rail's consecutive stitch ends land closer than short_dist_mm (the inside of a tight turn), every
+# other one stops short by short_inset of the column's width ("30 50": 30 %, then 50 % for the next
+# in a run), so thread doesn't pile up there. short_dist_mm must stay below the rail's normal spacing
+# (about the satin spacing): above it every stitch is shortened and the whole column thins. None keeps
+# the engine's default (15 %, 0.25 mm).
 FABRICS = {
     #            spacing  pull  centre walk below  zigzag from (mm)
-    "standard": dict(spacing_mm=None, pull_comp_mm=0.2, center_below_mm=1.5, zigzag_from_mm=4.0),
-    "twill":    dict(spacing_mm=0.4, pull_comp_mm=0.2, center_below_mm=2.0, zigzag_from_mm=5.0),
-    "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=4.0),
-    "fleece":   dict(spacing_mm=0.38, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=3.0),
+    "standard": dict(spacing_mm=None, pull_comp_mm=0.2, center_below_mm=1.5, zigzag_from_mm=4.0,
+                     short_inset=None, short_dist_mm=None),
+    "twill":    dict(spacing_mm=0.4, pull_comp_mm=0.2, center_below_mm=2.0, zigzag_from_mm=5.0,
+                     short_inset="30 50", short_dist_mm=0.25),
+    "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=4.0,
+                     short_inset="30 50", short_dist_mm=0.25),
+    "fleece":   dict(spacing_mm=0.38, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=3.0,
+                     short_inset="30 50", short_dist_mm=0.25),
 }
+
+
+def _schema_known(schema, stitch_type: str, params: dict, skipped: set) -> dict:
+    """A preset's params less any the loaded schema doesn't know (an older engine, or the built-in
+    bootstrap schema when the engine source hasn't been mined): one unknown name would make the
+    whole element's params fail, and it would sew as a plain stroke. Skipped names are collected
+    in `skipped` for the report. Explicit overrides aren't filtered: an unknown one should fail."""
+    known = set(((schema.get("stitch_types") or {}).get(stitch_type) or {}).get("params") or {})
+    if not known:
+        return params
+    out = {}
+    for k, v in params.items():
+        if k in known:
+            out[k] = v
+        else:
+            skipped.add(k)
+    return out
 
 
 def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None = None,
@@ -817,6 +845,9 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
     p = {"pull_compensation_mm": f"{pc:g}"}
     if f["spacing_mm"] is not None:
         p["zigzag_spacing_mm"] = f"{f['spacing_mm']:g}"
+    if f.get("short_inset") is not None:
+        p["short_stitch_inset"] = f["short_inset"]
+        p["short_stitch_distance_mm"] = f"{f['short_dist_mm']:g}"
     if w < f["center_below_mm"]:
         p["center_walk_underlay"] = "true"
     else:
@@ -933,7 +964,9 @@ _UNDERLAY_KEYS = {"center": "center_walk_underlay", "contour": "contour_underlay
 def _override_params(spec: dict, satin: bool) -> dict:
     """Stitch params a per-shape override sets (readers: lib/elements/satin_column.py and
     fill_stitch.py). underlay: "center", "contour" (or "edge"), "zigzag", joined with "+", or
-    "none"; density_mm: satin spacing; pull_comp_mm; angle: a fill's stitch angle (degrees)."""
+    "none"; density_mm: satin spacing; pull_comp_mm; short_stitch_inset ("30 50", percent of the
+    width, one value per level) and short_stitch_distance_mm (keep it below the satin spacing, or
+    every stitch is shortened); angle: a fill's stitch angle (degrees)."""
     p = {}
     if satin:
         if "underlay" in spec:
@@ -945,12 +978,18 @@ def _override_params(spec: dict, satin: bool) -> dict:
             p["zigzag_spacing_mm"] = f"{float(spec['density_mm']):g}"
         if "pull_comp_mm" in spec:
             p["pull_compensation_mm"] = f"{float(spec['pull_comp_mm']):g}"
+        if "short_stitch_inset" in spec:
+            v = spec["short_stitch_inset"]
+            p["short_stitch_inset"] = " ".join(f"{float(x):g}" for x in (v if isinstance(v, list) else str(v).split()))
+        if "short_stitch_distance_mm" in spec:
+            p["short_stitch_distance_mm"] = f"{float(spec['short_stitch_distance_mm']):g}"
     elif "angle" in spec:
         p["angle"] = f"{float(spec['angle']):g}"
     return p
 
 
-OVERRIDE_KEYS = {"split", "seam", "underlay", "density_mm", "pull_comp_mm", "angle", "stitch", "reason"}
+OVERRIDE_KEYS = {"split", "seam", "rungs", "underlay", "density_mm", "pull_comp_mm", "short_stitch_inset",
+                 "short_stitch_distance_mm", "angle", "stitch", "reason"}
 
 
 def _load_overrides(path) -> dict:
@@ -973,6 +1012,12 @@ def _load_overrides(path) -> dict:
                     raise UserError(f"--overrides {key}: underlay {u!r} (use center, contour, zigzag, none)")
         if spec.get("stitch") not in (None, "fill", "satin"):
             raise UserError(f"--overrides {key}: stitch is fill or satin")
+        if spec.get("rungs") is not None:
+            r = spec["rungs"]
+            ok = isinstance(r, list) and all(
+                isinstance(s, list) and len(s) == 2 and all(isinstance(q, list) and len(q) == 2 for q in s) for s in r)
+            if not ok:
+                raise UserError(f"--overrides {key}: rungs is a list of [[x1, y1], [x2, y2]] segments")
     return data
 
 
@@ -1032,6 +1077,9 @@ def _doc_mm_frame(root, uu_per_mm):
 @click.option("--one-column/--no-one-column", default=True, show_default=True,
               help="Join columns that meet end to end with no drawn corner (one stroke the planner "
                    "cut in two, as an S at its bowls) into one column whose rails follow the outline.")
+@click.option("--spread-turns/--no-spread-turns", default=True, show_default=True,
+              help="Tilt the rungs into tight turns so the inner ends spread along the inner curve "
+                   "instead of pinching at one point (the inside of an S's bowl).")
 @click.option("--merge-colors-de", type=float, default=None,
               help="Fills closer than this CIEDE2000 distance sew as one thread (default "
                    f"{8.0:g}; 0 keeps every fill its own thread).")
@@ -1043,7 +1091,8 @@ def _doc_mm_frame(root, uu_per_mm):
               help="Digitize shapes hidden under an identical later shape too.")
 @click.option("--overrides", "overrides_path", type=click.Path(exists=True, dir_okay=False), default=None,
               help="JSON: shape id (or sha:<hash> from the report) → {split: \"none\" | [[x, y], ...], "
-                   "seam: [x, y], underlay, density_mm, pull_comp_mm, angle, stitch: fill|satin, reason}. "
+                   "seam: [x, y], rungs: [[[x1, y1], [x2, y2]], ...], underlay, density_mm, pull_comp_mm, "
+                   "short_stitch_inset, short_stitch_distance_mm, angle, stitch: fill|satin, reason}. "
                    "Points are document mm, x right, y down from the page's top-left (as tools review "
                    "reports them).")
 @click.option("--cases", "cases_path", type=click.Path(dir_okay=False), default=None,
@@ -1051,7 +1100,7 @@ def _doc_mm_frame(root, uu_per_mm):
                    "this JSON-lines file, a fixture for planner tests (default: next to the project).")
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
-                    merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path, cases_path):
+                    spread_turns, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path, cases_path):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
     The planner that text-to-satin uses for letters, applied to any filled
@@ -1084,6 +1133,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
     if route is not None:
         travel = "route" if route else "leave"
     report, param_errors, to_route, groups = [], [], [], []
+    skipped: set = set()
     trims_added = 0
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
         if tree is None:
@@ -1133,10 +1183,12 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 ov["split"] = [from_doc(tuple(map(float, q))) for q in spec["split"]]
             if spec.get("seam") is not None:
                 ov["seam"] = from_doc(tuple(map(float, spec["seam"])))
+            if spec.get("rungs"):
+                ov["rungs"] = [tuple(from_doc(tuple(map(float, q))) for q in seg) for seg in spec["rungs"]]
             if ov:
                 plan_ov[el.get("id")] = ov
         planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)],
-                                 one_column=one_column, overrides=plan_ov)
+                                 one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         made_groups, cases = [], []
         for (el, _fill), color, lt, spec, gh in zip(targets, thread_of, planned, spec_of, hashes):
@@ -1168,7 +1220,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                     p.set("id", f"{el.get('id')}_c{k}")
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
-                    extra = _lettering_satin_params(c.widths(), pull_comp_mm, fabric)
+                    extra = _schema_known(schema, "satin_column",
+                                          _lettering_satin_params(c.widths(), pull_comp_mm, fabric), skipped)
                     extra.update(_override_params(spec, True))
                     if k in hops:            # reader: lib/elements/element.py trim_after
                         extra["trim_after"] = "true"
@@ -1198,6 +1251,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                            **({"override": sorted(k for k in spec if k != "reason")} if spec else {}),
                            "hard_seams": sr["hard_seams"], "fans": sr["fans"],
                            **({"joined_strokes": chk["joined_strokes"]} if chk.get("joined_strokes") else {}),
+                           **({"spread_turns": chk["spread_turns"]} if chk.get("spread_turns") else {}),
+                           **({"rungs_placed": chk["rungs_placed"]} if "rungs_placed" in chk else {}),
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
@@ -1269,6 +1324,9 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                "color_changes": max(0, len(blocks) - 1),
                **({"overrides_applied": len(cases)} if overrides_path else {}),
                **({"thread_order_splits": order_splits} if order_splits else {})}
+    if skipped:
+        payload["params_skipped"] = {"names": sorted(skipped),
+                                     "why": "the loaded schema doesn't know them (run with the engine source mined)"}
     if param_errors:
         payload["param_errors"] = param_errors
     emit(ctx, payload)
@@ -1348,7 +1406,7 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
     plan_mm = lambda p: to_mm(((p[0] + vx) / scale[0], (p[1] + vy) / scale[1]))
     sflags, totals = rv.stitch_flags(blocks, plan_mm, nearest, warn=warn)
     flags += sflags
-    order = {"hard_seam": 0, "fan": 1, "density": 2, "long_stitch": 3, "ring_seam": 4}
+    order = {"hard_seam": 0, "fan": 1, "density": 2, "long_stitch": 3, "ring_seam": 4, "turn": 5}
     flags.sort(key=lambda f: (order.get(f["kind"], 9), f["shape"]))
     for n, f in enumerate(flags, 1):
         f["n"] = n

@@ -8,7 +8,8 @@ consecutive pairs in proportion along each rail, so the column's look follows fr
   side and gaps open on the long one. A smooth curve is not a fan (an O's inner rail is shorter
   than its outer, ~1:2 to 1:4); a pivot is (the short rail stands still while the long one sweeps).
   Measured over a window: the short rail's run reaching FAN_SHORT_MM while the long one's passes
-  FAN_RATIO times that.
+  FAN_RATIO times that. A tight turn whose rungs lean into it (trace.glyph_columns.spread_turns) runs
+  about 1:3 to 1:4 and is listed by turns() instead: short stitches thin its inside.
 * **Hard seam.** Two columns of one shape meeting end to end where the outline has no drawn
   corner: one stroke sewn as two columns, as an S cut at its bowls. The stitch angle jumps and a
   line shows across what should read as one stroke. Columns meeting end to end at a drawn corner
@@ -27,6 +28,7 @@ FAN_SHORT_MM = 0.5      # the window: the short rail runs this far...
 FAN_RATIO = 8.0         # ...while the long rail runs this many times as far (a pivot; a tight
                         # bowl's inner curve runs ~1:3 to 1:6 and is not one)
 FAN_MIN_LONG_MM = 2.0   # and at least this far: tiny tips can't show a fan
+TURN_FLAG_RATIO = 3.5   # a tight turn (listed, not a defect): the long rail runs this many times as far
 JOIN_GAP_WIDTHS = 1.0   # two column ends this close (in the columns' width) meet end to end
 CORNER_SPAN_MM = 0.6    # a drawn corner: the outline turns CORNER_TURN_DEG within this either side
 CORNER_TURN_DEG = 45.0
@@ -42,10 +44,8 @@ def _mid(pair):
     return ((lx + rx) / 2, (ly + ry) / 2)
 
 
-def fans(pairs) -> list[dict]:
-    """Stretches of one column where its stitches radiate from a point. Each:
-    {"at": (x, y) mm of the short rail's pivot, "short_mm", "long_mm"}. Overlapping windows are
-    reported once."""
+def _radiating(pairs, ratio: float) -> list[dict]:
+    """Windows where the short rail runs FAN_SHORT_MM while the long one runs `ratio` times as far."""
     if len(pairs) < 2:
         return []
     L = [p[0] for p in pairs]
@@ -61,7 +61,7 @@ def fans(pairs) -> list[dict]:
             b += sr[j]
             j += 1
             short, long_ = min(a, b), max(a, b)
-            if long_ >= FAN_MIN_LONG_MM and long_ >= FAN_RATIO * max(short, 1e-6):
+            if long_ >= FAN_MIN_LONG_MM and long_ >= ratio * max(short, 1e-6):
                 hit = (L if a < b else R, short, long_)
         if hit is not None:
             rail, short, long_ = hit
@@ -70,12 +70,35 @@ def fans(pairs) -> list[dict]:
                                long_mm=round(out[-1]["long_mm"] + long_, 2))
             else:
                 out.append({"at": tuple(round(v, 2) for v in rail[i]), "short_mm": round(short, 2),
-                            "long_mm": round(long_, 2), "_end": j})
+                            "long_mm": round(long_, 2), "_start": i, "_end": j})
             i = j
         else:
             i += 1
+    return out
+
+
+def fans(pairs) -> list[dict]:
+    """Stretches of one column where its stitches radiate from a point. Each:
+    {"at": (x, y) mm of the short rail's pivot, "short_mm", "long_mm"}. Overlapping windows are
+    reported once."""
+    out = _radiating(pairs, FAN_RATIO)
     for f in out:
-        del f["_end"]
+        del f["_start"], f["_end"]
+    return out
+
+
+def turns(pairs) -> list[dict]:
+    """Tight turns that are not fans: the inner rail runs 1/TURN_FLAG_RATIO to 1/FAN_RATIO of the
+    outer. Sewn as is, with short stitches thinning the inside (the fabric presets turn them on),
+    which is how a digitizer sews the inside of a tight bowl. Listed so a reviewer can look; not a
+    defect. Same shape of report as fans()."""
+    fan_spans = [(f["_start"], f["_end"]) for f in _radiating(pairs, FAN_RATIO)]
+    out = []
+    for t in _radiating(pairs, TURN_FLAG_RATIO):
+        if any(a < t["_end"] and t["_start"] < b for a, b in fan_spans):
+            continue
+        del t["_start"], t["_end"]
+        out.append(t)
     return out
 
 
