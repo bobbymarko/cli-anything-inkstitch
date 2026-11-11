@@ -825,6 +825,10 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
             p["zigzag_underlay"] = "true"
     if max(widths_mm or [0.0]) > SPLIT_SATIN_MM:
         p["max_stitch_length_mm"] = f"{SPLIT_SATIN_MM:g}"
+        if p.get("zigzag_underlay") == "true" and fabric != "standard":
+            # the zigzag underlay crosses the column too and has its own limit (empty by default:
+            # a 10 mm column's underlay sewed 10 mm stitches). "standard" keeps its old output.
+            p["zigzag_underlay_max_stitch_length_mm"] = f"{SPLIT_SATIN_MM:g}"
     return p
 
 
@@ -922,6 +926,91 @@ def _filled_shapes(root, want):
     return out
 
 
+_UNDERLAY_KEYS = {"center": "center_walk_underlay", "contour": "contour_underlay",
+                  "edge": "contour_underlay", "zigzag": "zigzag_underlay"}
+
+
+def _override_params(spec: dict, satin: bool) -> dict:
+    """Stitch params a per-shape override sets (readers: lib/elements/satin_column.py and
+    fill_stitch.py). underlay: "center", "contour" (or "edge"), "zigzag", joined with "+", or
+    "none"; density_mm: satin spacing; pull_comp_mm; angle: a fill's stitch angle (degrees)."""
+    p = {}
+    if satin:
+        if "underlay" in spec:
+            want = {_UNDERLAY_KEYS[u.strip()] for u in str(spec["underlay"]).split("+")
+                    if u.strip() and u.strip() != "none"}
+            for k in set(_UNDERLAY_KEYS.values()):
+                p[k] = "true" if k in want else "false"
+        if "density_mm" in spec:
+            p["zigzag_spacing_mm"] = f"{float(spec['density_mm']):g}"
+        if "pull_comp_mm" in spec:
+            p["pull_compensation_mm"] = f"{float(spec['pull_comp_mm']):g}"
+    elif "angle" in spec:
+        p["angle"] = f"{float(spec['angle']):g}"
+    return p
+
+
+OVERRIDE_KEYS = {"split", "seam", "underlay", "density_mm", "pull_comp_mm", "angle", "stitch", "reason"}
+
+
+def _load_overrides(path) -> dict:
+    import json as _json
+
+    try:
+        data = _json.loads(open(path, encoding="utf-8").read())
+    except (OSError, ValueError) as exc:
+        raise UserError(f"--overrides {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise UserError("--overrides: a JSON object of shape id (or sha:<hash>) → override")
+    for key, spec in data.items():
+        bad = set(spec) - OVERRIDE_KEYS if isinstance(spec, dict) else {"(not an object)"}
+        if bad:
+            raise UserError(f"--overrides {key}: unknown key(s) {', '.join(sorted(bad))}; "
+                            f"known: {', '.join(sorted(OVERRIDE_KEYS))}")
+        if spec.get("underlay") is not None:
+            for u in str(spec["underlay"]).split("+"):
+                if u.strip() not in set(_UNDERLAY_KEYS) | {"none"}:
+                    raise UserError(f"--overrides {key}: underlay {u!r} (use center, contour, zigzag, none)")
+        if spec.get("stitch") not in (None, "fill", "satin"):
+            raise UserError(f"--overrides {key}: stitch is fill or satin")
+    return data
+
+
+def geometry_hash(contours) -> str:
+    """A shape's identity that survives renamed ids: its outline rounded to 0.1 mm, hashed."""
+    import hashlib
+
+    h = hashlib.sha1()
+    for c in contours:
+        for x, y in c:
+            h.update(f"{round(x, 1):.1f},{round(y, 1):.1f};".encode())
+        h.update(b"|")
+    return h.hexdigest()[:12]
+
+
+def _outline_attr(contours, to_doc, tol_mm: float = 0.05) -> str:
+    """Contours as 'x,y x,y ...;x,y ...' in document mm, simplified to tol_mm."""
+    from shapely.geometry import LinearRing
+
+    rings = []
+    for c in contours:
+        if len(c) < 3:
+            continue
+        r = LinearRing([to_doc(p) for p in c]).simplify(tol_mm)
+        rings.append(" ".join(f"{x:.2f},{y:.2f}" for x, y in list(r.coords)[:-1]))
+    return ";".join(rings)
+
+
+def _doc_mm_frame(root, uu_per_mm):
+    """(to_doc_mm, from_doc_mm) between the planner's frame (root user units / uu_per_mm, y up)
+    and document mm (x right, y down from the viewBox's top-left), the frame review and
+    --overrides use."""
+    vb = (root.get("viewBox") or "0 0 0 0").replace(",", " ").split()
+    vx, vy = (float(vb[0]), float(vb[1])) if len(vb) == 4 else (0.0, 0.0)
+    ox, oy = vx / uu_per_mm, vy / uu_per_mm
+    return (lambda p: (p[0] - ox, -p[1] - oy)), (lambda p: (p[0] + ox, -(p[1] + oy)))
+
+
 @tools.command("shapes-to-satin")
 @click.option("--project", "project_path", type=click.Path())
 @click.option("--ids", default=None,
@@ -952,9 +1041,17 @@ def _filled_shapes(root, want):
               help="Sew shapes in drawing order instead of one block per thread.")
 @click.option("--keep-duplicates", is_flag=True,
               help="Digitize shapes hidden under an identical later shape too.")
+@click.option("--overrides", "overrides_path", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="JSON: shape id (or sha:<hash> from the report) → {split: \"none\" | [[x, y], ...], "
+                   "seam: [x, y], underlay, density_mm, pull_comp_mm, angle, stitch: fill|satin, reason}. "
+                   "Points are document mm, x right, y down from the page's top-left (as tools review "
+                   "reports them).")
+@click.option("--cases", "cases_path", type=click.Path(dir_okay=False), default=None,
+              help="Append each applied override (shape hash, override, reason, outline, result) to "
+                   "this JSON-lines file, a fixture for planner tests (default: next to the project).")
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
-                    merge_colors_de, max_colors, keep_order, keep_duplicates):
+                    merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path, cases_path):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
     The planner that text-to-satin uses for letters, applied to any filled
@@ -1022,23 +1119,47 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
         else:
             order, order_splits = sp.thread_order(thread_of, polys)
 
+        to_doc, from_doc = _doc_mm_frame(root, uu_per_mm)
+        hashes = [geometry_hash([[to_doc(p) for p in c] for c in cs]) for cs in contours]
+        overrides = _load_overrides(overrides_path) if overrides_path else {}
+        spec_of = [overrides.get(el.get("id")) or overrides.get(f"sha:{h}") or {}
+                   for (el, _), h in zip(targets, hashes)]
+        plan_ov = {}
+        for (el, _), spec in zip(targets, spec_of):
+            ov = {}
+            if spec.get("split") == "none":
+                ov["split"] = "none"
+            elif isinstance(spec.get("split"), list):
+                ov["split"] = [from_doc(tuple(map(float, q))) for q in spec["split"]]
+            if spec.get("seam") is not None:
+                ov["seam"] = from_doc(tuple(map(float, spec["seam"])))
+            if ov:
+                plan_ov[el.get("id")] = ov
         planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)],
-                                 one_column=one_column)
+                                 one_column=one_column, overrides=plan_ov)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
-        made_groups = []
-        for (el, _fill), color, lt in zip(targets, thread_of, planned):
+        made_groups, cases = [], []
+        for (el, _fill), color, lt, spec, gh in zip(targets, thread_of, planned, spec_of, hashes):
             parent = el.getparent()
             g = etree.Element(f"{{{SVG_NS}}}g")
             g.set("id", f"{el.get('id')}_sat")
             g.set(f"{{{INKSCAPE_NS}}}label", el.get(f"{{{INKSCAPE_NS}}}label") or el.get("id"))
+            # the shape's outline (document mm), for tools review's seam check: the shape itself is
+            # replaced by its columns. A plain data- attribute: the engine reads only inkstitch:*.
+            g.set("data-outline-mm", _outline_attr(lt.contours, to_doc))
             as_fill = (not lt.ok and fallback == "fill") or not lt.columns
+            if spec.get("stitch") == "fill":
+                as_fill = True
+            elif spec.get("stitch") == "satin" and lt.columns:
+                as_fill = False
             made = []
             if as_fill:
                 cp = el.__copy__()
                 style = (cp.get("style") or "").rstrip(";")
                 cp.set("style", (style + ";" if style else "") + f"fill:{color}")
                 g.append(cp)
-                made.append((g[-1], None, {}))
+                made.append((g[-1], "auto_fill" if _override_params(spec, False) else None,
+                             _override_params(spec, False)))
             else:
                 hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
                     if travel == "trim" else set()
@@ -1048,6 +1169,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
                     extra = _lettering_satin_params(c.widths(), pull_comp_mm, fabric)
+                    extra.update(_override_params(spec, True))
                     if k in hops:            # reader: lib/elements/element.py trim_after
                         extra["trim_after"] = "true"
                         trims_added += 1
@@ -1062,11 +1184,18 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 except UserError as exc:
                     param_errors.append({"id": p.get("id"), "error": str(exc)})
             ids_here = [p.get("id") for p, st, _ in made if st == "satin_column"]
+            if spec:
+                cases.append({"shape": el.get("id"), "hash": gh,
+                              "override": {k: v for k, v in spec.items() if k != "reason"},
+                              "reason": spec.get("reason", ""),
+                              "outline_mm": [[[round(x, 3), round(y, 3)] for x, y in (to_doc(p) for p in c)]
+                                             for c in lt.contours]})
             if travel == "route" and len(ids_here) >= 2 and gc.exposed_travel_mm(lt) > gc.EXPOSED_TRAVEL_MM:
                 to_route.append(ids_here)
             chk = lt.check or {}
             sr = gc.seam_report(lt) if lt.columns and not as_fill else {"hard_seams": 0, "fans": 0}
-            report.append({"shape": lt.char, "group": g.get("id"), "thread": color,
+            report.append({"shape": lt.char, "group": g.get("id"), "thread": color, "hash": gh,
+                           **({"override": sorted(k for k in spec if k != "reason")} if spec else {}),
                            "hard_seams": sr["hard_seams"], "fans": sr["fans"],
                            **({"joined_strokes": chk["joined_strokes"]} if chk.get("joined_strokes") else {}),
                            "stitch": "fill" if as_fill else "satin",
@@ -1094,6 +1223,10 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 box.append(g)
             report = [report[i] for i in order]
         groups = [made_groups[i][0].get("id") for i in order]
+        for case in cases:
+            r = next(x for x in report if x["shape"] == case["shape"])
+            case["result"] = {k: r.get(k) for k in ("stitch", "columns", "hard_seams", "fans",
+                                                    "sewable_bare_pct", "plan_ok")}
         push(proj.history, make_entry(command="tools shapes-to-satin",
                                       patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
     for ids_here in to_route:
@@ -1117,6 +1250,15 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                     param_errors.append({"id": sewn[-1].get("id"), "error": str(exc)})
         push(proj.history, make_entry(command="tools shapes-to-satin (trims between shapes)",
                                       patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
+    if cases:
+        import datetime
+        import json as _json
+        from pathlib import Path as _P
+        cpath = _P(cases_path) if cases_path else _P(project_path or ".").with_suffix(".override_cases.jsonl")
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        with open(cpath, "a", encoding="utf-8") as fh:
+            for case in cases:
+                fh.write(_json.dumps({"when": stamp, **case}) + "\n")
     sewn_threads = [r["thread"] for r in report]
     blocks = [t for k, t in enumerate(sewn_threads) if k == 0 or t != sewn_threads[k - 1]]
     payload = {"shapes": report, "failed_plans": [r["shape"] for r in report if not r["plan_ok"]],
@@ -1125,9 +1267,106 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                "threads": sorted(set(sewn_threads)),
                "color_merges": threads.merges,
                "color_changes": max(0, len(blocks) - 1),
+               **({"overrides_applied": len(cases)} if overrides_path else {}),
                **({"thread_order_splits": order_splits} if order_splits else {})}
     if param_errors:
         payload["param_errors"] = param_errors
+    emit(ctx, payload)
+
+
+@tools.command("review")
+@click.option("--project", "project_path", type=click.Path())
+@click.option("--out", "out_png", type=click.Path(dir_okay=False), default=None,
+              help="Draw the stitch plan with every flag circled and numbered (PNG).")
+@click.option("--zoom", "zoom_shape", default=None,
+              help="Crop the drawing to one shape's flags (its id) at a larger scale.")
+@click.option("--warn", type=float, default=20.0, show_default=True,
+              help="Density flag level, needle penetrations per mm².")
+@click.pass_context
+def review(ctx, project_path, out_png, zoom_shape, warn):
+    """List a digitized design's problem areas by shape, and draw them.
+
+    The review half of the shapes-to-satin loop: fans, hard seams and ring
+    seams in the satin columns, density hot spots and long stitches in the
+    engine's stitch plan, and the thread count and colour changes. Each flag
+    gives the shape id and where it is in document mm (x right, y down from
+    the page's top-left), which is what shapes-to-satin --overrides takes.
+    Read-only.
+    """
+    import math as _m
+
+    from cli_anything_inkstitch.artifact.design_model import extract_stitch_blocks, stitch_plan_svg
+    from cli_anything_inkstitch.svg.attrs import qname
+    from cli_anything_inkstitch.svg.units import document_scale
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+    from cli_anything_inkstitch.trace import review as rv
+
+    with open_project(ctx, project_path) as (proj, tree):
+        if tree is None:
+            raise UserError("the project has no SVG: document open --svg first")
+        root = tree.getroot()
+        scale = document_scale(root) or (1.0, 1.0)
+        uu_per_mm = gc.PX_PER_MM / scale[0]
+        vb = (root.get("viewBox") or "0 0 0 0").replace(",", " ").split()
+        vx, vy = (float(vb[0]), float(vb[1])) if len(vb) == 4 else (0.0, 0.0)
+        to_mm = lambda p: ((p[0] - vx) / uu_per_mm, (p[1] - vy) / uu_per_mm)
+        sat = qname("satin_column")
+        by_shape: dict = {}
+        for el in root.iter(f"{{{SVG_NS}}}path"):
+            if (el.get(sat) or "").lower() != "true":
+                continue
+            pairs = rv.satin_pairs(el.get("d") or "")
+            if pairs is None:
+                continue
+            closed = _m.dist(pairs[0][0], pairs[-1][0]) < 0.5 * uu_per_mm and len(pairs) > 4 and \
+                _m.dist(pairs[0][1], pairs[-1][1]) < 0.5 * uu_per_mm
+            by_shape.setdefault(rv.shape_of(el), []).append((el.get("id"), pairs, closed))
+        outlines = {}
+        for g in root.iter(f"{{{SVG_NS}}}g"):
+            if g.get("data-outline-mm") and (g.get("id") or "").endswith("_sat"):
+                outlines[g.get("id")[:-4]] = [[tuple(map(float, xy.split(","))) for xy in ring.split()]
+                                              for ring in g.get("data-outline-mm").split(";") if ring.strip()]
+    flags = rv.column_flags(by_shape, to_mm, outlines)
+    bodies = []
+    from shapely.geometry import Point, Polygon
+    for shape, cols in by_shape.items():
+        for _, pairs, _ in cols:
+            ring = [to_mm(l) for l, _ in pairs] + [to_mm(r) for _, r in reversed(pairs)]
+            poly = Polygon(ring)
+            bodies.append((shape, poly if poly.is_valid else poly.buffer(0)))
+
+    def nearest(pt):
+        if not bodies:
+            return "?"
+        return min(bodies, key=lambda b: b[1].distance(Point(pt)))[0]
+
+    from cli_anything_inkstitch.commands._helpers import get_project_path
+    blocks = extract_stitch_blocks(stitch_plan_svg(str(get_project_path(ctx, project_path)),
+                                                   binary_override=(ctx.obj or {}).get("binary_override")))["blocks"]
+    # the plan is in px with the viewBox origin taken off after scaling (measured: a 305 mm design's
+    # plan spans 305 mm x 96/25.4 px and its corner sits at origin x scale - origin); back to user units
+    plan_mm = lambda p: to_mm(((p[0] + vx) / scale[0], (p[1] + vy) / scale[1]))
+    sflags, totals = rv.stitch_flags(blocks, plan_mm, nearest, warn=warn)
+    flags += sflags
+    order = {"hard_seam": 0, "fan": 1, "density": 2, "long_stitch": 3, "ring_seam": 4}
+    flags.sort(key=lambda f: (order.get(f["kind"], 9), f["shape"]))
+    for n, f in enumerate(flags, 1):
+        f["n"] = n
+    counts: dict = {}
+    for f in flags:
+        counts[f["kind"]] = counts.get(f["kind"], 0) + 1
+    payload = {**totals, "flag_counts": counts, "flags": flags}
+    if out_png:
+        box = None
+        if zoom_shape:
+            mine = [b for s_, b in bodies if s_ == zoom_shape]
+            if not mine:
+                raise UserError(f"--zoom {zoom_shape}: no satin columns for that shape")
+            from shapely.ops import unary_union
+            x0, y0, x1, y1 = unary_union(mine).bounds
+            box = (x0 - 3, y0 - 3, x1 + 3, y1 + 3)
+        rv.render(blocks, plan_mm, flags, out_png, px_per_mm=14.0 if box else 4.0, box=box)
+        payload["image"] = out_png
     emit(ctx, payload)
 
 

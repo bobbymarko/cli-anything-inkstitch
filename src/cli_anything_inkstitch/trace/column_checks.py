@@ -107,9 +107,9 @@ def sharp_corners(contours, span_mm: float = CORNER_SPAN_MM, turn_deg: float = C
             cos = (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)
             if math.degrees(math.acos(max(-1.0, min(1.0, cos)))) >= turn_deg:
                 hits.append(k)
-        group = []                                   # consecutive hits are one corner: keep its middle
+        group = []           # neighbouring hits within span_mm are one corner: keep its middle
         for k in hits + [None]:
-            if group and (k is None or k != group[-1] + 1):
+            if group and (k is None or k != group[-1] + 1 or _d(c[k], c[group[-1]]) > span_mm):
                 out.append(tuple(c[group[len(group) // 2]]))
                 group = []
             if k is not None:
