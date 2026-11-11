@@ -61,6 +61,7 @@ SPLIT_SATIN_MM = 7.0
 class PlannedColumn:
     left: list[tuple[float, float]]          # mm, y up
     right: list[tuple[float, float]]
+    closed: bool = False                     # a ring (an O): starts and ends at its seam
 
     def widths(self) -> list[float]:
         return [math.dist(a, b) for a, b in zip(self.left, self.right)]
@@ -155,7 +156,7 @@ def with_cap_height(font_path: str | Path, cache_dir: Path | None = None) -> Pat
 
 def _from_letter(lt, ok: bool, check: dict, char: str | None = None) -> PlannedLetter:
     cols = [PlannedColumn([tuple(map(float, a)) for a, _ in c.pairs],
-                          [tuple(map(float, b)) for _, b in c.pairs])
+                          [tuple(map(float, b)) for _, b in c.pairs], bool(c.closed))
             for c in lt.columns if len(c.pairs) >= 2]
     return PlannedLetter(char if char is not None else lt.char, cols,
                          [[tuple(map(float, p)) for p in c] for c in lt.outline],
@@ -274,20 +275,32 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
     return out
 
 
-def plan_shapes(shapes: list[tuple[str, list]]) -> list[PlannedLetter]:
+def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
+                overrides: dict | None = None) -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
     outlines) as satin columns, one shape at a time: the planner's
     `art_columns.plan_shape`, the same planner that drove an all-satin client
     chest logo in EmbroideryStudio. Each item is (label, contours),
     contours in mm, y up, outer ring first then holes. A shape the planner
     can't do, or whose check fails, comes back ok=False for the caller's
-    fallback."""
+    fallback.
+
+    one_column: where the planner cut one stroke into columns that meet end to
+    end with no drawn corner there (an S split at its bowls: a hard seam, see
+    column_checks), the pieces are joined into one stroke and re-planned, with
+    rails that follow the outline. The joined plan is kept only if it passes
+    the same check, with fewer hard seams and no more fans.
+
+    overrides: label → {"split": "none" | [[x, y], ...] (cut the stroke there,
+    mm y up), "seam": [x, y] (where a ring starts)}; see apply_override.
+    """
     import numpy as np
 
     ac, _ = require_planner()
     out = []
     for i, (label, contours) in enumerate(shapes):
         arrs = [np.asarray(c, float) for c in contours if len(c) >= 3]
+        ov = (overrides or {}).get(label) or {}
         try:
             sc = ac.plan_shape(i, arrs)
         except Exception as exc:  # noqa: BLE001 - one unplannable shape falls back alone
@@ -298,8 +311,321 @@ def plan_shapes(shapes: list[tuple[str, list]]) -> list[PlannedLetter]:
             out.append(PlannedLetter(label, [], [[tuple(map(float, q)) for q in c] for c in arrs],
                                      False, {}, sc.error or "no column plan"))
             continue
-        out.append(_from_letter(sc.letter, bool(sc.ok), sc.check or {}, label))
+        planned = _from_letter(sc.letter, bool(sc.ok), sc.check or {}, label)
+        split = ov.get("split")
+        if split == "none" or (one_column and split is None):
+            joined = _join_seamed_strokes(i, arrs, sc, planned, force=split == "none")
+            if joined is not None:
+                planned = joined
+        if isinstance(split, list) and split:
+            cut = _split_at(i, arrs, sc, label, split)
+            if cut is not None:
+                planned = cut
+        if ov.get("seam") is not None:
+            planned = _move_ring_seam(planned, ov["seam"])
+        out.append(planned)
     return out
+
+
+def seam_report(planned: PlannedLetter) -> dict:
+    from cli_anything_inkstitch.trace import column_checks as cc
+
+    cols = [list(zip(c.left, c.right)) for c in planned.columns]
+    seams = cc.seams(cols, planned.contours, [c.closed for c in planned.columns])
+    return {"hard_seams": sum(1 for x in seams if x["kind"] == "hard_seam"),
+            "fans": sum(len(cc.fans(c)) for c in cols), "seams": seams}
+
+
+def _letter_from_pairs(ac, i, arrs, box, strokes, pair_lists, closed):
+    from cli_anything_inkstitch.planner import columns as col
+
+    cols = [col.Column(pairs=[(tuple(l), tuple(r)) for l, r in pl], curve=[False] * len(pl), closed=c)
+            for pl, c in zip(pair_lists, closed)]
+    return col.Letter(str(i), cols, arrs, box, strokes)
+
+
+def _chain(strokes, groups_of):
+    """Strokes joined end to end, in order, oriented to run on. groups_of: list of index lists."""
+    import numpy as np
+    from cli_anything_inkstitch.planner import columns as col
+
+    out = []
+    for grp in groups_of:
+        if len(grp) == 1:
+            out.append(strokes[grp[0]])
+            continue
+        # order: start from an index whose stroke has only one joined neighbour in the group
+        pts = {k: np.asarray(strokes[k].path, float) for k in grp}
+        rest = list(grp)
+        def ends(k):
+            return pts[k][0], pts[k][-1]
+        # the chain end: the stroke whose nearest other end is farthest away
+        def nearest(k, e):
+            return min(np.hypot(*(e - x)) for q in rest if q != k for x in ends(q))
+        first = max(rest, key=lambda k: max(nearest(k, ends(k)[0]), nearest(k, ends(k)[1])))
+        a0, a1 = ends(first)
+        path = list(pts[first]) if nearest(first, a1) <= nearest(first, a0) else list(pts[first][::-1])
+        cut0 = strokes[first].start_cut if nearest(first, a1) <= nearest(first, a0) else strokes[first].end_cut
+        rest.remove(first)
+        cut1 = strokes[first].end_cut
+        while rest:
+            tail = path[-1]
+            k = min(rest, key=lambda q: min(np.hypot(*(tail - x)) for x in ends(q)))
+            q0, q1 = ends(k)
+            fwd = np.hypot(*(tail - q0)) <= np.hypot(*(tail - q1))
+            seg = list(pts[k]) if fwd else list(pts[k][::-1])
+            cut1 = strokes[k].end_cut if fwd else strokes[k].start_cut
+            # the joint: drop the ends of both strokes that lie within the gap of where they meet,
+            # so the joined centreline turns through the joint instead of doubling back
+            gap = np.hypot(*(tail - seg[0]))
+            mid = (tail + seg[0]) / 2
+            while len(path) > 2 and np.hypot(*(path[-1] - mid)) < gap:
+                path.pop()
+            while len(seg) > 2 and np.hypot(*(seg[0] - mid)) < gap:
+                seg.pop(0)
+            path += seg
+            rest.remove(k)
+        out.append(col.Stroke(path=[tuple(map(float, p)) for p in path], smooth=True,
+                              start_cut=cut0, end_cut=cut1))
+    return out
+
+
+def _join_seamed_strokes(i, arrs, sc, planned: PlannedLetter, force: bool = False):
+    """Re-plan with the strokes behind each hard seam joined (see plan_shapes)."""
+    from cli_anything_inkstitch.trace import column_checks as cc
+
+    ac, _ = require_planner()
+    lt = sc.letter
+    if len(lt.columns) < 2 or len(lt.strokes) != len(lt.columns):
+        return None
+    cols = [[(tuple(map(float, a)), tuple(map(float, b))) for a, b in c.pairs] for c in lt.columns]
+    closed = [bool(c.closed) for c in lt.columns]
+    seams = cc.seams(cols, [c.tolist() for c in arrs], closed)
+    joins = [x["columns"] for x in seams if x["kind"] == "hard_seam" or (force and x["kind"] == "corner_join")]
+    if not joins:
+        return None
+    parent = list(range(len(cols)))
+    def find(k):
+        while parent[k] != k:
+            k = parent[k]
+        return k
+    for a, b in joins:
+        parent[find(a)] = find(b)
+    groups, seen = [], {}
+    for k in range(len(cols)):                      # keep sewing order: a group sews where its first stroke did
+        r = find(k)
+        if r not in seen:
+            seen[r] = len(groups)
+            groups.append([])
+        groups[seen[r]].append(k)
+    strokes = _chain(lt.strokes, groups)
+    try:
+        sc2 = ac.plan_shape(i, arrs, strokes=strokes)
+    except Exception:  # noqa: BLE001
+        return None
+    if sc2.letter is None:
+        return None
+    joined_idx = [g for g, grp in enumerate(groups) if len(grp) > 1]
+    pairs = [[(tuple(map(float, a)), tuple(map(float, b))) for a, b in c.pairs] for c in sc2.letter.columns]
+    for g in joined_idx:
+        if g < len(pairs):
+            ring = outline_column(pairs[g], [c.tolist() for c in arrs]) if len(arrs) == 1 else None
+            pairs[g] = ring or follow_outline(pairs[g], [c.tolist() for c in arrs])
+    lt2 = _letter_from_pairs(ac, i, arrs, sc2.letter.box, strokes, pairs, [bool(c.closed) for c in sc2.letter.columns])
+    check = ac.flat_check(lt2)
+    new = _from_letter(lt2, bool(check["ok"]), check, planned.char)
+    before, after = seam_report(planned), seam_report(new)
+    if not force and not (check["ok"] and check["crossed_pairs"] == 0
+                          and after["hard_seams"] < before["hard_seams"] and after["fans"] <= before["fans"]):
+        return None
+    new.check["joined_strokes"] = [list(grp) for grp in groups if len(grp) > 1]
+    return new
+
+
+def follow_outline(pairs, contours, on_mm: float = 0.15, sag_mm: float = 0.1, step_mm: float = 1.0):
+    """A column's rails made to follow the outline between its pairs.
+
+    The engine sews straight between a column's rail nodes, so on a curve a rail drawn
+    pair to pair cuts the corner (a chord), leaving the outline's bulge bare. Where both of
+    a rail's consecutive points lie on the same outline ring (within on_mm), and the outline
+    between them sags more than sag_mm from the chord, pairs are added every ~step_mm along it.
+    Both rails get the same number of new pairs, spaced in proportion along each, which is how the
+    engine spreads stitches between two pairs anyway."""
+    from shapely.geometry import LinearRing, LineString, Point
+
+    rings = [LinearRing(c) for c in contours if len(c) >= 3]
+
+    def arc(a, b):
+        pa, pb = Point(a), Point(b)
+        for r in rings:
+            if r.distance(pa) <= on_mm and r.distance(pb) <= on_mm:
+                L = r.length
+                sa, sb = r.project(pa), r.project(pb)
+                f, bk = (sb - sa) % L, (sa - sb) % L
+                if min(f, bk) > 4 * max(Point(a).distance(pb), 1e-6) + 1.0:
+                    return None                       # not the short way round: a different stretch
+                return (r, sa, f) if f <= bk else (r, sa, -bk)
+        return None
+
+    def sample(spec, a, b, t):
+        if spec is None:
+            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        r, s0, ln = spec
+        q = r.interpolate((s0 + ln * t) % r.length)
+        return (q.x, q.y)
+
+    def sags(spec, a, b):
+        if spec is None:
+            return 0.0, 0.0
+        r, s0, ln = spec
+        chord = LineString([a, b])
+        n = max(2, int(abs(ln) / 0.2))
+        dev = max(chord.distance(Point(*sample(spec, a, b, k / n))) for k in range(n + 1))
+        return dev, abs(ln)
+
+    out = [pairs[0]]
+    for (l0, r0), (l1, r1) in zip(pairs, pairs[1:]):
+        sl, sr = arc(l0, l1), arc(r0, r1)
+        dl, ll = sags(sl, l0, l1)
+        dr, lr = sags(sr, r0, r1)
+        m = 0
+        if max(dl, dr) > sag_mm:
+            m = max(1, int(max(ll, lr) / step_mm))
+        for k in range(1, m):
+            t = k / m
+            out.append((sample(sl if dl > sag_mm / 4 else None, l0, l1, t),
+                        sample(sr if dr > sag_mm / 4 else None, r0, r1, t)))
+        out.append((l1, r1))
+    return out
+
+
+def outline_column(pairs, contours, on_mm: float = 0.15, step_mm: float = 1.0):
+    """A column whose rails ARE the outline: for a shape with one contour sewn as one column
+    (an S), the outline splits at the column's two end cuts into its two rails. The planned pairs
+    whose both points lie on the outline stay as anchors (where the stitch angle is set); between
+    anchors, pairs follow both outline arcs in proportion every ~step_mm. None if the end pairs
+    aren't on the outline or the arcs don't run one each way."""
+    from shapely.geometry import LinearRing, Point
+
+    ring = LinearRing(contours[0])
+    L = ring.length
+    on = lambda p: ring.distance(Point(p)) <= on_mm
+    if len(pairs) < 2 or not (on(pairs[0][0]) and on(pairs[0][1]) and on(pairs[-1][0]) and on(pairs[-1][1])):
+        return None
+    pos = lambda p: ring.project(Point(p))
+    l0, r0, l1, r1 = pos(pairs[0][0]), pos(pairs[0][1]), pos(pairs[-1][0]), pos(pairs[-1][1])
+    # the left rail runs from l0 to l1 one way round, the right from r0 to r1 the other way, and
+    # neither passes the other's ends
+    def span(a, b, d):
+        return (b - a) % L if d > 0 else (a - b) % L
+    def inside(x, a, ln, d):
+        return 0 < span(a, x, d) < ln
+    best = None
+    for d in (1, -1):
+        ll, lr = span(l0, l1, d), span(r0, r1, -d)
+        if not (inside(r0, l0, ll, d) or inside(r1, l0, ll, d) or inside(l0, r0, lr, -d) or inside(l1, r0, lr, -d)):
+            best = (d, ll, lr)
+    if best is None:
+        return None
+    d, ll, lr = best
+    if ll <= 0 or lr <= 0:
+        return None
+    anchors = [(0.0, 0.0)]
+    for l, r in pairs[1:-1]:
+        if on(l) and on(r):
+            tl, tr = span(l0, pos(l), d) / ll, span(r0, pos(r), -d) / lr
+            if anchors[-1][0] < tl < 1 and anchors[-1][1] < tr < 1:
+                anchors.append((tl, tr))
+    anchors.append((1.0, 1.0))
+    at = lambda s0, ln, dd, t: ring.interpolate((s0 + dd * ln * t) % L)
+    out = []
+    for (a0, b0), (a1, b1) in zip(anchors, anchors[1:]):
+        m = max(1, int(round(max((a1 - a0) * ll, (b1 - b0) * lr) / step_mm)))
+        for k in range(m):
+            t = k / m
+            pl = at(l0, ll, d, a0 + (a1 - a0) * t)
+            pr = at(r0, lr, -d, b0 + (b1 - b0) * t)
+            out.append(((pl.x, pl.y), (pr.x, pr.y)))
+    out.append((tuple(pairs[-1][0]), tuple(pairs[-1][1])))
+    out[0] = (tuple(pairs[0][0]), tuple(pairs[0][1]))
+    return out
+
+
+def _split_at(i, arrs, sc, label, points):
+    """Override: cut the shape's strokes at the given points (mm, y up) and re-plan. Each point cuts
+    the stroke whose centreline passes nearest it; the two pieces butt there."""
+    import numpy as np
+    from cli_anything_inkstitch.planner import columns as col
+
+    ac, _ = require_planner()
+    lt = sc.letter
+    box = lt.box
+    W, H = (box[2] - box[0]) or 1.0, (box[3] - box[1]) or 1.0
+    strokes = list(lt.strokes)
+    for pt in points:
+        uv = np.array([(pt[0] - box[0]) / W, (pt[1] - box[1]) / H])
+        best = None
+        for k, s in enumerate(strokes):
+            P = np.asarray(s.path, float)
+            if s.closed or len(P) < 2:
+                continue
+            dense = [P[0]]
+            for a, b in zip(P, P[1:]):
+                for t in np.linspace(0, 1, 12)[1:]:
+                    dense.append(a + (b - a) * t)
+            dense = np.array(dense)
+            d = np.hypot((dense[:, 0] - uv[0]) * W, (dense[:, 1] - uv[1]) * H)
+            j = int(np.argmin(d))
+            if best is None or d[j] < best[0]:
+                best = (d[j], k, dense, j)
+        if best is None:
+            continue
+        _, k, dense, j = best
+        if j < 2 or j > len(dense) - 3:
+            continue
+        s = strokes[k]
+        a = col.Stroke(path=[tuple(map(float, p)) for p in dense[:j + 1]], smooth=s.smooth,
+                       start_cut=s.start_cut, end_cut="perpendicular")
+        b = col.Stroke(path=[tuple(map(float, p)) for p in dense[j:]], smooth=s.smooth,
+                       start_cut="perpendicular", end_cut=s.end_cut)
+        strokes[k:k + 1] = [a, b]
+    try:
+        sc2 = ac.plan_shape(i, arrs, strokes=strokes)
+    except Exception:  # noqa: BLE001
+        return None
+    if sc2.letter is None:
+        return None
+    p = _from_letter(sc2.letter, bool(sc2.ok), sc2.check or {}, label)
+    p.check["split_at"] = [list(map(float, q)) for q in points]
+    return p
+
+
+def _move_ring_seam(planned: PlannedLetter, at) -> PlannedLetter:
+    """Override: start each ring (closed column) at the pair nearest `at` (mm, y up), keeping its
+    overlap length past the seam (planner columns.RING_OVERLAP_MM, ~0.3 mm along the centre)."""
+    import math as m
+
+    for c in planned.columns:
+        if not c.closed or len(c.left) < 4:
+            continue
+        mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(c.left, c.right)]
+        # the ring proper ends at the first pair that repeats pairs[0]; later pairs are the overlap
+        n = next((k for k in range(1, len(mids)) if m.dist(mids[k], mids[0]) < 1e-6), len(mids))
+        ring_l, ring_r = c.left[:n], c.right[:n]
+        k = min(range(n), key=lambda q: m.dist(mids[q], at))
+        L = ring_l[k:] + ring_l[:k]
+        R = ring_r[k:] + ring_r[:k]
+        over = 0.3
+        nxt_l, nxt_r = L[1 % n], R[1 % n]
+        ml, mr = m.dist(L[0], nxt_l) or 1.0, m.dist(R[0], nxt_r) or 1.0
+        mid_step = (ml + mr) / 2
+        t = min(1.0, over / mid_step)
+        ext_l = (L[0][0] + (nxt_l[0] - L[0][0]) * t, L[0][1] + (nxt_l[1] - L[0][1]) * t)
+        ext_r = (R[0][0] + (nxt_r[0] - R[0][0]) * t, R[0][1] + (nxt_r[1] - R[0][1]) * t)
+        c.left = L + [L[0], ext_l]
+        c.right = R + [R[0], ext_r]
+    planned.check["seam_at"] = list(map(float, at))
+    return planned
 
 
 # ---------------------------------------------------------------- SVG output
@@ -383,8 +709,14 @@ def exposed_travel_mm(letter: PlannedLetter) -> float:
     tucks into the base it split the base and added three trims (measured
     on Lato Black 16.4 mm, 2026-11-08).
     """
+    return sum(mm for _, mm in exposed_hops(letter))
+
+
+def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
+    """(k, mm) for each travel from column k to column k+1, sewn in planned order, that would lie
+    on bare fabric for more than a hair (exposed_travel_mm sums these)."""
     if len(letter.columns) < 2:
-        return 0.0
+        return []
     from shapely.geometry import LineString, Polygon
     from shapely.ops import unary_union
 
@@ -400,19 +732,21 @@ def exposed_travel_mm(letter: PlannedLetter) -> float:
         else:
             glyph = unary_union([glyph, p])
     if glyph is None:
-        return 0.0
+        return []
     glyph = glyph.buffer(0.05)
 
     def ends(c: PlannedColumn):
         mid = lambda i: ((c.left[i][0] + c.right[i][0]) / 2, (c.left[i][1] + c.right[i][1]) / 2)
         return [mid(0), mid(-1)]
 
-    total = 0.0
+    out = []
     cur = ends(letter.columns[0])[1]
-    for c in letter.columns[1:]:
+    for k, c in enumerate(letter.columns[1:]):
         e0, e1 = ends(c)
         start, far = (e0, e1) if math.dist(cur, e0) <= math.dist(cur, e1) else (e1, e0)
         if math.dist(cur, start) > 1e-6:
-            total += LineString([cur, start]).difference(glyph).length
+            mm = LineString([cur, start]).difference(glyph).length
+            if mm > 0.0:
+                out.append((k, mm))
         cur = far
-    return total
+    return out

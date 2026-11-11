@@ -934,9 +934,15 @@ def _filled_shapes(root, want):
               help="Satin spacing, pull compensation and underlay ladder for this fabric (FABRICS).")
 @click.option("--pull-comp-mm", type=float, default=None,
               help="Pull compensation, mm (default: the fabric preset's, 0.2 for standard/twill).")
-@click.option("--route/--no-route", default=True, show_default=True,
-              help="Route shapes whose planned order would leave travel on bare fabric through "
-                   "the engine's auto_satin, as text-to-satin does for letters.")
+@click.option("--travel", type=click.Choice(["trim", "route", "leave"]), default="trim", show_default=True,
+              help="Travel between a shape's columns that would cross bare fabric: trim it (the "
+                   "columns stay whole), route the shape through the engine's auto_satin (no trim, "
+                   "but it cuts columns where they cross, adding seams), or leave it.")
+@click.option("--route/--no-route", default=None, hidden=True,
+              help="Old spelling: --route = --travel route, --no-route = --travel leave.")
+@click.option("--one-column/--no-one-column", default=True, show_default=True,
+              help="Join columns that meet end to end with no drawn corner (one stroke the planner "
+                   "cut in two, as an S at its bowls) into one column whose rails follow the outline.")
 @click.option("--merge-colors-de", type=float, default=None,
               help="Fills closer than this CIEDE2000 distance sew as one thread (default "
                    f"{8.0:g}; 0 keeps every fill its own thread).")
@@ -947,8 +953,8 @@ def _filled_shapes(root, want):
 @click.option("--keep-duplicates", is_flag=True,
               help="Digitize shapes hidden under an identical later shape too.")
 @click.pass_context
-def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, route, merge_colors_de,
-                    max_colors, keep_order, keep_duplicates):
+def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
+                    merge_colors_de, max_colors, keep_order, keep_duplicates):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
     The planner that text-to-satin uses for letters, applied to any filled
@@ -978,7 +984,10 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, rout
         ctx.obj.get("binary_override") if ctx.obj else None))
     want = {i.strip() for i in ids.split(",")} if ids else None
     max_de = sp.MERGE_DE if merge_colors_de is None else merge_colors_de
+    if route is not None:
+        travel = "route" if route else "leave"
     report, param_errors, to_route, groups = [], [], [], []
+    trims_added = 0
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
         if tree is None:
             raise UserError("the project has no SVG: document open --svg first")
@@ -1013,7 +1022,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, rout
         else:
             order, order_splits = sp.thread_order(thread_of, polys)
 
-        planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)])
+        planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)],
+                                 one_column=one_column)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         made_groups = []
         for (el, _fill), color, lt in zip(targets, thread_of, planned):
@@ -1030,12 +1040,18 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, rout
                 g.append(cp)
                 made.append((g[-1], None, {}))
             else:
+                hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
+                    if travel == "trim" else set()
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"{el.get('id')}_c{k}")
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
-                    made.append((p, "satin_column", _lettering_satin_params(c.widths(), pull_comp_mm, fabric)))
+                    extra = _lettering_satin_params(c.widths(), pull_comp_mm, fabric)
+                    if k in hops:            # reader: lib/elements/element.py trim_after
+                        extra["trim_after"] = "true"
+                        trims_added += 1
+                    made.append((p, "satin_column", extra))
             made_groups.append((g, as_fill, _ancestor_matrix(el)))
             parent.replace(el, g)
             for p, st, extra in made:
@@ -1046,10 +1062,13 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, rout
                 except UserError as exc:
                     param_errors.append({"id": p.get("id"), "error": str(exc)})
             ids_here = [p.get("id") for p, st, _ in made if st == "satin_column"]
-            if route and len(ids_here) >= 2 and gc.exposed_travel_mm(lt) > gc.EXPOSED_TRAVEL_MM:
+            if travel == "route" and len(ids_here) >= 2 and gc.exposed_travel_mm(lt) > gc.EXPOSED_TRAVEL_MM:
                 to_route.append(ids_here)
             chk = lt.check or {}
+            sr = gc.seam_report(lt) if lt.columns and not as_fill else {"hard_seams": 0, "fans": 0}
             report.append({"shape": lt.char, "group": g.get("id"), "thread": color,
+                           "hard_seams": sr["hard_seams"], "fans": sr["fans"],
+                           **({"joined_strokes": chk["joined_strokes"]} if chk.get("joined_strokes") else {}),
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
@@ -1101,7 +1120,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, rout
     sewn_threads = [r["thread"] for r in report]
     blocks = [t for k, t in enumerate(sewn_threads) if k == 0 or t != sewn_threads[k - 1]]
     payload = {"shapes": report, "failed_plans": [r["shape"] for r in report if not r["plan_ok"]],
-               "routed_shapes": len(to_route),
+               "routed_shapes": len(to_route), "trims_added": trims_added,
                "duplicates_dropped": duplicates,
                "threads": sorted(set(sewn_threads)),
                "color_merges": threads.merges,
