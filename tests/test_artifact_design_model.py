@@ -300,6 +300,22 @@ class TestExtractStitchBlocks:
         # scale(0.5) applied → 10,20 becomes 5,10; layer translate(60) NOT added
         assert first == [[5.0, 10.0], [10.0, 10.0], [15.0, 10.0]]
 
+    def test_matrix_applied_for_offset_viewbox(self):
+        # An Illustrator export's viewBox doesn't start at 0, and the engine then writes
+        # matrix(scale + viewBox origin) on each plan path instead of scale(). Reading
+        # only scale() drew the preview offset and ~3x too big.
+        from cli_anything_inkstitch.artifact.design_model import extract_stitch_blocks
+        plan = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="88.9 143.9 397.3 288.7" width="305mm">
+          <g id="__inkstitch_stitch_plan__" transform="translate(397.3, 0)">
+            <g id="__color_block_0__">
+              <path style="stroke: #FFDD00;" d="M100 200 400 200"
+                    transform="matrix(0.344652 -0 0 0.344652 30.6396 49.5955)"/>
+            </g>
+          </g>
+        </svg>"""
+        pts = extract_stitch_blocks(plan)["blocks"][0]["paths"][0]
+        assert pts == [[65.105, 118.526], [168.5, 118.526]]
+
     def test_no_plan_layer_raises(self):
         from cli_anything_inkstitch.artifact.design_model import extract_stitch_blocks
         from cli_anything_inkstitch.errors import UserError

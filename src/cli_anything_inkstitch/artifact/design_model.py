@@ -929,7 +929,6 @@ def apply_history_step(project_file: str, *, redo: bool = False) -> dict[str, An
 
 # -- stitch sequence for the editor timeline -------------------------------------
 
-_SCALE_RE = re.compile(r"scale\(\s*(-?[\d.]+)(?:\s*,\s*(-?[\d.]+))?\s*\)")
 _STROKE_RE = re.compile(r"stroke:\s*([^;]+)")
 
 
@@ -944,6 +943,7 @@ def extract_stitch_blocks(svg_bytes: bytes) -> dict[str, Any]:
     needle penetration, in stitch order.
     """
     from cli_anything_inkstitch.artifact.gate import flatten_path
+    from cli_anything_inkstitch.svg.geometry import apply_matrix, parse_transform
 
     svg_ns = "{http://www.w3.org/2000/svg}"
     root = etree.fromstring(svg_bytes)
@@ -967,12 +967,12 @@ def extract_stitch_blocks(svg_bytes: bytes) -> dict[str, Any]:
             if color is None:
                 m = _STROKE_RE.search(style)
                 color = m.group(1).strip() if m else "#000000"
-            sx = sy = 1.0
-            m = _SCALE_RE.search(p.get("transform") or "")
-            if m:
-                sx = float(m.group(1))
-                sy = float(m.group(2)) if m.group(2) else sx
-            pts = [[round(x * sx, 3), round(y * sy, 3)]
+            # The engine writes each plan path in px with a transform back to user
+            # units: scale() when the viewBox starts at 0, but a full matrix() (scale +
+            # the viewBox origin) when it doesn't, as in Illustrator exports. Apply the
+            # whole transform; reading only scale() drew such designs offset and ~3x big.
+            mtx = parse_transform(p.get("transform"))
+            pts = [[round(v, 3) for v in apply_matrix(mtx, x, y)]
                    for x, y in flatten_path(p.get("d") or "")]
             if len(pts) >= 2:
                 paths.append(pts)
