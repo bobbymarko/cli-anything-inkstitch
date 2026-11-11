@@ -276,7 +276,8 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
 
 
 def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
-                overrides: dict | None = None, spread_turns_on: bool = True) -> list[PlannedLetter]:
+                overrides: dict | None = None, spread_turns_on: bool = True,
+                tidy_joins_on: bool = True) -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
     outlines) as satin columns, one shape at a time: the planner's
     `art_columns.plan_shape`, the same planner that drove an all-satin client
@@ -298,6 +299,9 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
     spread_turns_on: tilt the rungs into tight turns so the inner ends spread
     along the inner curve instead of pinching at one point (spread_turns).
     A shape with hand-placed rungs is left as placed.
+
+    tidy_joins_on: where columns meet, trim overlaps deeper than about 1 mm back to a 0.4 mm
+    overlap, and close bare wedges at junctions (trace/joins.py).
     """
     import numpy as np
 
@@ -332,6 +336,9 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
             planned = place_rungs(planned, ov["rungs"])
         elif spread_turns_on:
             planned = spread_letter_turns(planned)
+        if tidy_joins_on and not ov.get("rungs"):
+            from cli_anything_inkstitch.trace.joins import tidy_joins
+            planned = tidy_joins(planned)
         out.append(planned)
     return out
 
