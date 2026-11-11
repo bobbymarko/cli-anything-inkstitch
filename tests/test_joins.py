@@ -167,3 +167,57 @@ def test_tidy_joins_keeps_a_clean_shape():
     before = (list(bar.left), list(bar.right))
     joins.tidy_joins(pl)
     assert (pl.columns[0].left, pl.columns[0].right) == before
+
+
+# ---------------------------------------------------------------- S spine: rungs square to the middle
+
+def _offset_path(center, w):
+    c = np.asarray(center, float)
+    tg = np.gradient(c, axis=0)
+    tg /= np.hypot(*tg.T)[:, None]
+    nr = np.column_stack([-tg[:, 1], tg[:, 0]])
+    return c + nr * w, c - nr * w
+
+
+def _s_column():
+    """A 6 mm column: a tight 180-degree bowl (centre-line radius 4) and then a straight 16 mm spine.
+    Its rails are paired in proportion over their whole length, the way outline_column pairs two
+    outline arcs: the outer rail is longer round the bowl, so on the spine the rungs lean."""
+    th = np.linspace(math.pi / 2, -math.pi / 2, 60)
+    bowl = np.column_stack([4 * np.cos(th), 4 * np.sin(th)])
+    spine = np.column_stack([np.linspace(0, -16, 33)[1:], np.full(32, -4.0)])
+    center = np.vstack([bowl, spine])
+    lft, rgt = _offset_path(center, 3.0)
+    from shapely.geometry import LineString
+
+    Lr, Rr = LineString(lft), LineString(rgt)
+    n = 80
+    pairs = [(Lr.interpolate(k / n, normalized=True).coords[0], Rr.interpolate(k / n, normalized=True).coords[0])
+             for k in range(n + 1)]
+    return pairs
+
+
+def _spine_dev(pairs):
+    """Worst angle (deg) between a rung and the vertical (the spine runs along x) on the spine's middle."""
+    worst = 0.0
+    for a, b in pairs:
+        mx = (a[0] + b[0]) / 2
+        if -13 < mx < -3 and (a[1] + b[1]) / 2 < -1:
+            v = np.subtract(b, a)
+            worst = max(worst, math.degrees(math.acos(min(1.0, abs(v[1]) / (np.hypot(*v) or 1)))))
+    return worst
+
+
+def test_proportional_pairing_leans_on_the_spine():
+    assert _spine_dev(_s_column()) > 10       # the defect the fix is for
+
+
+def test_medial_rungs_square_on_the_spine():
+    from cli_anything_inkstitch.trace.glyph_columns import medial_rungs, spread_turns
+
+    pairs = medial_rungs(_s_column())
+    assert pairs is not None
+    assert _spine_dev(pairs) < 3
+    # spread_turns tilts only the bowl: the spine stays square
+    spread, _ = spread_turns(pairs)
+    assert _spine_dev(spread) < 3
