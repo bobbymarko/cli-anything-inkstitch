@@ -782,25 +782,46 @@ def _style_autorun_tops(ctx, project_path, stitch_length_mm, bean_repeats):
 
 # ---------------------------------------------------------------- lettering
 
-def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float) -> dict:
-    """Satin params for one planned column, from its median width.
+# Fabric presets for satin columns: stitch spacing, pull compensation, and the underlay ladder by
+# column width (the usual digitizing ladder, as ES's automatic underlay: a centre walk under thin
+# columns, an edge walk (contour) above that, edge walk plus zigzag on wide ones). "standard" is the
+# ladder text-to-satin has always used (the engine's default spacing). Stable woven fabric (twill,
+# canvas) needs less underlay and pull compensation than fleece or knit, which stretch and sink.
+FABRICS = {
+    #            spacing  pull  centre walk below  zigzag from (mm)
+    "standard": dict(spacing_mm=None, pull_comp_mm=0.2, center_below_mm=1.5, zigzag_from_mm=4.0),
+    "twill":    dict(spacing_mm=0.4, pull_comp_mm=0.2, center_below_mm=2.0, zigzag_from_mm=5.0),
+    "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=4.0),
+    "fleece":   dict(spacing_mm=0.38, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=3.0),
+}
 
-    Underlay by width, the usual digitizing ladder (ES's automatic
-    underlay does the same): a centre walk under thin columns, an edge
-    walk (contour) from 1.5 mm, edge walk plus zigzag from 4 mm. Columns
-    wider than SPLIT_SATIN_MM get the engine's split satin
-    (max_stitch_length_mm), because one long stitch snags. Every name here
-    is checked against the mined schema by _apply_params_to_element.
+
+def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None = None,
+                            fabric: str = "standard") -> dict:
+    """Satin params for one planned column, from its median width and the fabric preset.
+
+    Underlay by width (FABRICS): a centre walk below center_below_mm, an edge
+    walk (contour) above it, edge walk plus zigzag from zigzag_from_mm.
+    Columns wider than SPLIT_SATIN_MM get the engine's split satin
+    (max_stitch_length_mm), because one long stitch snags. pull_comp_mm
+    overrides the preset's. Every name here is checked against the mined
+    schema by _apply_params_to_element (readers: lib/elements/satin_column.py
+    zigzag_spacing_mm, pull_compensation_mm, center_walk_underlay,
+    contour_underlay, zigzag_underlay, max_stitch_length_mm).
     """
     from cli_anything_inkstitch.trace.glyph_columns import SPLIT_SATIN_MM
 
+    f = FABRICS[fabric]
     w = sorted(widths_mm)[len(widths_mm) // 2] if widths_mm else 0.0
-    p = {"pull_compensation_mm": f"{pull_comp_mm:g}"}
-    if w < 1.5:
+    pc = f["pull_comp_mm"] if pull_comp_mm is None else pull_comp_mm
+    p = {"pull_compensation_mm": f"{pc:g}"}
+    if f["spacing_mm"] is not None:
+        p["zigzag_spacing_mm"] = f"{f['spacing_mm']:g}"
+    if w < f["center_below_mm"]:
         p["center_walk_underlay"] = "true"
     else:
         p["contour_underlay"] = "true"
-        if w >= 4.0:
+        if w >= f["zigzag_from_mm"]:
             p["zigzag_underlay"] = "true"
     if max(widths_mm or [0.0]) > SPLIT_SATIN_MM:
         p["max_stitch_length_mm"] = f"{SPLIT_SATIN_MM:g}"
@@ -909,7 +930,10 @@ def _filled_shapes(root, want):
 @click.option("--fallback", type=click.Choice(["fill", "satin"]), default="fill", show_default=True,
               help="A shape whose plan fails its check: keep it as its fill, or use the failing "
                    "satin plan anyway.")
-@click.option("--pull-comp-mm", type=float, default=0.2, show_default=True)
+@click.option("--fabric", type=click.Choice(sorted(FABRICS)), default="standard", show_default=True,
+              help="Satin spacing, pull compensation and underlay ladder for this fabric (FABRICS).")
+@click.option("--pull-comp-mm", type=float, default=None,
+              help="Pull compensation, mm (default: the fabric preset's, 0.2 for standard/twill).")
 @click.option("--route/--no-route", default=True, show_default=True,
               help="Route shapes whose planned order would leave travel on bare fabric through "
                    "the engine's auto_satin, as text-to-satin does for letters.")
@@ -923,7 +947,7 @@ def _filled_shapes(root, want):
 @click.option("--keep-duplicates", is_flag=True,
               help="Digitize shapes hidden under an identical later shape too.")
 @click.pass_context
-def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route, merge_colors_de,
+def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, route, merge_colors_de,
                     max_colors, keep_order, keep_duplicates):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
@@ -1011,7 +1035,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route, merge
                     p.set("id", f"{el.get('id')}_c{k}")
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
-                    made.append((p, "satin_column", _lettering_satin_params(c.widths(), pull_comp_mm)))
+                    made.append((p, "satin_column", _lettering_satin_params(c.widths(), pull_comp_mm, fabric)))
             made_groups.append((g, as_fill, _ancestor_matrix(el)))
             parent.replace(el, g)
             for p, st, extra in made:
