@@ -7,7 +7,7 @@ See [SPEC.md](SPEC.md) for the full technical specification, [skills/cli-anythin
 ## Install (dev)
 
 ```bash
-pip install -e '.[dev]'
+pip install -e '.[dev]'          # add ,satin for text-to-satin / shapes-to-satin
 ```
 
 The CLI itself is pure Python (lxml + click + pyembroidery). For binary-backed commands (`tools`, `preview generate`, `export`, `validate run/fix`) install [Ink/Stitch](https://inkstitch.org/docs/install/). For raster previews (`preview generate --raster`, `preview rasterize`) install Inkscape 1.0+.

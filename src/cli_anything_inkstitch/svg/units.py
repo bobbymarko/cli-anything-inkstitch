@@ -188,6 +188,56 @@ from cli_anything_inkstitch.svg.attrs import (  # noqa: E402
 )
 
 
+
+def _polylines_intersect(a, b) -> bool:
+    def orient(p, q, r):
+        v = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return 0 if abs(v) < 1e-12 else (1 if v > 0 else -1)
+    for p1, p2 in zip(a, a[1:]):
+        for q1, q2 in zip(b, b[1:]):
+            o1, o2 = orient(p1, p2, q1), orient(p1, p2, q2)
+            o3, o4 = orient(q1, q2, p1), orient(q1, q2, p2)
+            if o1 != o2 and o3 != o4:
+                return True
+    return False
+
+
+def satin_rails_d(d: str) -> str | None:
+    """Only the two rails of a satin column's path data, or None when the
+    path has no rung subpaths to drop.
+
+    Rung subpaths reach past the rails on purpose (the engine scales its own
+    synthesized rungs 1.1x so they surely cross; auto_satin writes them out),
+    so a bbox that counts them reads as growth. Measured: a 10.8 mm word
+    whose old-style satins (two rails, no rungs) went through auto_satin
+    came back 8.8% taller, and check_scale_drift refused it. Rail choice
+    mirrors the engine reader lib/elements/satin_column.py
+    `SatinColumn.rail_indices`: rails are the subpaths that cross more than
+    two others (exactly one with three subpaths), else the two longest.
+    """
+    import math
+    import re
+    from cli_anything_inkstitch.artifact.gate import flatten_path
+
+    chunks = [c for c in re.split(r"(?=[Mm])", (d or "").strip()) if c.strip()]
+    if len(chunks) <= 2 or any(c.lstrip()[0] == "m" for c in chunks):
+        return None   # no rungs (or relative subpaths we don't re-anchor)
+    lines = [flatten_path(c) for c in chunks]
+    if any(len(pl) < 2 for pl in lines):
+        return None
+    n = len(lines)
+    counts = [sum(_polylines_intersect(lines[i], lines[j]) for j in range(n) if j != i)
+              for i in range(n)]
+    length = [sum(math.dist(p, q) for p, q in zip(pl, pl[1:])) for pl in lines]
+    if n == 3:
+        rails = [i for i in range(n) if counts[i] == 1 and length[i] > 0.1]
+    else:
+        rails = [i for i in range(n) if counts[i] > 2 and length[i] > 0.1]
+    if len(rails) != 2:
+        rails = sorted(range(n), key=lambda i: -length[i])[:2]
+    return " ".join(chunks[i] for i in sorted(rails))
+
+
 def art_bbox(tree):
     """Union bbox of the design's shape geometry, in root coordinates.
 
@@ -217,7 +267,18 @@ def art_bbox(tree):
             continue
         if in_nonrendered_container(elem):
             continue
-        bb, _meta = element_bbox_in_root(elem)
+        rails = None
+        if (elem.get("{http://inkstitch.org/namespace}satin_column") or "").lower() == "true":
+            rails = satin_rails_d(elem.get("d") or "")
+        if rails is not None:
+            from cli_anything_inkstitch.svg.geometry import (
+                IDENTITY, ctm_for, path_bbox, transformed_bbox)
+            bb = path_bbox(rails)
+            m = ctm_for(elem)
+            if bb is not None and m != IDENTITY:
+                bb = transformed_bbox(bb, m)
+        else:
+            bb, _meta = element_bbox_in_root(elem)
         if bb is not None:
             boxes.append(bb)
     if not boxes:
