@@ -66,6 +66,13 @@ class SessionStore:
         with self._lock:
             return list(self._sessions)
 
+    def open_sessions(self) -> list[dict[str, Any]]:
+        """Open (not ended) sessions, most recently updated first."""
+        with self._lock:
+            rows = [{"key": k, "file": v.get("file"), "updated_at": v.get("updated_at") or ""}
+                    for k, v in self._sessions.items() if v.get("status") == "open"]
+        return sorted(rows, key=lambda r: r["updated_at"], reverse=True)
+
     def upsert_session(self, file: str, url: str, *, reopen: bool = False) -> dict[str, Any]:
         """Open or revive the session for `file`.
 

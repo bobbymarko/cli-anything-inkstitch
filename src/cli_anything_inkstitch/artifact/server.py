@@ -237,7 +237,9 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         parts = [p for p in parsed.path.split("/") if p]
         try:
-            if parsed.path == "/health":
+            if parsed.path == "/":
+                self._handle_root()
+            elif parsed.path == "/health":
                 self._json({"ok": True, "app": "cli-anything-inkstitch artifact", "version": __version__})
             elif parsed.path == "/api/poll":
                 self._handle_poll(parse_qs(parsed.query))
@@ -326,6 +328,35 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                 pass
 
     # -- session lifecycle -------------------------------------------------------
+
+    def _handle_root(self) -> None:
+        """`/` goes straight to the open session, so a person can bookmark the server
+        instead of a per-design URL. Several open: newest first, as links. None: say so."""
+        import html
+        rows = self.state.store.open_sessions()
+        if len(rows) == 1:
+            self.send_response(302)
+            self.send_header("Location", f"/session/{rows[0]['key']}")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if rows:
+            items = "".join(
+                f"<li><a href='/session/{r['key']}'>{html.escape(Path(r['file'] or '').parent.name or r['key'])}"
+                f" / {html.escape(Path(r['file'] or '').name)}</a></li>" for r in rows)
+            body = f"<h1>Open sessions</h1><ul>{items}</ul>"
+        else:
+            body = "<h1>No open session</h1><p>Ask your agent to open a design in the editor.</p>"
+        page = ("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
+                "<title>Stitch editor</title><style>body{font:16px system-ui;margin:2rem;"
+                "background:#16171a;color:#e8e8e8}a{color:#8ab4f8}</style>" + body)
+        data = page.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _handle_open(self, body: dict) -> None:
         project = body.get("project") or ""
