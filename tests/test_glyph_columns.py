@@ -2,7 +2,7 @@
 
 Why: rung-based fill-to-satin broke letters at junctions (the 6's wedge,
 EST. 2018's E/T/1/8 in the 2026-11-08 head-to-head). The planner
-(trace/glyph_columns.py, stitchpilot's column planner) pairs rails by
+(trace/glyph_columns.py, the column planner in planner/) pairs rails by
 construction and writes old-style two-rail satins.
 
 Pure tests pin the two contracts this depends on: old-style satins keep
@@ -37,7 +37,8 @@ FONT_CANDIDATES = [
 FONT = next((p for p in FONT_CANDIDATES if Path(p).exists()), None)
 
 try:
-    import stitchpilot.art_columns  # noqa: F401
+    import cli_anything_inkstitch.planner.art_columns  # noqa: F401
+    import scipy.spatial  # noqa: F401
     import shapely  # noqa: F401
     HAVE_PLANNER = True
 except ImportError:
@@ -206,7 +207,7 @@ class TestEngineSewsThePlan:
 
 # ---------------------------------------------------------------- artwork shapes (tools shapes-to-satin)
 # Why: a logo's knots, crown, heart and outlined letters are filled shapes, not font text. The same
-# planner (stitchpilot art_columns.plan_shape) digitizes them stroke by stroke; the HIDA chest logo
+# planner (planner/art_columns.plan_shape) digitizes them stroke by stroke; a client chest logo
 # head-to-head (2026-11-10) planned all 17 of its shapes as satin this way.
 
 def _ring_d(cx, cy, r_out, r_in, n=48):

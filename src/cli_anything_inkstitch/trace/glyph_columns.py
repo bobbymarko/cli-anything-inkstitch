@@ -7,7 +7,7 @@ in the 6, and EST. 2018 lost parts of the E, T, 1 and 8. EmbroideryStudio
 won lettering on exactly that.
 
 The fix is to plan a letter the way a digitizer does before any rail
-exists. stitchpilot's column planner (bobbymarko/stitchpilot, Apache-2.0,
+exists. The column planner (cli_anything_inkstitch.planner:
 `autostrokes.letter_strokes` + `columns.letter_columns`) does this:
   1. the letter's medial axis (a Voronoi diagram of its outline), cut into
      branches at junctions;
@@ -35,10 +35,9 @@ Engine contract (readers cited):
   stroke paint plus inkstitch:satin_column="True" makes a SatinColumn.
   The caller sets that through the mined schema (params path).
 
-stitchpilot is an optional, undeclared dependency for now (it isn't on
-PyPI; declaring it as a git extra in pyproject.toml is a packaging decision
-left to the maintainer). Without it, `require_planner` raises a UserError
-with the install line.
+The planner needs numpy, scipy, shapely, fonttools and svgelements, which
+the core install doesn't: they come with the `satin` extra. Without them,
+`require_planner` raises a UserError with the install line.
 """
 
 from __future__ import annotations
@@ -79,14 +78,17 @@ class PlannedLetter:
 
 def require_planner():
     try:
-        from stitchpilot import art_columns, columns  # noqa: F401
+        import numpy  # noqa: F401
+        import scipy.spatial  # noqa: F401
+        import shapely  # noqa: F401
+        import fontTools  # noqa: F401
+        import svgelements  # noqa: F401
     except ImportError as exc:  # pragma: no cover - exercised by the skip path
         raise UserError(
-            "satin lettering needs the column planner (stitchpilot) and its "
-            "geometry libraries: pip install numpy scipy shapely fonttools "
-            "svgelements 'stitchpilot @ git+https://github.com/bobbymarko/stitchpilot' "
+            "satin planning needs the satin extra's geometry libraries: "
+            "pip install 'cli-anything-inkstitch[satin]' "
             f"({type(exc).__name__}: {exc})") from exc
-    from stitchpilot import art_columns, columns
+    from cli_anything_inkstitch.planner import art_columns, columns
     return art_columns, columns
 
 
@@ -180,7 +182,7 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
         raise UserError("nothing to stitch: the text is empty")
     if width_mm is not None:
         # spacing that makes the ink box this wide: plan once with none,
-        # then spread the difference over the gaps (stitchpilot's
+        # then spread the difference over the gaps (planner columns.
         # word_columns does the same for EmbroideryStudio's fit-to-width)
         gaps = len(text) - 1
         if gaps < 1:
@@ -189,14 +191,14 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
         base = plan_text(font_path, text, height_mm, letter_spacing_pct=0.0)
         xs = [p[0] for lt in base for c in lt.contours for p in c]
         letter_spacing_pct = (width_mm - (max(xs) - min(xs))) / gaps / height_mm * 100
-    # Layout as stitchpilot's word_columns (advance widths plus spacing, the
+    # Layout as the planner's columns.word_columns (advance widths plus spacing, the
     # ink box centred on 0, 0), but each letter planned on its own: a planner
     # exception in one glyph (measured: a GEOS "endpoints are equal" error on
     # one Lato Regular lowercase letter at 10 mm) fails that letter to the
     # fallback instead of the whole line. Steps per letter mirror
     # art_columns.text_columns: letter_strokes → tuck_order → letter_columns
     # (flat, tucked) → trim_tips → flat_check.
-    from stitchpilot.autostrokes import letter_strokes
+    from cli_anything_inkstitch.planner.autostrokes import letter_strokes
     import numpy as np
 
     spacing = min(col.DEFAULT_SPACING_MM, max(ac.MIN_SPACING_MM, 0.075 * height_mm))
@@ -274,9 +276,9 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
 
 def plan_shapes(shapes: list[tuple[str, list]]) -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
-    outlines) as satin columns, one shape at a time: stitchpilot's
-    `art_columns.plan_shape`, the same planner the rig used for the HIDA chest
-    logo's all-satin v5-v9 in EmbroideryStudio. Each item is (label, contours),
+    outlines) as satin columns, one shape at a time: the planner's
+    `art_columns.plan_shape`, the same planner that drove an all-satin client
+    chest logo in EmbroideryStudio. Each item is (label, contours),
     contours in mm, y up, outer ring first then holes. A shape the planner
     can't do, or whose check fails, comes back ok=False for the caller's
     fallback."""
