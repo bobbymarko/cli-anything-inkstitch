@@ -807,9 +807,48 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float) -> dict
     return p
 
 
+_SHAPE_TAGS = ("path", "circle", "ellipse", "rect", "polygon")
+_NOT_ART = ("defs", "clipPath", "mask", "symbol", "pattern", "marker")
+
+
+def _element_d(el) -> str:
+    """A filled element's outline as path data: a path's own `d`; a circle, ellipse, rect or
+    polygon converted (svgelements), in the element's own coordinates."""
+    import svgelements as se
+
+    tag = etree.QName(el).localname
+    if tag == "path":
+        return el.get("d") or ""
+    a = {k: el.get(k) for k in ("cx", "cy", "r", "rx", "ry", "x", "y", "width", "height", "points")
+         if el.get(k) is not None}
+    if tag == "circle":
+        shape = se.Circle(a.get("cx", 0), a.get("cy", 0), a.get("r", 0))
+    elif tag == "ellipse":
+        shape = se.Ellipse(a.get("cx", 0), a.get("cy", 0), a.get("rx", 0), a.get("ry", 0))
+    elif tag == "rect":
+        shape = se.Rect(a.get("x", 0), a.get("y", 0), a.get("width", 0), a.get("height", 0),
+                        a.get("rx"), a.get("ry"))
+    else:
+        shape = se.Polygon(a.get("points", ""))
+    return se.Path(shape).d()
+
+
+def _ancestor_matrix(el):
+    """The composed transform of el's ancestors (not el's own), svgelements Matrix."""
+    import svgelements as se
+
+    m = se.Matrix()
+    e = el.getparent()
+    while e is not None and isinstance(e.tag, str):
+        if e.get("transform"):
+            m = m * se.Matrix(e.get("transform"))
+        e = e.getparent()
+    return m
+
+
 def _path_contours_mm(el, uu_per_mm: float, step_mm: float = 0.2) -> list[list[tuple[float, float]]]:
-    """A filled path's subpaths as polygons in mm, y up (the planner's frame), with the
-    transforms of the path and its ancestors applied. Curves are sampled every ~step_mm."""
+    """A filled element's subpaths as polygons in mm, y up (the planner's frame), with the
+    transforms of the element and its ancestors applied. Curves are sampled every ~step_mm."""
     import svgelements as se
 
     m = se.Matrix()
@@ -820,7 +859,7 @@ def _path_contours_mm(el, uu_per_mm: float, step_mm: float = 0.2) -> list[list[t
         e = e.getparent()
     for t in chain:                      # the path's own first, then each ancestor's (svgelements:
         m = m * se.Matrix(t)             # a * b applies a, then b)
-    path = se.Path(el.get("d") or "", transform=m)
+    path = se.Path(_element_d(el), transform=m)
     path = path.reified() if hasattr(path, "reified") else path
     out = []
     for sp in path.as_subpaths():
@@ -838,11 +877,35 @@ def _path_contours_mm(el, uu_per_mm: float, step_mm: float = 0.2) -> list[list[t
     return out
 
 
+def _filled_shapes(root, want):
+    """(element, fill) for every visible filled shape to digitize, in drawing order. A fill set by
+    a CSS class (design-program exports) counts; shapes in defs/clip paths/masks and hidden layers
+    don't; satins already planned are skipped."""
+    from cli_anything_inkstitch.svg.attrs import qname
+    from cli_anything_inkstitch.trace import shape_prep as sp
+
+    classes = sp.css_fills(root)
+    sat = qname("satin_column")
+    out = []
+    for el in root.iter(*[f"{{{SVG_NS}}}{t}" for t in _SHAPE_TAGS]):
+        if want is not None and el.get("id") not in want:
+            continue
+        if any(etree.QName(a).localname in _NOT_ART for a in el.iterancestors() if isinstance(a.tag, str)):
+            continue
+        fill = sp.element_fill(el, classes)
+        if (el.get(sat) or "").lower() == "true" or not fill or sp.hidden(el):
+            if want is not None:
+                raise UserError(f"{el.get('id')}: not a visible filled shape")
+            continue
+        out.append((el, fill))
+    return out
+
+
 @tools.command("shapes-to-satin")
 @click.option("--project", "project_path", type=click.Path())
 @click.option("--ids", default=None,
-              help="Comma-separated ids of filled paths to convert (default: every filled path "
-                   "that isn't already a satin).")
+              help="Comma-separated ids of filled shapes to convert (default: every visible filled "
+                   "shape that isn't already a satin).")
 @click.option("--fallback", type=click.Choice(["fill", "satin"]), default="fill", show_default=True,
               help="A shape whose plan fails its check: keep it as its fill, or use the failing "
                    "satin plan anyway.")
@@ -850,19 +913,34 @@ def _path_contours_mm(el, uu_per_mm: float, step_mm: float = 0.2) -> list[list[t
 @click.option("--route/--no-route", default=True, show_default=True,
               help="Route shapes whose planned order would leave travel on bare fabric through "
                    "the engine's auto_satin, as text-to-satin does for letters.")
+@click.option("--merge-colors-de", type=float, default=None,
+              help="Fills closer than this CIEDE2000 distance sew as one thread (default "
+                   f"{8.0:g}; 0 keeps every fill its own thread).")
+@click.option("--max-colors", type=int, default=None,
+              help="Also merge the closest threads until at most this many are left.")
+@click.option("--keep-order", is_flag=True,
+              help="Sew shapes in drawing order instead of one block per thread.")
+@click.option("--keep-duplicates", is_flag=True,
+              help="Digitize shapes hidden under an identical later shape too.")
 @click.pass_context
-def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route):
+def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route, merge_colors_de,
+                    max_colors, keep_order, keep_duplicates):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
     The planner that text-to-satin uses for letters, applied to any filled
-    outline (stitchpilot art_columns.plan_shape): each shape is cut into
-    strokes at its junctions, each stroke becomes a satin column with its
-    rails paired by construction, and the shape is checked against its
-    outline (bare area, overhang, overlap, crossed pairs). A shape that
-    fails stays a fill (--fallback fill). Each shape's columns replace the
-    path in place, keeping its colour and its place in the sewing order,
-    with a trim after each shape. Underlay, pull compensation and split
-    satin are chosen per column as for lettering.
+    outline: each shape is cut into strokes at its junctions, each stroke
+    becomes a satin column with its rails paired by construction, and the
+    shape is checked against its outline (bare area, overhang, overlap,
+    crossed pairs). A shape that fails stays a fill (--fallback fill).
+
+    Before planning, the art is cleaned the way a digitizer would
+    (trace/shape_prep.py): fills set by CSS classes are read, a shape hidden
+    under an identical later copy is dropped (exports often draw the art
+    twice), fills a few ΔE apart become one thread, and each thread sews as
+    one block wherever that doesn't change which shape lies on top. The
+    report lists every drop and merge. Each shape's columns carry its
+    thread colour, with a trim after each shape. Underlay, pull compensation
+    and split satin are chosen per column as for lettering.
     """
     from cli_anything_inkstitch.binary import installed_version
     from cli_anything_inkstitch.commands.params import _apply_params_to_element
@@ -870,11 +948,12 @@ def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route):
     from cli_anything_inkstitch.svg.attrs import INKSCAPE_NS, qname
     from cli_anything_inkstitch.svg.units import document_scale
     from cli_anything_inkstitch.trace import glyph_columns as gc
-    import re as _re
+    from cli_anything_inkstitch.trace import shape_prep as sp
 
     schema = load_schema(prefer_version=installed_version(
         ctx.obj.get("binary_override") if ctx.obj else None))
     want = {i.strip() for i in ids.split(",")} if ids else None
+    max_de = sp.MERGE_DE if merge_colors_de is None else merge_colors_de
     report, param_errors, to_route, groups = [], [], [], []
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
         if tree is None:
@@ -884,26 +963,36 @@ def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route):
         uu_per_mm = gc.PX_PER_MM / scale[0]
         tx = gc.make_transform(uu_per_mm, 0.0, 0.0)
         before_xml = etree.tostring(root).decode("utf-8")
-        sat = qname("satin_column")
-        targets = []
-        for el in root.iter(f"{{{SVG_NS}}}path"):
-            style = el.get("style") or ""
-            fill = _re.search(r"fill:\s*(#[0-9a-fA-F]{3,6})", style) or (
-                _re.match(r"#[0-9a-fA-F]{3,6}", el.get("fill") or "") and
-                _re.match(r"(#[0-9a-fA-F]{3,6})", el.get("fill")))
-            if want is not None and el.get("id") not in want:
-                continue
-            if (el.get(sat) or "").lower() == "true" or not fill:
-                if want is not None:
-                    raise UserError(f"{el.get('id')}: not a filled path")
-                continue
-            targets.append((el, fill.group(1)))
+        targets = _filled_shapes(root, want)
         if want is not None and len(targets) != len(want):
             missing = want - {el.get("id") for el, _ in targets}
-            raise UserError(f"no such filled path(s): {', '.join(sorted(missing))}")
-        planned = gc.plan_shapes([(el.get("id"), _path_contours_mm(el, uu_per_mm)) for el, _ in targets])
+            raise UserError(f"no such filled shape(s): {', '.join(sorted(missing))}")
+        for k, (el, _) in enumerate(targets):          # circles etc. from exports may have no id
+            if not el.get("id"):
+                el.set("id", f"shape{k}")
+        contours = [_path_contours_mm(el, uu_per_mm) for el, _ in targets]
+        duplicates = []
+        if not keep_duplicates:
+            keep, duplicates = sp.dedupe([(el.get("id"), c) for (el, _), c in zip(targets, contours)])
+            for i in sorted(set(range(len(targets))) - set(keep)):
+                targets[i][0].getparent().remove(targets[i][0])
+            targets = [targets[i] for i in keep]
+            contours = [contours[i] for i in keep]
+        polys = [sp.outline_polygon(c) for c in contours]
+        areas: dict[str, float] = {}
+        for (_, fill), poly in zip(targets, polys):
+            areas[fill] = areas.get(fill, 0.0) + (poly.area if poly is not None else 0.0)
+        threads = sp.merge_colors(areas, max_de=max_de, max_colors=max_colors) if areas else sp.ThreadPlan({})
+        thread_of = [threads.thread.get(fill, fill) for _, fill in targets]
+        if keep_order or len(targets) < 2:
+            order, order_splits = list(range(len(targets))), []
+        else:
+            order, order_splits = sp.thread_order(thread_of, polys)
+
+        planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)])
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
-        for (el, color), lt in zip(targets, planned):
+        made_groups = []
+        for (el, _fill), color, lt in zip(targets, thread_of, planned):
             parent = el.getparent()
             g = etree.Element(f"{{{SVG_NS}}}g")
             g.set("id", f"{el.get('id')}_sat")
@@ -911,7 +1000,10 @@ def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route):
             as_fill = (not lt.ok and fallback == "fill") or not lt.columns
             made = []
             if as_fill:
-                g.append(el.__copy__())
+                cp = el.__copy__()
+                style = (cp.get("style") or "").rstrip(";")
+                cp.set("style", (style + ";" if style else "") + f"fill:{color}")
+                g.append(cp)
                 made.append((g[-1], None, {}))
             else:
                 for k, c in enumerate(lt.columns):
@@ -920,6 +1012,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route):
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
                     made.append((p, "satin_column", _lettering_satin_params(c.widths(), pull_comp_mm)))
+            made_groups.append((g, as_fill, _ancestor_matrix(el)))
             parent.replace(el, g)
             for p, st, extra in made:
                 if st is None:
@@ -931,14 +1024,33 @@ def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route):
             ids_here = [p.get("id") for p, st, _ in made if st == "satin_column"]
             if route and len(ids_here) >= 2 and gc.exposed_travel_mm(lt) > gc.EXPOSED_TRAVEL_MM:
                 to_route.append(ids_here)
-            groups.append(g.get("id"))
             chk = lt.check or {}
-            report.append({"shape": lt.char, "group": g.get("id"),
+            report.append({"shape": lt.char, "group": g.get("id"), "thread": color,
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
                            **{k: chk[k] for k in ("sewable_bare_pct", "outside_pct", "overlap_mm2",
                                                   "crossed_pairs") if k in chk}})
+        if order != sorted(order):
+            # Sew by thread: the groups move, in the new order, into one container where the first
+            # of them was. Satin rails are written in the root frame (the planner applied every
+            # ancestor transform); a fill kept as fill is in its old parent's frame, so its group
+            # takes that parent chain's transform with it.
+            first = made_groups[0][0]
+            top = first
+            while top.getparent() is not None and top.getparent() is not root:
+                top = top.getparent()
+            box = etree.Element(f"{{{SVG_NS}}}g")
+            box.set("id", "shapes_by_thread")
+            box.set(f"{{{INKSCAPE_NS}}}label", "Shapes, sewn by thread")
+            top.addprevious(box)
+            for i in order:
+                g, as_fill, m = made_groups[i]
+                if as_fill and not m.is_identity():
+                    g.set("transform", f"matrix({m.a:g},{m.b:g},{m.c:g},{m.d:g},{m.e:g},{m.f:g})")
+                box.append(g)
+            report = [report[i] for i in order]
+        groups = [made_groups[i][0].get("id") for i in order]
         push(proj.history, make_entry(command="tools shapes-to-satin",
                                       patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
     for ids_here in to_route:
@@ -962,8 +1074,15 @@ def shapes_to_satin(ctx, project_path, ids, fallback, pull_comp_mm, route):
                     param_errors.append({"id": sewn[-1].get("id"), "error": str(exc)})
         push(proj.history, make_entry(command="tools shapes-to-satin (trims between shapes)",
                                       patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
+    sewn_threads = [r["thread"] for r in report]
+    blocks = [t for k, t in enumerate(sewn_threads) if k == 0 or t != sewn_threads[k - 1]]
     payload = {"shapes": report, "failed_plans": [r["shape"] for r in report if not r["plan_ok"]],
-               "routed_shapes": len(to_route)}
+               "routed_shapes": len(to_route),
+               "duplicates_dropped": duplicates,
+               "threads": sorted(set(sewn_threads)),
+               "color_merges": threads.merges,
+               "color_changes": max(0, len(blocks) - 1),
+               **({"thread_order_splits": order_splits} if order_splits else {})}
     if param_errors:
         payload["param_errors"] = param_errors
     emit(ctx, payload)
