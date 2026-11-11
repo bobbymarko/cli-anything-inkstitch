@@ -101,6 +101,48 @@ class TestLifecycle:
         assert "EventSource" in body          # SSE wiring present
 
 
+class TestRoot:
+    """`/` sends a person to the open session, so one bookmark works for every design."""
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    def _raw(self, server, path):
+        opener = urllib.request.build_opener(self._NoRedirect)
+        try:
+            with opener.open(_url(server, path), timeout=10) as r:
+                return r.status, dict(r.headers), r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read().decode("utf-8")
+
+    def test_no_session_says_so(self, server):
+        status, _, body = self._raw(server, "/")
+        assert status == 200 and "No open session" in body
+
+    def test_one_session_redirects(self, server, project):
+        opened = _open_session(server, project)
+        status, headers, _ = self._raw(server, "/")
+        assert status == 302
+        assert headers["Location"] == f"/session/{opened['key']}"
+
+    def test_ended_session_is_not_a_target(self, server, project):
+        opened = _open_session(server, project)
+        _post(server, f"/api/{opened['key']}/end")
+        status, _, body = self._raw(server, "/")
+        assert status == 200 and "No open session" in body
+
+    def test_several_sessions_listed(self, server, project, tmp_path):
+        other = tmp_path / "other" / "design.inkstitch-cli.json"
+        other.parent.mkdir()
+        other.write_text(json.dumps({"schema_version": 1, "svg_path": None}))
+        a = _open_session(server, project)
+        b = _open_session(server, str(other))
+        status, _, body = self._raw(server, "/")
+        assert status == 200
+        assert f"/session/{a['key']}" in body and f"/session/{b['key']}" in body
+
+
 class TestPollLoop:
     def test_immediate_drain(self, server, project):
         opened = _open_session(server, project)
