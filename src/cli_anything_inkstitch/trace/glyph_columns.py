@@ -276,7 +276,7 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
 
 
 def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
-                overrides: dict | None = None) -> list[PlannedLetter]:
+                overrides: dict | None = None, spread_turns_on: bool = True) -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
     outlines) as satin columns, one shape at a time: the planner's
     `art_columns.plan_shape`, the same planner that drove an all-satin client
@@ -292,7 +292,12 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
     the same check, with fewer hard seams and no more fans.
 
     overrides: label → {"split": "none" | [[x, y], ...] (cut the stroke there,
-    mm y up), "seam": [x, y] (where a ring starts)}; see apply_override.
+    mm y up), "seam": [x, y] (where a ring starts), "rungs": [[[x1, y1], [x2, y2]], ...]
+    (hand-placed rungs, mm y up: see place_rungs)}.
+
+    spread_turns_on: tilt the rungs into tight turns so the inner ends spread
+    along the inner curve instead of pinching at one point (spread_turns).
+    A shape with hand-placed rungs is left as placed.
     """
     import numpy as np
 
@@ -323,6 +328,10 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
                 planned = cut
         if ov.get("seam") is not None:
             planned = _move_ring_seam(planned, ov["seam"])
+        if ov.get("rungs"):
+            planned = place_rungs(planned, ov["rungs"])
+        elif spread_turns_on:
+            planned = spread_letter_turns(planned)
         out.append(planned)
     return out
 
@@ -333,7 +342,8 @@ def seam_report(planned: PlannedLetter) -> dict:
     cols = [list(zip(c.left, c.right)) for c in planned.columns]
     seams = cc.seams(cols, planned.contours, [c.closed for c in planned.columns])
     return {"hard_seams": sum(1 for x in seams if x["kind"] == "hard_seam"),
-            "fans": sum(len(cc.fans(c)) for c in cols), "seams": seams}
+            "fans": sum(len(cc.fans(c)) for c in cols), "turns": sum(len(cc.turns(c)) for c in cols),
+            "seams": seams}
 
 
 def _letter_from_pairs(ac, i, arrs, box, strokes, pair_lists, closed):
@@ -549,6 +559,200 @@ def outline_column(pairs, contours, on_mm: float = 0.15, step_mm: float = 1.0):
     out.append((tuple(pairs[-1][0]), tuple(pairs[-1][1])))
     out[0] = (tuple(pairs[0][0]), tuple(pairs[0][1]))
     return out
+
+
+# ---------------------------------------------------------------- tight turns
+
+# Where a column turns tightly, its inner rail is much shorter than its outer. The engine spreads a
+# stretch's stitches in proportion along each rail between two consecutive pairs, so if the planner
+# set a run of pairs whose inner ends sit within a millimetre while the outer ends sweep a whole
+# bowl, every stitch in that run starts from nearly one point: a pinch, thread piled on the inside
+# and gaps outside. A digitizer instead tilts the rungs into the turn. The inner ends start the turn
+# earlier and finish it later, spread evenly along the inner curve, and short stitches thin the
+# inside. spread_turns does the tilting.
+TURN_RATIO = 0.25        # a span whose shorter rail moves less than this share of the longer one
+TURN_MIN_MM = 0.2        # ...ignored if the longer rail moves less than this
+TURN_MAX_TILT_DEG = 55.0  # a rung may lean this far from square to the column, no further
+
+
+def _cum(points):
+    out = [0.0]
+    for a, b in zip(points, points[1:]):
+        out.append(out[-1] + math.dist(a, b))
+    return out
+
+
+def _span_ratios(sL, sR):
+    """Per span: (shorter rail's move / longer rail's move, longer move)."""
+    out = []
+    for k in range(len(sL) - 1):
+        a, b = sL[k + 1] - sL[k], sR[k + 1] - sR[k]
+        lo, hi = min(a, b), max(a, b)
+        out.append((lo / hi if hi > 1e-9 else 1.0, hi))
+    return out
+
+
+def _max_tilt_deg(pairs) -> float:
+    """How far the column's rungs lean from square to its centreline, worst case."""
+    mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in pairs]
+    worst = 0.0
+    for k in range(1, len(pairs) - 1):
+        tx, ty = mids[k + 1][0] - mids[k - 1][0], mids[k + 1][1] - mids[k - 1][1]
+        rx, ry = pairs[k][1][0] - pairs[k][0][0], pairs[k][1][1] - pairs[k][0][1]
+        tn, rn = math.hypot(tx, ty), math.hypot(rx, ry)
+        if tn < 1e-9 or rn < 1e-9:
+            continue
+        # a square rung is perpendicular to the centreline: |cos| between them is 0
+        c = abs(tx * rx + ty * ry) / (tn * rn)
+        worst = max(worst, math.degrees(math.asin(min(1.0, c))))
+    return worst
+
+
+def spread_turns(pairs, ratio: float = TURN_RATIO, max_tilt_deg: float = TURN_MAX_TILT_DEG):
+    """A column's pairs with the inner ends of tight turns spread along the inner rail.
+
+    Each run of spans where one rail barely moves (shorter/longer below `ratio`) is widened a pair at
+    a time, and inside it both rails' pair positions are made even (the converged result of smoothing
+    them). The run grows until every span in it reaches `ratio` or a rung would lean more than
+    max_tilt_deg; the last widening that kept the tilt is used. Rails are the column's own (the
+    polylines through its pairs, which follow the outline), so the outline is unchanged; the end
+    pairs (the column's cuts) never move. Returns (pairs, changed)."""
+    from shapely.geometry import LineString
+
+    n = len(pairs)
+    if n < 5:
+        return pairs, False
+    Lp, Rp = [tuple(p[0]) for p in pairs], [tuple(p[1]) for p in pairs]
+    sL, sR = _cum(Lp), _cum(Rp)
+    if sL[-1] < 1e-6 or sR[-1] < 1e-6:
+        return pairs, False
+    rL, rR = LineString(Lp), LineString(Rp)
+    bad = [k for k, (r, hi) in enumerate(_span_ratios(sL, sR)) if r < ratio and hi >= TURN_MIN_MM]
+    if not bad:
+        return pairs, False
+    # group the bad spans into runs (spans k..j means pairs k..j+1)
+    runs = []
+    for k in bad:
+        if runs and k <= runs[-1][1] + 2:
+            runs[-1][1] = k
+        else:
+            runs.append([k, k])
+    base_tilt = _max_tilt_deg(pairs)
+    tilt_cap = max(max_tilt_deg, base_tilt)   # never refuse a run because the plan already leaned
+    nL, nR = list(sL), list(sR)
+    changed = False
+    for a, b in runs:
+        best = None
+        lo, hi = a, b + 1                      # pair indices whose neighbours anchor the run
+        while True:
+            lo, hi = max(1, lo - 1), min(n - 2, hi + 1)
+            tL, tR = list(nL), list(nR)
+            for s, t in ((sL, tL), (sR, tR)):
+                x0, x1 = s[lo - 1], s[hi + 1]
+                m = hi + 1 - (lo - 1)
+                for q in range(lo, hi + 1):
+                    t[q] = x0 + (x1 - x0) * (q - (lo - 1)) / m
+            cand = [(rL.interpolate(tL[q]).coords[0], rR.interpolate(tR[q]).coords[0]) for q in range(n)]
+            cand[0], cand[-1] = pairs[0], pairs[-1]
+            seg = cand[max(0, lo - 2):min(n, hi + 3)]
+            if _max_tilt_deg(seg) > tilt_cap:
+                break
+            best = (tL, tR)
+            worst = min(r for r, h in _span_ratios(tL[lo - 1:hi + 2], tR[lo - 1:hi + 2]))
+            if worst >= ratio or (lo == 1 and hi == n - 2):
+                break
+        if best is not None:
+            nL, nR = best
+            changed = True
+    if not changed:
+        return pairs, False
+    out = [(tuple(map(float, rL.interpolate(nL[q]).coords[0])), tuple(map(float, rR.interpolate(nR[q]).coords[0])))
+           for q in range(n)]
+    out[0], out[-1] = (tuple(pairs[0][0]), tuple(pairs[0][1])), (tuple(pairs[-1][0]), tuple(pairs[-1][1]))
+    return out, True
+
+
+def _crossed(pairs) -> int:
+    """Consecutive rungs that cross each other (a twist the engine would sew as a bow-tie)."""
+    from shapely.geometry import LineString
+
+    return sum(1 for p, q in zip(pairs, pairs[1:])
+               if LineString(p).crosses(LineString(q)))
+
+
+def spread_letter_turns(planned: PlannedLetter, ratio: float = TURN_RATIO) -> PlannedLetter:
+    """spread_turns on every open column of a planned shape; a column keeps its new pairs only if no
+    rungs cross and it has no more fans than before. Lists the changed columns in check["spread_turns"]."""
+    from cli_anything_inkstitch.trace import column_checks as cc
+
+    done = []
+    for k, c in enumerate(planned.columns):
+        if c.closed:
+            continue
+        pairs = list(zip(c.left, c.right))
+        new, changed = spread_turns(pairs, ratio)
+        if not changed or _crossed(new) > _crossed(pairs) or len(cc.fans(new)) > len(cc.fans(pairs)):
+            continue
+        c.left, c.right = [p[0] for p in new], [p[1] for p in new]
+        done.append(k)
+    if done:
+        planned.check["spread_turns"] = done
+    return planned
+
+
+def place_rungs(planned: PlannedLetter, rungs, step_mm: float = 1.0) -> PlannedLetter:
+    """Override: hand-placed rungs. Each rung is a segment ((x1, y1), (x2, y2)) in mm, y up, across one
+    column. The column's pairs are rebuilt with those rungs as anchors (its end pairs kept), and between
+    anchors pairs follow both rails in proportion every ~step_mm. A rung that doesn't cross both rails
+    of a column is ignored (listed in check["rungs_ignored"])."""
+    from shapely.geometry import LineString, Point
+
+    ignored, used = [], 0
+    for c in planned.columns:
+        if c.closed or len(c.left) < 2:
+            continue
+        rL, rR = LineString(c.left), LineString(c.right)
+        sL0, sL1 = 0.0, rL.length
+        sR0, sR1 = 0.0, rR.length
+        anchors = []
+        for seg in rungs:
+            (x1, y1), (x2, y2) = seg
+            dx, dy = x2 - x1, y2 - y1
+            line = LineString([(x1 - 0.15 * dx, y1 - 0.15 * dy), (x2 + 0.15 * dx, y2 + 0.15 * dy)])
+            hits = []
+            for rail in (rL, rR):
+                x = line.intersection(rail)
+                pts = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "Point" and not g.is_empty]
+                if not pts:
+                    break
+                mid = Point((x1 + x2) / 2, (y1 + y2) / 2)
+                hits.append(rail.project(min(pts, key=lambda p: p.distance(mid))))
+            if len(hits) == 2 and sL0 < hits[0] < sL1 and sR0 < hits[1] < sR1:
+                anchors.append(tuple(hits))
+        if not anchors:
+            continue
+        anchors.sort()
+        keep = [(sL0, sR0)]
+        for a in anchors:                       # drop any rung that would cross the previous one
+            if a[0] > keep[-1][0] and a[1] > keep[-1][1]:
+                keep.append(a)
+        keep.append((sL1, sR1))
+        used += len(keep) - 2
+        out = []
+        for (a0, b0), (a1, b1) in zip(keep, keep[1:]):
+            m = max(1, int(round(max(a1 - a0, b1 - b0) / step_mm)))
+            for q in range(m):
+                t = q / m
+                out.append((rL.interpolate(a0 + (a1 - a0) * t).coords[0], rR.interpolate(b0 + (b1 - b0) * t).coords[0]))
+        out.append((c.left[-1], c.right[-1]))
+        out[0] = (c.left[0], c.right[0])
+        c.left = [tuple(map(float, p[0])) for p in out]
+        c.right = [tuple(map(float, p[1])) for p in out]
+    planned.check["rungs_placed"] = used
+    ignored = len(rungs) - used
+    if ignored:
+        planned.check["rungs_ignored"] = ignored
+    return planned
 
 
 def _split_at(i, arrs, sc, label, points):

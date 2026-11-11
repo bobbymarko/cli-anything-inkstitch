@@ -78,6 +78,10 @@ def column_flags(columns_by_shape: dict, to_mm, outlines: dict | None = None) ->
             for f in cc.fans(pairs):
                 out.append({"kind": "fan", "shape": shape, "column": cid, "at_mm": list(f["at"]),
                             "detail": f"short rail {f['short_mm']} mm against {f['long_mm']} mm"})
+            for f in cc.turns(pairs):
+                out.append({"kind": "turn", "shape": shape, "column": cid, "at_mm": list(f["at"]),
+                            "detail": f"tight turn, inner rail {f['short_mm']} mm against {f['long_mm']} mm "
+                                      "(not a defect: short stitches thin the inside; look at it)"})
         for s in cc.seams(mm_cols, contours, [c for _, _, c in cols]):
             if s["kind"] == "corner_join":
                 continue
@@ -117,7 +121,7 @@ def stitch_flags(blocks, to_mm, nearest_shape, warn: float = 20.0) -> tuple[list
     return flags, totals
 
 
-KIND_COLOR = {"fan": "#ff9800", "hard_seam": "#ff1744", "ring_seam": "#40c4ff",
+KIND_COLOR = {"fan": "#ff9800", "hard_seam": "#ff1744", "ring_seam": "#40c4ff", "turn": "#80cbc4",
               "density": "#e040fb", "long_stitch": "#ffee58"}
 
 
