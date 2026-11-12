@@ -91,3 +91,18 @@ def test_same_plan_as_the_original_package():
         assert a.ok == b.ok and len(a.letter.columns) == len(b.letter.columns)
         for ca, cb in zip(a.letter.columns, b.letter.columns):
             assert np.allclose(np.asarray(ca.pairs, float), np.asarray(cb.pairs, float))
+
+
+def test_clipped_foot_keeps_its_level_end():
+    """A slanted leg cut level on the baseline and the cap line ends on a pair along the cut. On a
+    short cut (0.78 mm) that pair was under trim_tips' 0.4 mm, so it was dropped and the column ended
+    on the square rung, its foot standing ~10 deg off the line with the outer corner bare."""
+    from cli_anything_inkstitch.planner import art_columns as ac, columns as col
+    leg = [np.array([(0, 0), (0.77, 0), (1.9, 5.83), (1.13, 5.83)], float) * (5.87 / 5.83)]
+    box = (0, 0, 1.9 * 5.87 / 5.83, 5.87)
+    st = col.Stroke(path=[(0.385 / 1.9, 0.0), (1.515 / 1.9, 1.0)], smooth=False, closed=False,
+                    start_cut="horizontal", end_cut="horizontal")
+    c = ac.trim_tips(col.stroke_column(st, leg, box, 0.4, tuck=True))
+    for (a, b) in (c.pairs[0], c.pairs[-1]):
+        assert abs(a[1] - b[1]) < 0.03, (a, b)          # level, on the line
+        assert math.dist(a, b) >= ac.MIN_TIP_MM
