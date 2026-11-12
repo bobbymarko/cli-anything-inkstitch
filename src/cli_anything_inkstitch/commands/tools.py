@@ -824,23 +824,46 @@ def _schema_known(schema, stitch_type: str, params: dict, skipped: set) -> dict:
     return out
 
 
+def shape_band_width_mm(columns) -> float | None:
+    """One representative width for a shape's columns, for the shape-level underlay-band choice.
+
+    The median of each column's median width. Returns None when no column has width (so the
+    caller falls back to per-column widths). Deciding the underlay band from this, rather than
+    each column's own width, keeps the band consistent across one shape: two near-identical stems
+    (e.g. an H's legs at 2.01 and 1.92 mm) straddling a FABRICS width threshold would otherwise get
+    different underlay. The split-satin decision stays per column (a wide column snags regardless
+    of its neighbours)."""
+    import statistics
+
+    meds = [sorted(w)[len(w) // 2] for w in (c.widths() for c in columns) if w]
+    return statistics.median(meds) if meds else None
+
+
 def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None = None,
-                            fabric: str = "standard") -> dict:
+                            fabric: str = "standard", band_width_mm: float | None = None) -> dict:
     """Satin params for one planned column, from its median width and the fabric preset.
 
     Underlay by width (FABRICS): a centre walk below center_below_mm, an edge
-    walk (contour) above it, edge walk plus zigzag from zigzag_from_mm.
-    Columns wider than SPLIT_SATIN_MM get the engine's split satin
-    (max_stitch_length_mm), because one long stitch snags. pull_comp_mm
-    overrides the preset's. Every name here is checked against the mined
-    schema by _apply_params_to_element (readers: lib/elements/satin_column.py
-    zigzag_spacing_mm, pull_compensation_mm, center_walk_underlay,
-    contour_underlay, zigzag_underlay, max_stitch_length_mm).
+    walk (contour) above it, edge walk plus zigzag from zigzag_from_mm. The
+    centre-walk-vs-contour band is chosen from band_width_mm when given (a
+    shape-level representative width, so every column of one shape agrees on
+    that band; see shape_band_width_mm), else from this column's own median
+    width. The zigzag reinforcement stays per column: it is an add-on for a
+    genuinely wide column, so a shape of mixed widths doesn't zigzag its
+    medium columns just because its representative width is wide. Columns
+    wider than SPLIT_SATIN_MM get the engine's split satin
+    (max_stitch_length_mm), because one long stitch snags, and that too stays
+    a per-column decision. pull_comp_mm overrides the preset's. Every name
+    here is checked against the mined schema by _apply_params_to_element
+    (readers: lib/elements/satin_column.py zigzag_spacing_mm,
+    pull_compensation_mm, center_walk_underlay, contour_underlay,
+    zigzag_underlay, max_stitch_length_mm).
     """
     from cli_anything_inkstitch.trace.glyph_columns import SPLIT_SATIN_MM
 
     f = FABRICS[fabric]
     w = sorted(widths_mm)[len(widths_mm) // 2] if widths_mm else 0.0
+    bw = w if band_width_mm is None else band_width_mm   # the centre/contour band width
     pc = f["pull_comp_mm"] if pull_comp_mm is None else pull_comp_mm
     p = {"pull_compensation_mm": f"{pc:g}"}
     if f["spacing_mm"] is not None:
@@ -848,7 +871,7 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
     if f.get("short_inset") is not None:
         p["short_stitch_inset"] = f["short_inset"]
         p["short_stitch_distance_mm"] = f"{f['short_dist_mm']:g}"
-    if w < f["center_below_mm"]:
+    if bw < f["center_below_mm"]:
         p["center_walk_underlay"] = "true"
     else:
         p["contour_underlay"] = "true"
@@ -1221,13 +1244,14 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
             else:
                 hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
                     if travel == "trim" else set()
+                band_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole shape
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"{el.get('id')}_c{k}")
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
                     extra = _schema_known(schema, "satin_column",
-                                          _lettering_satin_params(c.widths(), pull_comp_mm, fabric), skipped)
+                                          _lettering_satin_params(c.widths(), pull_comp_mm, fabric, band_w), skipped)
                     extra.update(_override_params(spec, True))
                     if k in hops:            # reader: lib/elements/element.py trim_after
                         extra["trim_after"] = "true"
@@ -1547,12 +1571,13 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                     p.set("style", f"fill:{color};stroke:none")
                     made.append((p, "auto_fill", {}))
             else:
+                band_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole glyph
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"text{n}_l{li}_c{k}")
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
-                    extra = (_lettering_satin_params(c.widths(), pull_comp_mm)
+                    extra = (_lettering_satin_params(c.widths(), pull_comp_mm, band_width_mm=band_w)
                              if auto_params else {})
                     made.append((p, "satin_column", extra))
             for p, st, extra in made:
