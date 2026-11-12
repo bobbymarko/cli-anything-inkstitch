@@ -42,6 +42,15 @@ EDGE_INSET_MM = 0.15     # the outline is shrunk this much before measuring bare
 MAX_EXTEND_MM = 4.0
 EXTEND_STEP_MM = 0.25
 
+# Snapping a near-straight rail to an exact vertical or horizontal line. Source art often draws
+# a stem with a slight taper or hand wobble (a few hundredths of a mm over its length); that reads
+# as "not vertical" and sews a visibly tilted edge. This extends autostrokes' CUT_SNAP_DEG (which
+# already squares nearly-axis-aligned cuts) to the rails themselves, at a much tighter tolerance so
+# a genuinely slanted or italic stem is left alone.
+SNAP_ANGLE_DEG = 1.5     # a rail whose end-to-end run is within this of an axis is a candidate
+SNAP_MAX_DEV_MM = 0.12   # ...but only if no point strays this far from its chord (it is near-straight)
+SNAP_MIN_LEN_MM = 3.0    # too short a rail can't be judged near-axis; left alone
+
 
 def _poly(c):
     from shapely.geometry import Polygon
@@ -608,10 +617,53 @@ def straighten_tips(planned, bare_tol: float = 0.3):
     return planned
 
 
+def snap_rails(planned):
+    """Snap each near-straight, near-axis rail to an exact vertical or horizontal line.
+
+    Per open column, per rail: if the rail's end-to-end chord runs within SNAP_ANGLE_DEG of an
+    axis and no point strays more than SNAP_MAX_DEV_MM from that chord (so the rail is already
+    near-straight), every point's off-axis coordinate is set to the rail's mean, making the sewn
+    edge exactly vertical or horizontal. The left and right rails snap independently, so a column
+    that genuinely tapers keeps its taper in width; the tight tolerances leave a real slant or
+    italic stem untouched (its points stray well past SNAP_MAX_DEV_MM, or its run is too far off an
+    axis). Rings (closed columns) are skipped. Returns the number of rails snapped."""
+    import math
+
+    snapped = 0
+    for c in planned.columns:
+        if getattr(c, "closed", False) or len(c.left) < 2:
+            continue
+        for side in ("left", "right"):
+            pts = list(getattr(c, side))
+            (x0, y0), (x1, y1) = pts[0], pts[-1]
+            length = math.hypot(x1 - x0, y1 - y0)
+            if length < SNAP_MIN_LEN_MM:
+                continue
+            dev = max(abs((x1 - x0) * (y0 - py) - (x0 - px) * (y1 - y0)) / length
+                      for px, py in pts)
+            if dev > SNAP_MAX_DEV_MM:
+                continue
+            ang = math.degrees(math.atan2(abs(y1 - y0), abs(x1 - x0)))
+            if ang > 90 - SNAP_ANGLE_DEG:          # near vertical: one x for the whole rail
+                mx = sum(p[0] for p in pts) / len(pts)
+                setattr(c, side, [(mx, p[1]) for p in pts])
+                snapped += 1
+            elif ang < SNAP_ANGLE_DEG:             # near horizontal: one y
+                my = sum(p[1] for p in pts) / len(pts)
+                setattr(c, side, [(p[0], my) for p in pts])
+                snapped += 1
+    return snapped
+
+
 def tidy_joins(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPTH_MM):
     """trim_overlaps then close_wedges, on one planned shape."""
     if not planned.ok or not planned.columns:
         return planned
+    # Square near-axis rails first, so the overlap/wedge geometry below works on the exact edges
+    # the shape will sew (and re-checks its no-bare/no-crossed invariants over them).
+    snapped = snap_rails(planned)
+    if snapped:
+        planned.check["rails_snapped"] = snapped + planned.check.get("rails_snapped", 0)
     planned = trim_overlaps(planned, keep_mm, max_depth_mm)
     planned = straighten_tips(planned)
     planned = close_wedges(planned, keep_mm)
