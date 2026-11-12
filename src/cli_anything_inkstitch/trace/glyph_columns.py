@@ -332,16 +332,22 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
                 planned = cut
         if ov.get("seam") is not None:
             planned = _move_ring_seam(planned, ov["seam"])
+        do_ease = False
         if ov.get("rungs"):
             planned = place_rungs(planned, ov["rungs"])
         elif spread_turns_on:
             planned = spread_letter_turns(planned)
+            do_ease = True
         if tidy_joins_on:
             # Run even on a rungs-override shape: tidy_joins works on where the shape's own
             # columns MEET (overlaps/wedges), which is orthogonal to interior rung placement,
             # and place_rungs has already run above. Skipping it left override shapes un-tidied.
             from cli_anything_inkstitch.trace.joins import tidy_joins
             planned = tidy_joins(planned)
+        if do_ease:
+            # After tidy_joins, so the ease works on the final end cuts (a junction end may have been
+            # trimmed/snapped) and nothing undoes it. A hand-placed-rungs shape is left as placed.
+            planned = ease_letter_ends(planned)
         out.append(planned)
     return out
 
@@ -797,6 +803,142 @@ def spread_letter_turns(planned: PlannedLetter, ratio: float = TURN_RATIO) -> Pl
         done.append(k)
     if done:
         planned.check["spread_turns"] = done
+    return planned
+
+
+# ---------------------------------------------------------------- slanted / pointed ends
+
+# Where a column's end is cut on a slant or runs to a point (a V's tip, a diagonal leg tucked into a
+# stem, a mitred corner), the end pair sits at the cut's angle while the column's interior rungs are
+# square to the spine. Left to the engine, the rungs turn from square to the cut angle in the last
+# couple of millimetres, so the stitches fan/pinch at the tip. A digitizer eases that turn in over a
+# longer run. This is spread_turns' idea applied at the ends: smoothstep the rung angle from the end
+# cut's angle at the tip to the column's own angle L mm in (StrokeStyles maps this to easing toward
+# the stroke-end/L straight-transition direction; the paper gives the target angle, the easing is
+# empirical). The end cut itself (the end pair) is not moved, so the outline and any junction trim
+# are unchanged.
+END_EASE_MM = 15.0        # ease a slanted end over about this far...
+END_EASE_POINT_MM = 10.0  # ...a bit less into a near-pointed end
+END_POINT_WIDTH_MM = 1.0  # an end narrower than this reads as a point
+END_EASE_STEP_MM = 0.7
+END_EASE_MIN_TILT_DEG = 20.0  # only ease an end whose cut leans at least this far from square
+END_EASE_SPINE_FRAC = 0.6     # never ease more than this share of the column's length
+
+
+def _rung_angle(pair) -> float:
+    (lx, ly), (rx, ry) = pair
+    return math.atan2(ry - ly, rx - lx)
+
+
+def ease_end(pairs, ease_mm: float = END_EASE_MM, point_mm: float = END_EASE_POINT_MM,
+             step_mm: float = END_EASE_STEP_MM):
+    """Re-pair the near end (index 0) so the rung angle eases from the end cut's angle at the tip to
+    the column's own angle `ease_mm` (or `point_mm` for a pointed end) in, by a smoothstep. Rungs are
+    cast across the column's own rails, so the outline is unchanged; the end pair (the cut) and every
+    pair beyond the eased run are kept. Returns new pairs, or None when the end is already near-square
+    or the column is too short/odd to ease."""
+    import numpy as np
+    from shapely.geometry import LineString, Point
+
+    if len(pairs) < 5:
+        return None
+    L = [tuple(map(float, p[0])) for p in pairs]
+    R = [tuple(map(float, p[1])) for p in pairs]
+    rL, rR = LineString(L), LineString(R)
+    mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(L, R)]
+    s = [0.0]
+    for a, b in zip(mids, mids[1:]):
+        s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    total = s[-1]
+    if total < 3 * step_mm:
+        return None
+    end_width = math.dist(L[0], R[0])
+    want = point_mm if end_width < END_POINT_WIDTH_MM else ease_mm
+    span = min(want, total * END_EASE_SPINE_FRAC)
+    if span < 2 * step_mm:
+        return None
+    k = next((i for i, v in enumerate(s) if v >= span), len(s) - 1)
+    if k < 2:
+        return None
+    a0 = _rung_angle((L[0], R[0]))          # the end cut's angle
+    a1 = _rung_angle((L[k], R[k]))          # the column's own angle, span mm in
+    da = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi
+    if abs(da) < math.radians(END_EASE_MIN_TILT_DEG):
+        return None                          # already near-square: nothing to ease
+    cl = LineString(mids)
+    sk = s[k]
+    new = [(L[0], R[0])]                      # keep the cut
+    t = step_mm
+    while t < sk - 1e-9:
+        u = t / sk
+        w = u * u * (3 - 2 * u)               # smoothstep: 0 at the tip, 1 at span
+        a = a1 - da * (1 - w)                 # cut angle at the tip -> square angle at span
+        d = (math.cos(a), math.sin(a))
+        cp = cl.interpolate(t).coords[0]
+        big = LineString([(cp[0] - 30 * d[0], cp[1] - 30 * d[1]),
+                          (cp[0] + 30 * d[0], cp[1] + 30 * d[1])])
+        hits = []
+        for rail in (rL, rR):
+            x = big.intersection(rail)
+            pts = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "Point" and not g.is_empty]
+            if not pts:
+                break
+            hits.append(min(pts, key=lambda g: g.distance(Point(cp))).coords[0])
+        if len(hits) == 2:
+            new.append((hits[0], hits[1]))
+        t += step_mm
+    new += [(L[i], R[i]) for i in range(k, len(pairs))]
+    if len(new) < 3:
+        return None
+    return [((float(a[0]), float(a[1])), (float(b[0]), float(b[1]))) for a, b in new]
+
+
+def _head_turn_tilt(pairs, within_mm: float = 3.0) -> float:
+    """Worst rung-to-rung angle step (deg) within `within_mm` of the head (index 0): how sharply the
+    rungs turn as they approach that cut. The defect ease_end spreads out. Measured on the head alone
+    so easing one end is judged by that end only (the caller orients the end being eased to index 0)."""
+    if len(pairs) < 3:
+        return 0.0
+    mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in pairs]
+    s = [0.0]
+    for a, b in zip(mids, mids[1:]):
+        s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    worst = 0.0
+    for i in range(len(pairs) - 1):
+        if s[i] > within_mm:
+            break
+        da = (_rung_angle(pairs[i + 1]) - _rung_angle(pairs[i]) + math.pi) % (2 * math.pi) - math.pi
+        worst = max(worst, abs(math.degrees(da)))
+    return worst
+
+
+def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM) -> PlannedLetter:
+    """Ease the rung angle into every open column's slanted or pointed ends (ease_end), one end at a
+    time. An end's new pairs are kept only if they leave no more crossings and no more fans than
+    before and actually reduce how sharply the rungs turn into that end. Rails (the outline) are never
+    moved. Lists the changed columns in check["eased_ends"]."""
+    from cli_anything_inkstitch.trace import column_checks as cc
+
+    done = []
+    for k, c in enumerate(planned.columns):
+        if c.closed:
+            continue
+        for end in (0, -1):
+            pairs = list(zip(c.left, c.right))
+            work = pairs if end == 0 else pairs[::-1]       # the end being eased is now index 0
+            eased_head = ease_end(work, ease_mm)
+            if eased_head is None:
+                continue
+            if (_head_turn_tilt(eased_head) >= _head_turn_tilt(work)
+                    or _crossed(eased_head) > _crossed(work)
+                    or len(cc.fans(eased_head)) > len(cc.fans(work))):
+                continue
+            eased = eased_head if end == 0 else eased_head[::-1]
+            c.left, c.right = [p[0] for p in eased], [p[1] for p in eased]
+            if k not in done:
+                done.append(k)
+    if done:
+        planned.check["eased_ends"] = done
     return planned
 
 
