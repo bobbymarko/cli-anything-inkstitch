@@ -271,6 +271,43 @@ def _mid_inside(c, end, poly, margin):
     return poly.buffer(-margin).contains(Point(m))
 
 
+# Two satin columns that converge at a sharp, acute inner point (a V's tip, an M's middle, a
+# diagonal running into a stem at a pinch) are a special junction: there is no way to trim the
+# overlap without either leaving a bare notch short of the point (cut each leg back) or a bare
+# vertical seam (cut to the dividing line). The design — and ES's digitising — instead fills the
+# point by letting the two legs overlap and interleave right to the tip, accepting the small thread
+# build-up at the point as the cost of covering it. So at an acute inner-V, don't trim the overlap;
+# let it fill. This is scoped tightly (an acute angle AND the two tips nearly touching) so ordinary
+# overlaps elsewhere — a T's arm in a bar, a crossing — are trimmed as before and the bare guard
+# still protects them.
+V_ACUTE_DEG = 75.0       # the two legs open by less than this at the convergence: a sharp inner V
+V_TIP_GAP_MM = 2.5       # ...and their nearest ends are within this of each other (they converge)
+
+
+def _acute_v(a, b) -> bool:
+    """True if columns a and b converge at an acute inner-V point (fill to the point, don't trim)."""
+    import numpy as np
+
+    if a.closed or b.closed or len(a.left) < 2 or len(b.left) < 2:
+        return False
+
+    def mid(c, e):
+        return np.array([(c.left[e][0] + c.right[e][0]) / 2, (c.left[e][1] + c.right[e][1]) / 2])
+
+    gap, ea, eb = min(((float(np.hypot(*(mid(a, ia) - mid(b, ib)))), ia, ib)
+                       for ia in (0, -1) for ib in (0, -1)), key=lambda t: t[0])
+    if gap > V_TIP_GAP_MM:
+        return False                                   # the tips don't converge: not a V
+    apex = (mid(a, ea) + mid(b, eb)) / 2
+    da = mid(a, -1 if ea == 0 else 0) - apex           # each leg's direction, away from the apex
+    db = mid(b, -1 if eb == 0 else 0) - apex
+    na, nb = np.hypot(*da), np.hypot(*db)
+    if na < 1e-6 or nb < 1e-6:
+        return False
+    ang = float(np.degrees(np.arccos(np.clip(da @ db / (na * nb), -1.0, 1.0))))
+    return ang < V_ACUTE_DEG
+
+
 def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPTH_MM):
     """See the module docstring. Lists the trims in check["joins_trimmed"]."""
     outline = _outline(planned.contours)
@@ -278,6 +315,7 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
     if outline is None or len(cols) < 2:
         return planned
     done = []
+    acute_fills = []
     for _ in range(3):
         changed = False
         for i in range(len(cols)):
@@ -288,6 +326,13 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
                 pa, pb = _poly(a), _poly(b)
                 x = pa.intersection(pb)
                 if x.area < MIN_OVERLAP_MM2 or _depth(x) <= max_depth_mm:
+                    continue
+                if _acute_v(a, b):
+                    # a sharp inner V (an M's middle, a diagonal into a stem at a pinch): fill the
+                    # point, don't trim it back to a notch or a seam. See _acute_v.
+                    _dbg(planned.char, "acute-V fill", i, j, round(x.area, 2))
+                    if [i, j] not in acute_fills:
+                        acute_fills.append([i, j])
                     continue
                 base_bare = _bare(outline, cols)
                 _dbg(planned.char, "overlap", i, j, round(x.area, 2), "depth", round(_depth(x), 2), "bare", round(base_bare, 2))
@@ -344,6 +389,8 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
             break
     if done:
         planned.check["joins_trimmed"] = done
+    if acute_fills:
+        planned.check["acute_v_fills"] = acute_fills
     return planned
 
 

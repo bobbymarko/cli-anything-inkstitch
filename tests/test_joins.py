@@ -270,3 +270,52 @@ class TestSnapRails:
         c.closed = True
         pl = _letter([(10, 0), (12, 0), (12.3, 6), (10.03, 6)], [c])
         assert joins.snap_rails(pl) == 0
+
+
+def _leg(tip, top, w=1.0, n=11):
+    """A straight satin column of half-width w from `tip` to `top` (mm, y up)."""
+    tip, top = np.array(tip, float), np.array(top, float)
+    d = (top - tip) / np.hypot(*(top - tip)); perp = np.array([-d[1], d[0]])
+    L = [tuple(tip + (top - tip) * k / (n - 1) + perp * w) for k in range(n)]
+    R = [tuple(tip + (top - tip) * k / (n - 1) - perp * w) for k in range(n)]
+    return joins.PlannedColumn(left=L, right=R) if hasattr(joins, "PlannedColumn") else _col(L, R)
+
+
+def _v_letter(a, b):
+    from shapely.ops import unary_union
+    uni = unary_union([joins._poly(a), joins._poly(b)])
+    return _letter(list(uni.exterior.coords), [a, b])
+
+
+class TestAcuteVFill:
+    """A sharp inner-V (two columns converging at an acute point) fills to the point rather than
+    being trimmed to a notch or a seam — the ES-matching treatment."""
+
+    def test_acute_v_is_detected(self):
+        a, b = _leg((0, 0), (-4, 10)), _leg((0, 0), (4, 10))     # ~33 deg apart: a sharp V
+        assert joins._acute_v(a, b) is True
+
+    def test_wide_corner_is_not_an_acute_v(self):
+        a, b = _leg((0, 0), (-8.66, 5)), _leg((0, 0), (8.66, 5))  # 120 deg: a wide corner, not a V
+        assert joins._acute_v(a, b) is False
+
+    def test_butt_junction_is_not_an_acute_v(self):
+        pl = _tee()                                              # an arm meeting a bar at 90 deg
+        assert joins._acute_v(pl.columns[0], pl.columns[1]) is False
+
+    def test_acute_v_overlap_is_filled_not_trimmed(self):
+        a, b = _leg((0, 0), (-4, 10)), _leg((0, 0), (4, 10))
+        before = _overlap(a, b).area
+        assert joins._depth(_overlap(a, b)) > joins.MAX_DEPTH_MM   # deep enough that trim would fire
+        pl = _v_letter(a, b)
+        joins.trim_overlaps(pl)
+        assert pl.check.get("acute_v_fills") == [[0, 1]]          # recognised and left to fill
+        assert "joins_trimmed" not in pl.check                    # not trimmed
+        after = joins._poly(pl.columns[0]).intersection(joins._poly(pl.columns[1])).area
+        assert after == pytest.approx(before, abs=1e-6)           # the overlap is preserved
+
+    def test_wide_corner_overlap_is_not_marked_acute(self):
+        a, b = _leg((0, 0), (-8.66, 5)), _leg((0, 0), (8.66, 5))
+        pl = _v_letter(a, b)
+        joins.trim_overlaps(pl)
+        assert "acute_v_fills" not in pl.check                    # a wide corner is handled normally
