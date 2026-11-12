@@ -585,6 +585,7 @@ CLIP_RAIL_LOOSE = 0.6        # ...or one of them, the other within this share of
 CLIP_LINE_MM = 0.1           # ...on the baseline or cap height: within this of the letter's bottom or top
 CLIP_SQUARE_MM = 0.7         # square rungs down to this width; then the last pair along the cut line,
 CLIP_TIP_MM = 0.45           # ...this long, to the far corner
+CLIP_TIP_GAP_MM = 0.05       # ...ending at least this short of where the last square rung meets the cut
 CLIP_APEX = 0.5              # an end within this share of its width of another stroke is an apex: left as is
 CLIP_ON_EDGE_MM = 0.12       # a free end's cut lies along the outline: its rung's middle is this close to it
 
@@ -749,7 +750,15 @@ def _clip_ends(pairs: list, left: np.ndarray, right: np.ndarray, ends: list[str]
         if last is None:
             continue
         along = (far - near) / (np.hypot(*(far - near)) or 1)
-        tip = far - along * min(CLIP_TIP_MM, 0.5 * float(np.hypot(*(far - near))))
+        # The tip pair is CLIP_TIP_MM long, or half the cut on a short one, but never shorter than the
+        # stretch of cut the square rungs leave bare allows: art_columns.trim_tips drops end pairs under
+        # 0.4 mm as satin points, and dropping this one ended the column on the square rung. A 5.87 mm
+        # Futura Condensed A's left foot (0.78 mm cut, 0.39 mm tip) then stood 9.8 deg off the baseline
+        # with its outer corner bare.
+        cut_len = float(np.hypot(*(far - near)))
+        last_on_cut = np.asarray(last[0] if near_left else last[1], float)
+        room = float(np.hypot(*(far - last_on_cut))) - CLIP_TIP_GAP_MM
+        tip = far - along * max(min(CLIP_TIP_MM, 0.5 * cut_len), min(CLIP_TIP_MM, room))
         final = (tuple(tip), tuple(far)) if near_left else (tuple(far), tuple(tip))
         tail = [first, last, final]
         if boundary is not None:
