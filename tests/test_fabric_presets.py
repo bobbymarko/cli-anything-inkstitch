@@ -76,3 +76,43 @@ class TestEngineReadsThePreset:
     def test_fleece_sews_more_than_twill(self, tmp_path):
         # a 3.5 mm column: twill = edge walk, fleece = edge walk + zigzag at tighter spacing
         assert self._stitches(tmp_path, "fleece") > self._stitches(tmp_path, "twill") * 1.1
+
+
+class TestUnderlayPerShape:
+    """The underlay band is decided once per shape, so near-identical columns straddling a width
+    threshold (an H's two legs at 2.01 and 1.92 mm) don't get different underlay."""
+
+    @staticmethod
+    def _leg(width):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn
+        return PlannedColumn(left=[(0.0, 0.0), (0.0, 10.0)], right=[(width, 0.0), (width, 10.0)])
+
+    def test_representative_width_is_median_of_column_medians(self):
+        from cli_anything_inkstitch.commands.tools import shape_band_width_mm
+        assert shape_band_width_mm([self._leg(2.01), self._leg(1.92)]) == pytest.approx(1.965)
+        assert shape_band_width_mm([]) is None
+
+    def test_straddling_legs_share_one_band(self):
+        from cli_anything_inkstitch.commands.tools import _lettering_satin_params, shape_band_width_mm
+        legs = [self._leg(2.01), self._leg(1.92)]
+        # per column (no band width) the legs flip across the 2.0 mm twill threshold
+        assert _underlay(_lettering_satin_params([2.01], None, "twill")) == ["contour_underlay"]
+        assert _underlay(_lettering_satin_params([1.92], None, "twill")) == ["center_walk_underlay"]
+        # with the shape band width both legs agree (median 1.965 < 2.0 -> centre walk)
+        bw = shape_band_width_mm(legs)
+        assert _underlay(_lettering_satin_params([2.01], None, "twill", bw)) == ["center_walk_underlay"]
+        assert _underlay(_lettering_satin_params([1.92], None, "twill", bw)) == ["center_walk_underlay"]
+
+    def test_zigzag_stays_per_column_on_a_mixed_width_shape(self):
+        # a shape with a wide column (6.8 mm) and a medium one (3.3 mm): the medium column must not
+        # pick up zigzag underlay just because the shape's representative width is wide.
+        from cli_anything_inkstitch.commands.tools import _lettering_satin_params, shape_band_width_mm
+        cols = [self._leg(6.8), self._leg(3.3)]
+        bw = shape_band_width_mm(cols)            # median of medians = 5.05 (wide)
+        assert _underlay(_lettering_satin_params([3.3], None, "twill", bw)) == ["contour_underlay"]
+        assert _underlay(_lettering_satin_params([6.8], None, "twill", bw)) == ["contour_underlay", "zigzag_underlay"]
+
+    def test_split_satin_stays_per_column(self):
+        from cli_anything_inkstitch.commands.tools import _lettering_satin_params
+        # a wide column still splits even when the shape band width is thin
+        assert _lettering_satin_params([8.0], None, "twill", band_width_mm=1.0)["max_stitch_length_mm"] == "7"
