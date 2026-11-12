@@ -276,7 +276,8 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
 
 
 def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
-                overrides: dict | None = None, spread_turns_on: bool = True) -> list[PlannedLetter]:
+                overrides: dict | None = None, spread_turns_on: bool = True,
+                tidy_joins_on: bool = True) -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
     outlines) as satin columns, one shape at a time: the planner's
     `art_columns.plan_shape`, the same planner that drove an all-satin client
@@ -298,6 +299,9 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
     spread_turns_on: tilt the rungs into tight turns so the inner ends spread
     along the inner curve instead of pinching at one point (spread_turns).
     A shape with hand-placed rungs is left as placed.
+
+    tidy_joins_on: where columns meet, trim overlaps deeper than about 1 mm back to a 0.4 mm
+    overlap, and close bare wedges at junctions (trace/joins.py).
     """
     import numpy as np
 
@@ -332,6 +336,9 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
             planned = place_rungs(planned, ov["rungs"])
         elif spread_turns_on:
             planned = spread_letter_turns(planned)
+        if tidy_joins_on and not ov.get("rungs"):
+            from cli_anything_inkstitch.trace.joins import tidy_joins
+            planned = tidy_joins(planned)
         out.append(planned)
     return out
 
@@ -440,6 +447,17 @@ def _join_seamed_strokes(i, arrs, sc, planned: PlannedLetter, force: bool = Fals
     for g in joined_idx:
         if g < len(pairs):
             ring = outline_column(pairs[g], [c.tolist() for c in arrs]) if len(arrs) == 1 else None
+            if ring:
+                # outline_column pairs the two outline arcs in proportion between sparse anchors; where
+                # the arcs' lengths differ (after an S's bowl) the rungs lean ~30 deg on the straight
+                # spine. Re-pair square to the middle; spread_turns then leans only the tight turns.
+                med = medial_rungs(ring)
+                if med:
+                    spread, _ = spread_turns(med)
+                    if _crossed(spread) <= _crossed(med):
+                        med = spread
+                    if _crossed(med) <= _crossed(ring):
+                        ring = med
             pairs[g] = ring or follow_outline(pairs[g], [c.tolist() for c in arrs])
     lt2 = _letter_from_pairs(ac, i, arrs, sc2.letter.box, strokes, pairs, [bool(c.closed) for c in sc2.letter.columns])
     check = ac.flat_check(lt2)
@@ -558,6 +576,85 @@ def outline_column(pairs, contours, on_mm: float = 0.15, step_mm: float = 1.0):
             out.append(((pl.x, pl.y), (pr.x, pr.y)))
     out.append((tuple(pairs[-1][0]), tuple(pairs[-1][1])))
     out[0] = (tuple(pairs[0][0]), tuple(pairs[0][1]))
+    return out
+
+
+def medial_rungs(pairs, step_mm: float = 0.8, smooth_mm: float = 1.5):
+    """Re-pair a column so every rung is square to its middle line: the middle is traced from the
+    left rail to the nearest point of the right, smoothed over smooth_mm and resampled every step_mm;
+    at each sample the line along the normal is cut by both rails. Samples whose hits don't move on
+    along both rails (the inside of a tight turn) are dropped, so the turn keeps sparse pairs for
+    spread_turns to tilt. End pairs are kept as planned. None if fewer than 3 pairs come out."""
+    import numpy as np
+    from shapely.geometry import LineString, Point
+
+    if len(pairs) < 3:
+        return None
+    left = [tuple(map(float, p[0])) for p in pairs]
+    right = [tuple(map(float, p[1])) for p in pairs]
+    Lr, Rr = LineString(left), LineString(right)
+    if Lr.length < 2 * step_mm or Rr.length < 2 * step_mm:
+        return None
+    mids = []
+    for t in np.arange(0, Lr.length + 1e-9, 0.25):
+        pl = Lr.interpolate(t)
+        pr = Rr.interpolate(Rr.project(pl))
+        mids.append(((pl.x + pr.x) / 2, (pl.y + pr.y) / 2))
+    mids = np.asarray(mids)
+    s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(mids, axis=0).T))])
+    keep = np.concatenate([[True], np.diff(s) > 1e-6])
+    mids, s = mids[keep], s[keep]
+    if len(mids) < 3:
+        return None
+    sm = np.empty_like(mids)
+    for i in range(len(mids)):
+        w = np.abs(s - s[i]) <= smooth_mm
+        sm[i] = mids[w].mean(axis=0)
+    ss = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(sm, axis=0).T))])
+    if ss[-1] < 2 * step_mm:
+        return None
+    t = np.arange(step_mm, ss[-1] - step_mm / 2, step_mm)
+    mx, my = np.interp(t, ss, sm[:, 0]), np.interp(t, ss, sm[:, 1])
+    width = max(float(np.hypot(*np.subtract(a, b))) for a, b in zip(left, right))
+    out_pos = [(0.0, 0.0)]
+    for i in range(len(t)):
+        a = max(0, i - 1)
+        b = min(len(t) - 1, i + 1)
+        tg = np.array([mx[b] - mx[a], my[b] - my[a]])
+        n = np.hypot(*tg)
+        if n == 0:
+            continue
+        nr = np.array([-tg[1], tg[0]]) / n
+        m = np.array([mx[i], my[i]])
+        line = LineString([tuple(m - nr * 2 * width), tuple(m + nr * 2 * width)])
+        hits = []
+        for rail in (Lr, Rr):
+            x = line.intersection(rail)
+            pts = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "Point" and not g.is_empty]
+            if not pts:
+                break
+            hits.append(rail.project(min(pts, key=lambda g: g.distance(Point(m)))))
+        if len(hits) != 2:
+            continue
+        sl, sr = hits
+        if sl > out_pos[-1][0] + 0.05 and sr > out_pos[-1][1] + 0.05 and sl < Lr.length - 0.05 and sr < Rr.length - 0.05:
+            out_pos.append((sl, sr))
+    if len(out_pos) < 3:
+        return None
+    out_pos.append((Lr.length, Rr.length))
+    # Where samples were dropped (inside a tight turn) one rail has a long gap: the engine would sew
+    # its chord and cut the outline's corner. Fill it with pairs in proportion, as between anchors.
+    dense = [out_pos[0]]
+    for (a0, b0), (a1, b1) in zip(out_pos, out_pos[1:]):
+        m = int(np.ceil(max(a1 - a0, b1 - b0) / step_mm))
+        for k in range(1, m):
+            dense.append((a0 + (a1 - a0) * k / m, b0 + (b1 - b0) * k / m))
+        dense.append((a1, b1))
+    out = [(left[0], right[0])]
+    for sl, sr in dense[1:-1]:
+        pl, pr = Lr.interpolate(sl), Rr.interpolate(sr)
+        out.append(((pl.x, pl.y), (pr.x, pr.y)))
+    out.append((left[-1], right[-1]))
     return out
 
 

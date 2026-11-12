@@ -1080,6 +1080,10 @@ def _doc_mm_frame(root, uu_per_mm):
 @click.option("--spread-turns/--no-spread-turns", default=True, show_default=True,
               help="Tilt the rungs into tight turns so the inner ends spread along the inner curve "
                    "instead of pinching at one point (the inside of an S's bowl).")
+@click.option("--tidy-joins/--no-tidy-joins", default=True, show_default=True,
+              help="Where columns meet: trim overlaps deeper than ~1 mm back to a 0.4 mm overlap (an arm's "
+                   "end sewn across its bar, a strand behind a crossing jutting out), and close bare "
+                   "wedges at junctions by running the nearest end on into its neighbour.")
 @click.option("--merge-colors-de", type=float, default=None,
               help="Fills closer than this CIEDE2000 distance sew as one thread (default "
                    f"{8.0:g}; 0 keeps every fill its own thread).")
@@ -1100,7 +1104,8 @@ def _doc_mm_frame(root, uu_per_mm):
                    "this JSON-lines file, a fixture for planner tests (default: next to the project).")
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
-                    spread_turns, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path, cases_path):
+                    spread_turns, tidy_joins, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
+                    cases_path):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
     The planner that text-to-satin uses for letters, applied to any filled
@@ -1188,7 +1193,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
             if ov:
                 plan_ov[el.get("id")] = ov
         planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)],
-                                 one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns)
+                                 one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns,
+                                 tidy_joins_on=tidy_joins)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         made_groups, cases = [], []
         for (el, _fill), color, lt, spec, gh in zip(targets, thread_of, planned, spec_of, hashes):
@@ -1252,6 +1258,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                            "hard_seams": sr["hard_seams"], "fans": sr["fans"],
                            **({"joined_strokes": chk["joined_strokes"]} if chk.get("joined_strokes") else {}),
                            **({"spread_turns": chk["spread_turns"]} if chk.get("spread_turns") else {}),
+                           **({"joins_trimmed": len(chk["joins_trimmed"])} if chk.get("joins_trimmed") else {}),
+                           **({"wedges_closed": len(chk["wedges_closed"])} if chk.get("wedges_closed") else {}),
                            **({"rungs_placed": chk["rungs_placed"]} if "rungs_placed" in chk else {}),
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
