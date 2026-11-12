@@ -221,3 +221,52 @@ def test_medial_rungs_square_on_the_spine():
     # spread_turns tilts only the bowl: the spine stays square
     spread, _ = spread_turns(pairs)
     assert _spine_dev(spread) < 3
+
+
+class TestSnapRails:
+    """snap_rails squares a near-straight, near-axis rail; it leaves a real slant alone.
+
+    The companion rail in each case is a clear slant so only the rail under test can snap.
+    """
+
+    def test_near_vertical_rail_snapped_to_one_x(self):
+        # a 6 mm stem whose left rail drifts 0.05 mm over its length (a source-art taper/wobble)
+        left = [(10.00, 0), (10.02, 2), (10.03, 4), (10.05, 6)]
+        right = [(12.0, 0), (12.3, 2), (12.6, 4), (12.9, 6)]   # an 8-degree slant: untouched
+        pl = _letter([(10, 0), (12.9, 6), (10.05, 6)], [_col(left, right)])
+        assert joins.snap_rails(pl) == 1
+        xs = {round(p[0], 6) for p in pl.columns[0].left}
+        assert len(xs) == 1                                   # the left rail is exactly vertical now
+        assert abs(next(iter(xs)) - 10.025) < 0.02            # at the rail's mean x
+        assert pl.columns[0].right == right                   # the slant is left alone
+
+    def test_near_horizontal_rail_snapped_to_one_y(self):
+        top = [(0, 6.0), (5, 6.03), (10, 6.05)]
+        bot = [(0, 4.0), (5, 4.3), (10, 4.6)]                 # a slant: untouched
+        pl = _letter([(0, 4), (10, 4.6), (10, 6.05), (0, 6)], [_col(top, bot)])
+        assert joins.snap_rails(pl) == 1
+        ys = {round(p[1], 6) for p in pl.columns[0].left}
+        assert len(ys) == 1
+
+    def test_genuine_slant_left_alone(self):
+        # a 20-degree italic stem: straight, but well off vertical -> both rails untouched
+        import math as _m
+        dx = _m.tan(_m.radians(20))
+        left = [(0, 0), (dx * 2, 2), (dx * 4, 4), (dx * 6, 6)]
+        right = [(2, 0), (2 + dx * 2, 2), (2 + dx * 4, 4), (2 + dx * 6, 6)]
+        pl = _letter([(0, 0), (2, 0), (2 + dx * 6, 6), (dx * 6, 6)], [_col(left, right)])
+        assert joins.snap_rails(pl) == 0
+        assert pl.columns[0].left[0][0] != pl.columns[0].left[-1][0]
+
+    def test_curved_rail_left_alone(self):
+        # near-vertical end-to-end but each rail bows ~0.4 mm in the middle -> not near-straight
+        left = [(10, 0), (10.4, 3), (10, 6)]
+        right = [(12, 0), (12.4, 3), (12, 6)]
+        pl = _letter([(10, 0), (12, 0), (12, 6), (10, 6)], [_col(left, right)])
+        assert joins.snap_rails(pl) == 0
+
+    def test_ring_skipped(self):
+        c = _col([(10, 0), (10.03, 6)], [(12, 0), (12.3, 6)])
+        c.closed = True
+        pl = _letter([(10, 0), (12, 0), (12.3, 6), (10.03, 6)], [c])
+        assert joins.snap_rails(pl) == 0
