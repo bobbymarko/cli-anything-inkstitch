@@ -1,7 +1,7 @@
 ---
 name: "chroma-rde-import"
 description: >-
-  Convert a Melco/Chroma .rde design file into an Ink/Stitch-editable SVG, so it can be resized, re-parameterized, previewed and re-exported. Use whenever a .rde file appears — "convert this Chroma file", "open this .rde in Ink/Stitch", "resize this embroidery design", "preview this design" — or when reviewing/changing tools/rde_to_inkstitch.py. Covers running the converter, what it decides and why (fill vs satin vs run, counters, row spacing, trims), the verification protocol that catches its silent failure modes, its known limits, and the corpus regression harness. The format is undocumented and reverse-engineered, so its constants are measurements, not defaults to be tuned.
+  Convert a Melco/Chroma .rde design file into an Ink/Stitch-editable SVG, so it can be resized, re-parameterized, previewed and re-exported. Use whenever a .rde file appears — "convert this Chroma file", "open this .rde in Ink/Stitch", "resize this embroidery design", "preview this design" — or when reviewing/changing tools/rde_to_odi.py, tools/rde_to_inkstitch.py or the ODI writer. Covers running the converter, what it decides and why (fill vs satin vs run, counters, row spacing, trims), the verification protocol that catches its silent failure modes, its known limits, and the corpus regression harness. The format is undocumented and reverse-engineered, so its constants are measurements, not defaults to be tuned.
 ---
 
 # Chroma .rde → Ink/Stitch SVG
@@ -16,6 +16,13 @@ sew-out, while elements are re-stitched by the engine at whatever size you pick.
 python3 tools/rde_to_inkstitch.py design.rde design.svg
 #   satin columns: 0  fills: 43  runs: 0  trims: 40
 ```
+
+Internally this is `.rde -> ODI -> SVG`: `tools/rde_to_odi.py design.rde
+design.odi.json` writes the intermediate (an object-level JSON IR, every value
+tagged decoded / measured / defaulted; see `docs/odi.md`), and
+`python -m cli_anything_inkstitch.odi to-svg design.odi.json design.svg` writes
+the same SVG the one-step command does. The decisions below live in
+`rde_to_odi.py`; the SVG markup lives in `odi/inkstitch_writer.py`.
 
 Output is a px-unit SVG (viewBox = width/height at 96 dpi, so engine tools need
 no correction transform), one Inkscape layer per thread named from the file's

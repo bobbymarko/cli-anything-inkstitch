@@ -73,7 +73,16 @@ stitch counts, and our own unit tests. The engine source is checked out at
    (`lib/stitches/auto_run.py autorun`) and re-routes travel, doubling the
    design; `tools auto-run` strips them (`_strip_stale_underpaths`).
 
-## Chroma .rde conversion (`tools/rde_to_inkstitch.py`)
+## Chroma .rde conversion (`tools/rde_to_odi.py` -> ODI -> `tools/rde_to_inkstitch.py`)
+
+The converter is two steps: `rde_to_odi.py` decodes the file into an ODI
+document (`src/cli_anything_inkstitch/odi/`, spec in `docs/odi.md`), and
+`odi.write_inkstitch` turns that into SVG. All decisions (and the tuned
+constants below) live in the first; all `inkstitch:*` markup, with its
+engine-reader citations, lives in the second. The step boundary is lossless:
+a design saved as `.odi.json` and written later produces byte-identical SVG.
+Every value in the ODI keeps its provenance (decoded / measured / defaulted):
+never tag a measured value as decoded.
 
 Same discipline, different source of truth. The converter reads a proprietary
 format that no spec exists for, so its facts are **mined from the 127-design
@@ -150,6 +159,10 @@ src/cli_anything_inkstitch/
         files.py            # file discovery, filename→character parsing, DST/SVG unit constants
         analysis.py         # baseline detection, exit-advance detection, stitch→SVG paths
         bx.py               # Embrilliance BX binary parsing + descender thresholds
+    odi/                    # ODI (Open Digitizing Interchange) draft 0.1: dataclass model + JSON
+                            # load/save (model.py), validation (validate.py), SVG path helpers
+                            # (paths.py), ODI -> Ink/Stitch SVG writer (inkstitch_writer.py).
+                            # `python -m cli_anything_inkstitch.odi validate|to-svg`
     font_format/            # Pure logic: Ink/Stitch font directory format (no Click)
         svg_build.py        # →.svg building/loading/saving, guides, path x-range helpers
         metadata.py         # font.json load/save/defaults
