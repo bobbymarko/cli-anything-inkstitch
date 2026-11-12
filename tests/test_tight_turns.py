@@ -166,3 +166,48 @@ class TestFabricShortStitches:
         from cli_anything_inkstitch.commands.tools import _lettering_satin_params
         p = _lettering_satin_params([3.0], fabric="standard")
         assert "short_stitch_inset" not in p and "short_stitch_distance_mm" not in p
+
+
+def _slanted_end_bar(theta_deg=40.0, length=20.0, w=1.0, n=21):
+    """A straight bar up +y, width 2w, whose y=0 end is cut on a slant of theta_deg (the end pair
+    leans that far from square); the rest of the pairs are square. Left to the engine the rungs turn
+    the whole slant in the first segment: the pinch ease_end spreads out."""
+    import math
+    t = math.tan(math.radians(theta_deg))
+    pairs = [((-w, -w * t), (w, w * t))]                     # the slanted cut
+    for i in range(1, n):
+        y = length * i / (n - 1)
+        pairs.append(((-w, y), (w, y)))                      # square above the cut
+    return pairs
+
+
+class TestEaseEnds:
+    def test_slanted_end_tilt_is_spread_out(self):
+        from cli_anything_inkstitch.trace import glyph_columns as gc
+        pairs = _slanted_end_bar()
+        before = gc._head_turn_tilt(pairs)
+        eased = gc.ease_end(pairs)
+        assert eased is not None
+        after = gc._head_turn_tilt(eased)
+        assert after < before - 10                           # the turn is eased, not abrupt
+        assert gc._crossed(eased) == 0                       # no twisted rungs
+        assert eased[0] == pairs[0]                          # the end cut itself is not moved
+        assert eased[-1] == pairs[-1]
+
+    def test_square_end_is_left_alone(self):
+        from cli_anything_inkstitch.trace import glyph_columns as gc
+        square = [((-1.0, float(i)), (1.0, float(i))) for i in range(21)]
+        assert gc.ease_end(square) is None                   # nothing to ease on a square end
+
+    def test_letter_ends_keeps_only_improving_ends(self):
+        from cli_anything_inkstitch.trace import column_checks as cc
+        from cli_anything_inkstitch.trace import glyph_columns as gc
+        pairs = _slanted_end_bar()
+        c = gc.PlannedColumn(left=[p[0] for p in pairs], right=[p[1] for p in pairs])
+        pl = gc.PlannedLetter("t", [c], [[(-1, -1), (1, 1), (1, 20), (-1, 20)]], True, {})
+        before_fans = len(cc.fans(list(zip(c.left, c.right))))
+        gc.ease_letter_ends(pl)
+        new = list(zip(pl.columns[0].left, pl.columns[0].right))
+        assert pl.check.get("eased_ends") == [0]
+        assert len(cc.fans(new)) <= before_fans
+        assert gc._crossed(new) == 0
