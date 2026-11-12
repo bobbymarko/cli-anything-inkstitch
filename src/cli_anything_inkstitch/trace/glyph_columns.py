@@ -336,7 +336,10 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
             planned = place_rungs(planned, ov["rungs"])
         elif spread_turns_on:
             planned = spread_letter_turns(planned)
-        if tidy_joins_on and not ov.get("rungs"):
+        if tidy_joins_on:
+            # Run even on a rungs-override shape: tidy_joins works on where the shape's own
+            # columns MEET (overlaps/wedges), which is orthogonal to interior rung placement,
+            # and place_rungs has already run above. Skipping it left override shapes un-tidied.
             from cli_anything_inkstitch.trace.joins import tidy_joins
             planned = tidy_joins(planned)
         out.append(planned)
