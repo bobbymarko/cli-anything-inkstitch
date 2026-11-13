@@ -165,11 +165,17 @@ def plan_shape(index: int, contours: list[np.ndarray], strokes: list[col.Stroke]
     size = max(box[2] - box[0], box[3] - box[1])
     spacing = min(MAX_SPACING_MM, max(MIN_SPACING_MM, SPACING_FRACTION * size))
     try:
-        strokes = strokes or letter_strokes(contours, size, overlap_feet=True)
+        junctions: list = []
+        strokes = strokes or letter_strokes(contours, size, overlap_feet=True, junctions_out=junctions)
         cols = [trim_tips(c) for c in col.letter_columns(strokes, contours, box, spacing,
                                                           seam_overlap=SEAM_OVERLAP_MM)]
         lt = col.Letter(str(index), cols, contours, box, strokes)
         check = col.check_letter(lt, 100.0, FLAT_OUTSIDE_PCT)
+        # The medial-axis junction reading (type per junction) and the concavities, carried forward
+        # for the tidy/element stage so it need not re-derive junctions from the finished polygons.
+        if junctions:
+            check["junctions"] = [j for pc in junctions for j in pc["junctions"]]
+            check["concavities"] = [list(p) for pc in junctions for p in pc["concavities"]]
         # Coverage counts only the part satin can sew: tips and slivers narrower than MIN_TIP_MM are
         # left bare on purpose (trim_tips), so they're taken out of the shape before measuring.
         from shapely.ops import unary_union
