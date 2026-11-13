@@ -42,9 +42,17 @@ def formats(ctx):
 @click.option("--format", "fmt", required=True)
 @click.option("--out", required=True, type=click.Path())
 @click.option("--id", "ids", multiple=True)
+@click.option("--require-gate", is_flag=True,
+              help="Run the engine-stitch gate first and refuse to export if it "
+                   "reports errors (e.g. a satin column sewn in two passes).")
 @click.pass_context
-def file_cmd(ctx, project_path, fmt, out, ids):
+def file_cmd(ctx, project_path, fmt, out, ids, require_gate):
     out = require_absolute(out, "out")
+    if require_gate:
+        from cli_anything_inkstitch.artifact.gate import require_gate as _require
+        from cli_anything_inkstitch.commands._helpers import get_project_path
+        _require(get_project_path(ctx, project_path),
+                 engine_binary=ctx.obj.get("binary_override"))
     with open_project(ctx, project_path) as (proj, _tree):
         binary = require(ctx.obj.get("binary_override"), proj.session)
         stdout = run_extension(binary, "output", proj.svg_path,
