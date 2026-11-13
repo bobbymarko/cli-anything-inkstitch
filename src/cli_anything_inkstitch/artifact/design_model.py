@@ -927,6 +927,149 @@ def apply_history_step(project_file: str, *, redo: bool = False) -> dict[str, An
                 "cursor": proj.history["cursor"]}
 
 
+# -- entry/exit routing for the editor overlay -----------------------------------
+
+_SHAPE_TAGS = ("path", "rect", "circle", "ellipse", "line", "polygon", "polyline")
+
+
+def _uu_per_mm(root) -> float:
+    """User units per millimetre for the document: viewBox width over the mm
+    width attr. Falls back to CSS px (96/25.4) when the width is unitless or
+    absent, so travel thresholds stay in real millimetres."""
+    vb = (root.get("viewBox") or "").replace(",", " ").split()
+    m = re.match(r"^\s*([\d.]+)\s*mm\s*$", root.get("width") or "")
+    if len(vb) == 4 and m:
+        try:
+            width_mm = float(m.group(1))
+            if width_mm > 0:
+                return float(vb[2]) / width_mm
+        except ValueError:
+            pass
+    return 96.0 / 25.4
+
+
+def _shape_id_for(elem) -> str:
+    """The id of the group a column belongs to (its logical shape), so the
+    editor can tell whether every column of one shape sews as a single run.
+    A satin's immediate parent <g> is its shape group (the planner writes each
+    shape as a `shapeNN_sat` group of columns); with no such group the element
+    stands alone and is its own shape."""
+    parent = elem.getparent()
+    if (parent is not None and isinstance(parent.tag, str)
+            and etree.QName(parent.tag).localname == "g" and parent.get("id")):
+        return parent.get("id")
+    return elem.get("id")
+
+
+def route_plan(project_file: str) -> dict[str, Any]:
+    """Entry/exit points for every satin column, in sewing order, for the
+    editor's Entry/Exit overlay.
+
+    Each column reports where its stitching starts (`entry`) and ends (`exit`)
+    in design user coordinates -- the same space as /preview and the canvas, so
+    the client overlays them directly -- plus which shape group it belongs to
+    and whether the travel into it from the previous column crosses bare fabric
+    (`is_jump_before`). The entry/exit decision and the bare-fabric test are the
+    engine's start_at_nearest_point sew-walk, shared with the trim model
+    (trace.glyph_columns.route_walk / glyph_polygon), so these markers match
+    what auto-route and the exposed-travel checks see. Read-only.
+
+    Columns are walked in document order (element order IS stitch order). The
+    covered area is the union of every satin band plus any fill shape, so travel
+    that stays under thread is not flagged. `exposed` and the threshold are in
+    millimetres. Without the geometry libraries (shapely), entry/exit still come
+    back; no travel is classified as a jump.
+    """
+    from cli_anything_inkstitch.artifact.gate import flatten_path
+    from cli_anything_inkstitch.svg.elements import classify
+    from cli_anything_inkstitch.svg.geometry import apply_matrix, ctm_for
+    from cli_anything_inkstitch.trace.glyph_columns import (
+        EXPOSED_TRAVEL_MM,
+        column_ends,
+        route_walk,
+    )
+
+    with _open_locked(project_file) as (proj, tree):
+        root = tree.getroot()
+        uu_per_mm = _uu_per_mm(root)
+        columns: list[dict[str, Any]] = []
+        fill_rings: list[list[tuple[float, float]]] = []
+        for elem in root.iter():
+            if not isinstance(elem.tag, str):
+                continue
+            if etree.QName(elem.tag).localname not in _SHAPE_TAGS:
+                continue
+            if _is_command_use(elem) or _is_command_plumbing(elem) or not elem.get("id"):
+                continue
+            d = elem.get("d")
+            if not d:
+                continue
+            stitch_type = classify(elem)
+            kind = _kind_of(elem, stitch_type)
+            ctm = ctm_for(elem)
+            root_pts = lambda pts: [apply_matrix(ctm, x, y) for x, y in pts]
+            if kind == "satin":
+                subs = split_subpaths(d)
+                if len(subs) < 2:
+                    continue
+                left = root_pts(flatten_path(subs[0]))
+                right = root_pts(flatten_path(subs[1]))
+                if len(left) < 2 or len(right) < 2:
+                    continue
+                columns.append({
+                    "element_id": elem.get("id"),
+                    "shape_id": _shape_id_for(elem),
+                    "ends": column_ends(left, right),
+                    "band": left + right[::-1],
+                })
+            elif kind == "fill":
+                for sub in split_subpaths(d):
+                    ring = root_pts(flatten_path(sub))
+                    if len(ring) >= 3:
+                        fill_rings.append(ring)
+
+    covered = None
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        polys = []
+        for c in columns:
+            band = c["band"]
+            if len(band) >= 3:
+                p = Polygon(band)
+                polys.append(p if p.is_valid else p.buffer(0))
+        for ring in fill_rings:
+            p = Polygon(ring)
+            polys.append(p if p.is_valid else p.buffer(0))
+        if polys:
+            covered = unary_union(polys).buffer(0.05 * uu_per_mm)
+    except Exception:  # noqa: BLE001 — without geometry libs, show dots, flag no jumps
+        covered = None
+
+    ends = [c["ends"] for c in columns]
+    records = route_walk(ends, covered)
+    threshold_uu = EXPOSED_TRAVEL_MM * uu_per_mm
+    rnd = lambda p: [round(p[0], 3), round(p[1], 3)]
+    out = []
+    for col, rec in zip(columns, records):
+        exposed_mm = rec["exposed"] / uu_per_mm if uu_per_mm else 0.0
+        out.append({
+            "order": rec["order"],
+            "shape_id": col["shape_id"],
+            "element_id": col["element_id"],
+            "entry": rnd(rec["entry"]),
+            "exit": rnd(rec["exit"]),
+            "is_jump_before": rec["exposed"] > threshold_uu,
+            "exposed_mm": round(exposed_mm, 3),
+        })
+    return {
+        "columns": out,
+        "viewBox": root.get("viewBox"),
+        "uu_per_mm": uu_per_mm,
+        "exposed_threshold_mm": EXPOSED_TRAVEL_MM,
+    }
+
+
 # -- stitch sequence for the editor timeline -------------------------------------
 
 _STROKE_RE = re.compile(r"stroke:\s*([^;]+)")

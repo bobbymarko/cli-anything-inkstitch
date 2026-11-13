@@ -10,6 +10,7 @@ from cli_anything_inkstitch.artifact.design_model import (
     apply_edits,
     ensure_prepped,
     read_design,
+    route_plan,
     split_subpaths,
     stitch_plan_svg,
 )
@@ -211,6 +212,83 @@ class TestStitchPlan:
     def test_stitch_plan_svg_renders(self, project):
         svg = stitch_plan_svg(project)
         assert b"<svg" in svg or b"<?xml" in svg
+
+
+# Two shape groups: shape_a has two satin columns stacked so they sew as one
+# continuous run; shape_b is one column far across bare fabric (a jump). Each
+# satin is two rails (M railA M railB) -- route_plan reads the rail ends. No
+# client fixtures: a synthetic construction with known coordinates.
+ROUTE_SVG = """<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:inkstitch="http://inkstitch.org/namespace"
+     width="40mm" height="30mm" viewBox="0 0 40 30">
+  <metadata><inkstitch_svg_version>3</inkstitch_svg_version></metadata>
+  <g id="shape_a">
+    <path id="a0" fill="none" stroke="#000" inkstitch:satin_column="True"
+          d="M2,2 L2,12 M4,2 L4,12"/>
+    <path id="a1" fill="none" stroke="#000" inkstitch:satin_column="True"
+          d="M2,12 L2,22 M4,12 L4,22"/>
+  </g>
+  <g id="shape_b">
+    <path id="b0" fill="none" stroke="#000" inkstitch:satin_column="True"
+          d="M30,2 L30,12 M32,2 L32,12"/>
+  </g>
+</svg>
+"""
+
+
+@pytest.fixture
+def route_project(tmp_path):
+    svg = tmp_path / "route.svg"
+    svg.write_text(ROUTE_SVG)
+    proj_path = tmp_path / "route.inkstitch-cli.json"
+    proj, _ = ProjectFile.load_or_create(str(proj_path))
+    proj.svg_path = str(svg)
+    proj.svg_sha256 = sha256_of(svg)
+    proj.save()
+    return str(proj_path)
+
+
+class TestRoutePlan:
+    """Entry/exit points per satin column for the editor's Entry/Exit overlay.
+    The entry/exit decision IS the trim model's start_at_nearest_point walk."""
+
+    def test_one_record_per_satin_in_document_order(self, route_project):
+        cols = route_plan(route_project)["columns"]
+        assert [c["element_id"] for c in cols] == ["a0", "a1", "b0"]
+        assert [c["order"] for c in cols] == [0, 1, 2]
+
+    def test_shape_id_is_the_parent_group(self, route_project):
+        cols = route_plan(route_project)["columns"]
+        assert [c["shape_id"] for c in cols] == ["shape_a", "shape_a", "shape_b"]
+
+    def test_entry_exit_match_the_nearest_point_walk(self, route_project):
+        cols = route_plan(route_project)["columns"]
+        by = {c["element_id"]: c for c in cols}
+        # a0 sewn bottom -> top by the first-column convention (mid of each end)
+        assert by["a0"]["entry"] == [3.0, 2.0]
+        assert by["a0"]["exit"] == [3.0, 12.0]
+        # a1 enters at the end coincident with a0's exit (3,12)
+        assert by["a1"]["entry"] == [3.0, 12.0]
+        assert by["a1"]["exit"] == [3.0, 22.0]
+        # b0's near end to a1's exit (3,22) is its top end (31,12)
+        assert by["b0"]["entry"] == [31.0, 12.0]
+        assert by["b0"]["exit"] == [31.0, 2.0]
+
+    def test_jump_flagged_only_across_bare_fabric(self, route_project):
+        cols = route_plan(route_project)["columns"]
+        by = {c["element_id"]: c for c in cols}
+        assert by["a0"]["is_jump_before"] is False     # first column
+        assert by["a1"]["is_jump_before"] is False     # continuous with a0
+        assert by["b0"]["is_jump_before"] is True       # across the bare gap
+        assert by["b0"]["exposed_mm"] > 0.5
+
+    def test_coordinates_land_in_the_viewbox_userspace(self, route_project):
+        plan = route_plan(route_project)
+        assert plan["viewBox"] == "0 0 40 30"
+        assert abs(plan["uu_per_mm"] - 1.0) < 1e-9
+        for c in plan["columns"]:
+            for p in (c["entry"], c["exit"]):
+                assert 0 <= p[0] <= 40 and 0 <= p[1] <= 30
 
 
 class TestStitchSequenceExclude:

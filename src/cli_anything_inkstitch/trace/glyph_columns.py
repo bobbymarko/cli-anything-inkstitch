@@ -1158,15 +1158,23 @@ def exposed_travel_mm(letter: PlannedLetter) -> float:
     return sum(mm for _, mm in exposed_hops(letter))
 
 
-def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
-    """(k, mm) for each travel from column k to column k+1, sewn in planned order, that would lie
-    on bare fabric for more than a hair (exposed_travel_mm sums these)."""
-    if len(letter.columns) < 2:
-        return []
-    from shapely.geometry import LineString, Polygon
+def column_ends(left, right):
+    """A column's two ends: the midpoints of its first and last rail pair,
+    (end_a, end_b). The engine's start_at_nearest_point enters the column at one
+    of these and leaves at the other."""
+    mid = lambda i: ((left[i][0] + right[i][0]) / 2.0, (left[i][1] + right[i][1]) / 2.0)
+    return mid(0), mid(-1)
+
+
+def glyph_polygon(contours):
+    """The filled glyph as one shapely geometry: outer rings add, rings they
+    contain cut out as counters. None when there is nothing fillable. Shared by
+    exposed_hops and the artifact /route endpoint so both test travel against
+    the same covered area."""
+    from shapely.geometry import Polygon
     from shapely.ops import unary_union
 
-    polys = [Polygon(c) for c in letter.contours if len(c) >= 3]
+    polys = [Polygon(c) for c in contours if len(c) >= 3]
     polys = [p if p.is_valid else p.buffer(0) for p in polys]
     polys.sort(key=lambda p: -p.area)
     glyph = None
@@ -1177,22 +1185,55 @@ def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
             glyph = glyph.difference(p)
         else:
             glyph = unary_union([glyph, p])
+    return glyph
+
+
+def route_walk(ends, covered=None):
+    """Simulate the engine's start_at_nearest_point sew-walk over a sequence of
+    columns, given each column's two ends (column_ends) in SEWING ORDER.
+
+    Returns one record per column, in order:
+      {"order": k, "entry": (x, y), "exit": (x, y), "exposed": float,
+       "is_jump_before": bool}
+    The first column is taken to sew end_a -> end_b (entry=end_a, exit=end_b);
+    each later column starts at whichever of its ends is nearer where the
+    previous column left the needle and leaves it at the far end -- exactly as
+    exposed_hops measures travel, so the entry/exit decision lives in one place.
+    `exposed` is the length of the travel INTO this column that lies outside
+    `covered` (a shapely geometry, same units as the ends): 0 for the first
+    column and whenever `covered` is None. is_jump_before is True when that
+    travel crosses bare fabric at all; callers that only care about visible
+    jumps apply their own length threshold to `exposed`."""
+    out = []
+    if not ends:
+        return out
+    e0, e1 = ends[0]
+    out.append({"order": 0, "entry": e0, "exit": e1, "exposed": 0.0,
+                "is_jump_before": False})
+    cur = e1
+    if covered is not None:
+        from shapely.geometry import LineString
+    for k in range(1, len(ends)):
+        a, b = ends[k]
+        start, far = (a, b) if math.dist(cur, a) <= math.dist(cur, b) else (b, a)
+        exposed = 0.0
+        if covered is not None and math.dist(cur, start) > 1e-6:
+            exposed = LineString([cur, start]).difference(covered).length
+        out.append({"order": k, "entry": start, "exit": far,
+                    "exposed": exposed, "is_jump_before": exposed > 0.0})
+        cur = far
+    return out
+
+
+def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
+    """(k, mm) for each travel from column k to column k+1, sewn in planned order, that would lie
+    on bare fabric for more than a hair (exposed_travel_mm sums these)."""
+    if len(letter.columns) < 2:
+        return []
+    glyph = glyph_polygon(letter.contours)
     if glyph is None:
         return []
     glyph = glyph.buffer(0.05)
-
-    def ends(c: PlannedColumn):
-        mid = lambda i: ((c.left[i][0] + c.right[i][0]) / 2, (c.left[i][1] + c.right[i][1]) / 2)
-        return [mid(0), mid(-1)]
-
-    out = []
-    cur = ends(letter.columns[0])[1]
-    for k, c in enumerate(letter.columns[1:]):
-        e0, e1 = ends(c)
-        start, far = (e0, e1) if math.dist(cur, e0) <= math.dist(cur, e1) else (e1, e0)
-        if math.dist(cur, start) > 1e-6:
-            mm = LineString([cur, start]).difference(glyph).length
-            if mm > 0.0:
-                out.append((k, mm))
-        cur = far
-    return out
+    ends = [column_ends(c.left, c.right) for c in letter.columns]
+    return [(r["order"] - 1, r["exposed"])
+            for r in route_walk(ends, glyph)[1:] if r["exposed"] > 0.0]
