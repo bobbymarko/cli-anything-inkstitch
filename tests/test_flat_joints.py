@@ -181,3 +181,65 @@ class TestEngineCoversTheJoint:
         keep = stem_top(self._run(tmp_path / "a", "--joint-overlap-mm", "0.4"))
         flush = stem_top(self._run(tmp_path / "b", "--joint-overlap-mm", "0"))
         assert 0.25 < flush - keep < 0.6
+
+
+def _slanted_band():
+    """A 4 mm band along x (y 0..4) whose right end is cut at 45 degrees from (30, 0) to (26, 4),
+    paired the way a planner might: proportionally along each rail, so the rungs lean more and more
+    toward the cut (a long fan into the end)."""
+    n = 30
+    return PlannedColumn(left=[(30.0 * i / n, 0.0) for i in range(n + 1)],
+                         right=[(26.0 * i / n, 4.0) for i in range(n + 1)])
+
+
+def _diagonal_host():
+    """A 4 mm strand along x + y = 32 whose near edge (x + y = 29.17) runs 0.6 mm in front of the
+    band's cut: the band's end tucks under it."""
+    c, h = (1 / math.sqrt(2), 1 / math.sqrt(2)), 2.0
+    a, b = (36.0, -4.0), (22.0, 10.0)
+    off = lambda p, s: (p[0] - s * h * c[0], p[1] - s * h * c[1])
+    return PlannedColumn(left=[off(a, 1), off(b, 1)], right=[off(a, -1), off(b, -1)])
+
+
+def _angle(pair):
+    (ax, ay), (bx, by) = pair
+    return math.degrees(math.atan2(by - ay, bx - ax)) % 180
+
+
+class TestTuckedEndsAreSquareNotEased:
+    """An end that tucks under another column keeps its stitches square to the band up to the cut's
+    inner corner; only the last section fans. A free end is still eased (glyph_columns.ease_end)."""
+
+    def test_square_tucked_end_keeps_the_outline_and_stays_square(self):
+        from shapely.geometry import Polygon
+
+        from cli_anything_inkstitch.trace.glyph_columns import square_tucked_end
+        band = _slanted_band()
+        pairs = list(zip(band.left, band.right))[::-1]            # the cut is index 0
+        sq = square_tucked_end(pairs)
+        assert sq is not None
+        # the inner rail runs on along the cut: the column ends in a point at the cut's outer corner
+        assert math.dist(*sq[0]) < 0.5 and math.dist(sq[0][0], (30.0, 0.0)) < 1e-6
+        # ...and its outline (rails + cut) is unchanged, so is what it covers
+        poly = lambda ps: Polygon([p[0] for p in ps] + [p[1] for p in ps][::-1]).buffer(0)
+        assert abs(poly(sq).area - poly(pairs).area) < 0.1 and poly(sq).symmetric_difference(poly(pairs)).area < 0.1
+        # square to the band from well inside right up to the slanted edge
+        assert all(abs(_angle(p) - 90) < 3 for p in sq[1:] if (p[0][0] + p[1][0]) / 2 > 16.0)
+        # no zero-length rail piece next to the end (the engine drops such a section, satin_column.py
+        # flattened_sections, and that part of the column would not be sewn)
+        assert math.dist(sq[1][0], sq[0][0]) > 0.1 and math.dist(sq[1][1], sq[0][1]) > 0.1
+
+    def test_tucked_end_is_squared_and_free_end_is_eased(self):
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+
+        from cli_anything_inkstitch.trace.glyph_columns import ease_letter_ends
+        band, host = _slanted_band(), _diagonal_host()
+        outline = unary_union([Polygon(c.left + c.right[::-1]) for c in (band, host)])
+        lt = ease_letter_ends(PlannedLetter("t", [band, host], [list(outline.exterior.coords)[:-1]], True, {}))
+        assert [0, -1] in lt.check.get("squared_tucked_ends", [])
+        tucked = [p for p in zip(lt.columns[0].left, lt.columns[0].right) if (p[0][0] + p[1][0]) / 2 > 16.0]
+        assert tucked and all(abs(_angle(p) - 90) < 3 for p in tucked[:-1])  # square, not turned to the cut
+        free = _slanted_band()
+        lt2 = ease_letter_ends(PlannedLetter("f", [free], [free.left + free.right[::-1]], True, {}))
+        assert lt2.check.get("eased_ends") == [0]

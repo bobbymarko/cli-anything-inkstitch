@@ -896,6 +896,104 @@ def ease_end(pairs, ease_mm: float = END_EASE_MM, point_mm: float = END_EASE_POI
     return [((float(a[0]), float(a[1])), (float(b[0]), float(b[1]))) for a, b in new]
 
 
+TUCK_SQUARE_MM = 15.0     # a tucked end's rungs are re-cast square to the band over this far in
+TUCK_TIP_MM = 0.3         # the width left at the cut's outer corner (the column ends there in a point)
+
+
+def square_tucked_end(pairs, span_mm: float = TUCK_SQUARE_MM, step_mm: float = END_EASE_STEP_MM,
+                      tip_mm: float = TUCK_TIP_MM):
+    """Re-pair the near end (index 0) of a column whose end tucks under another column at a slant:
+    the rail that ends at the cut's inner corner (the corner nearer the column's body) is carried on
+    along the cut to its outer corner, and every rung is square to the band, so the stitches stay
+    square right into the joint and only shorten along the slanted edge, ending in a point at the
+    outer corner. That is how a hand-digitized band ending on a slanted strand is built. The column's
+    outline (rails + cut) is unchanged, so its coverage is too. No ease (ease_end) here: an eased
+    tucked end turned the band's stitches toward the other column's slant over ~15 mm, and a plain
+    slanted end pair fanned the last section from one corner, which the engine left part-bare at the
+    sharp outer corner. Returns new pairs, or None when the end is already near-square or the column
+    too short."""
+    from shapely.geometry import LineString, Point
+
+    if len(pairs) < 2:
+        return None
+    L = [tuple(map(float, p[0])) for p in pairs]
+    R = [tuple(map(float, p[1])) for p in pairs]
+    width = math.dist(L[0], R[0])
+    mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(L, R)]
+    cl = LineString(mids[::-1])
+    if cl.length < 3 * step_mm or width <= 0:
+        return None
+    # the band's direction just behind the end region (body -> end)
+    back = min(cl.length, max(2.0 * width, 2.0))
+    p0, p1 = cl.interpolate(cl.length - back), cl.interpolate(cl.length - back / 2)
+    tx, ty = p1.x - p0.x, p1.y - p0.y
+    tn = math.hypot(tx, ty)
+    if tn == 0:
+        return None
+    tx, ty = tx / tn, ty / tn
+    cut = (R[0][0] - L[0][0], R[0][1] - L[0][1])
+    if abs(cut[0] * tx + cut[1] * ty) / (math.hypot(*cut) or 1.0) < math.sin(math.radians(END_EASE_MIN_TILT_DEG)):
+        return None                                        # already near-square: nothing to do
+    inner_left = (L[0][0] * tx + L[0][1] * ty) <= (R[0][0] * tx + R[0][1] * ty)
+    inner_rail, outer_rail = (L, R) if inner_left else (R, L)
+    corner, outer = inner_rail[0], outer_rail[0]
+    if math.dist(corner, outer) <= tip_mm + step_mm:
+        return None
+    # the inner rail, carried on along the cut to just short of the outer corner (body -> end)
+    along = LineString([corner, outer])
+    tip_in = along.interpolate(along.length - tip_mm)
+    near = LineString(inner_rail[::-1] + [(tip_in.x, tip_in.y)])
+    far = LineString(outer_rail[::-1])
+    orig_near = LineString(inner_rail[::-1])
+    span = min(span_mm, far.length * END_EASE_SPINE_FRAC)
+    if span < 2 * step_mm:
+        return None
+
+    def _dir(rail, u):
+        q0, q1 = rail.interpolate(max(u - 2.0, 0.0)), rail.interpolate(min(u + 2.0, rail.length))
+        vx, vy = q1.x - q0.x, q1.y - q0.y
+        vn = math.hypot(vx, vy) or 1.0
+        return vx / vn, vy / vn
+
+    new = [((tip_in.x, tip_in.y), outer)]                 # the end: a point at the outer corner
+    n_prev = near.length - tip_mm * 0                     # rungs must step back along both rails
+    t = far.length - step_mm
+    while t > far.length - span + 1e-9:
+        b = far.interpolate(t)
+        # square to the band: the outer rail's direction and the inner rail's own (not the cut's)
+        (ax_, ay_) = _dir(far, t)
+        (bx_, by_) = _dir(orig_near, min(orig_near.project(b), orig_near.length))
+        dx, dy = ax_ + bx_, ay_ + by_
+        dn = math.hypot(dx, dy)
+        if dn == 0:
+            break
+        nx, ny = -dy / dn, dx / dn
+        reach = 4 * width + 1
+        big = LineString([(b.x - nx * reach, b.y - ny * reach), (b.x + nx * reach, b.y + ny * reach)])
+        x = big.intersection(near)
+        pts = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "Point" and not g.is_empty]
+        if not pts:
+            break
+        a = min(pts, key=lambda g: g.distance(b))
+        u = near.project(a)
+        if u < n_prev - 1e-6:
+            new.append(((a.x, a.y), (b.x, b.y)))
+            n_prev = u
+        t -= step_mm
+    if len(new) < 3:
+        return None
+    # original pairs wholly further in than the last square rung (on both rails) are kept as they were
+    a_last, b_last = new[-1]
+    n_last, f_last = near.project(Point(a_last)), far.project(Point(b_last))
+    keep = [(inner_rail[i], outer_rail[i]) for i in range(1, len(L))
+            if near.project(Point(inner_rail[i])) < n_last - 0.5 * step_mm
+            and far.project(Point(outer_rail[i])) < f_last - 0.5 * step_mm]
+    out = new + keep                                       # (inner, outer) pairs, end first
+    if not inner_left:
+        out = [(o, i) for i, o in out]                     # back to (left, right)
+    return [((float(a[0]), float(a[1])), (float(b[0]), float(b[1]))) for a, b in out]
+
+
 def _head_turn_tilt(pairs, within_mm: float = 3.0) -> float:
     """Worst rung-to-rung angle step (deg) within `within_mm` of the head (index 0): how sharply the
     rungs turn as they approach that cut. The defect ease_end spreads out. Measured on the head alone
@@ -916,19 +1014,34 @@ def _head_turn_tilt(pairs, within_mm: float = 3.0) -> float:
 
 
 def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM) -> PlannedLetter:
-    """Ease the rung angle into every open column's slanted or pointed ends (ease_end), one end at a
-    time. An end's new pairs are kept only if they leave no more crossings and no more fans than
-    before and actually reduce how sharply the rungs turn into that end. Rails (the outline) are never
-    moved. Lists the changed columns in check["eased_ends"]."""
+    """Ease the rung angle into every open column's free slanted or pointed ends (ease_end), one end
+    at a time. An end that tucks under another column (joins._host) is not eased: its rungs are
+    squared to the band up to the cut instead (square_tucked_end, check["squared_tucked_ends"]). An
+    end's new pairs are kept only if they leave no more crossings and no more fans than before and,
+    for an ease, actually reduce how sharply the rungs turn into that end. Rails (the outline) are
+    never moved. Lists the eased columns in check["eased_ends"]."""
     from cli_anything_inkstitch.trace import column_checks as cc
+    from cli_anything_inkstitch.trace.joins import _host
 
-    done = []
+    done, squared, kept_ease = [], [], []
     for k, c in enumerate(planned.columns):
         if c.closed:
             continue
         for end in (0, -1):
             pairs = list(zip(c.left, c.right))
             work = pairs if end == 0 else pairs[::-1]       # the end being eased is now index 0
+            if len(planned.columns) > 1 and _host(planned.columns, k, end, skip_acute_v=False) is not None:
+                sq = square_tucked_end(work)
+                if sq is not None and _crossed(sq) <= _crossed(work) and _same_outline(sq, work):
+                    sq = sq if end == 0 else sq[::-1]
+                    c.left, c.right = [p[0] for p in sq], [p[1] for p in sq]
+                    squared.append([k, end])
+                    continue
+                if sq is not None:
+                    # Squaring would move the outline (a tight curve the square rungs can't follow on
+                    # its inner rail): ease that end as before (ease_end), so its cut stays covered.
+                    kept_ease.append([k, end])
+                # (sq None: already square or too short; ease_end below leaves a square end alone)
             eased_head = ease_end(work, ease_mm)
             if eased_head is None:
                 continue
@@ -942,7 +1055,21 @@ def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM) -> Pl
                 done.append(k)
     if done:
         planned.check["eased_ends"] = done
+    if squared:
+        planned.check["squared_tucked_ends"] = squared
+    if kept_ease:
+        planned.check["tucked_ends_eased"] = kept_ease
     return planned
+
+
+def _same_outline(a_pairs, b_pairs, tol_mm2: float = 0.3) -> bool:
+    """Whether two pairings of one column cover the same outline (rails + end cuts), within tol_mm2
+    (a squared tucked end loses ~0.15 mm2: its point and rail sampling; a tight curve the square rungs
+    could not follow lost 1.4 mm2)."""
+    from shapely.geometry import Polygon
+
+    poly = lambda ps: Polygon([p[0] for p in ps] + [p[1] for p in ps][::-1]).buffer(0)
+    return poly(a_pairs).symmetric_difference(poly(b_pairs)).area <= tol_mm2
 
 
 def place_rungs(planned: PlannedLetter, rungs, step_mm: float = 1.0) -> PlannedLetter:

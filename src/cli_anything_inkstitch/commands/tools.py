@@ -1354,6 +1354,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                            **({"joint_ends_flattened": len(chk["joint_ends_flattened"])}
                               if chk.get("joint_ends_flattened") else {}),
                            **({"sew_order_changed": True} if chk.get("sew_order_changed") else {}),
+                           **({"squared_tucked_ends": len(chk["squared_tucked_ends"])}
+                              if chk.get("squared_tucked_ends") else {}),
                            **({"rungs_placed": chk["rungs_placed"]} if "rungs_placed" in chk else {}),
                            **({"one_pass": {"reversed": len(op["reversed"]), "trims_inside": len(op["trim_after"]),
                                             "longest_entry_run_mm": round(max(op["hidden_runs"] or [0.0]), 1)}}
