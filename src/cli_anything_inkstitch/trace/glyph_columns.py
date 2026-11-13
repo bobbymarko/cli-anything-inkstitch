@@ -1158,12 +1158,17 @@ def exposed_travel_mm(letter: PlannedLetter) -> float:
     return sum(mm for _, mm in exposed_hops(letter))
 
 
-def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
-    """(k, mm) for each travel from column k to column k+1, sewn in planned order, that would lie
-    on bare fabric for more than a hair (exposed_travel_mm sums these)."""
-    if len(letter.columns) < 2:
-        return []
-    from shapely.geometry import LineString, Polygon
+def _col_ends(c: PlannedColumn):
+    """The two rail-midpoint ends of a column (mm), [end0, end1]."""
+    mid = lambda i: ((c.left[i][0] + c.right[i][0]) / 2, (c.left[i][1] + c.right[i][1]) / 2)
+    return [mid(0), mid(-1)]
+
+
+def _glyph_polygon(letter: PlannedLetter):
+    """The letter's filled region as a shapely polygon (outer contours add,
+    counters subtract), buffered a hair so travel that grazes the edge counts
+    as inside. None when the letter has no usable contour."""
+    from shapely.geometry import Polygon
     from shapely.ops import unary_union
 
     polys = [Polygon(c) for c in letter.contours if len(c) >= 3]
@@ -1177,18 +1182,21 @@ def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
             glyph = glyph.difference(p)
         else:
             glyph = unary_union([glyph, p])
-    if glyph is None:
-        return []
-    glyph = glyph.buffer(0.05)
+    return glyph.buffer(0.05) if glyph is not None else None
 
-    def ends(c: PlannedColumn):
-        mid = lambda i: ((c.left[i][0] + c.right[i][0]) / 2, (c.left[i][1] + c.right[i][1]) / 2)
-        return [mid(0), mid(-1)]
+
+def _walk_hops(columns: list[PlannedColumn], glyph) -> list[tuple[int, float]]:
+    """(k, mm) for the bare-fabric part of each travel from column k to k+1,
+    walked in the given column order. Entry/exit follow start_at_nearest_point
+    (lib/elements/satin_column.py start_point): the walk starts at the first
+    column's far end and each later column is entered at its end nearer the
+    needle and left at its other end."""
+    from shapely.geometry import LineString
 
     out = []
-    cur = ends(letter.columns[0])[1]
-    for k, c in enumerate(letter.columns[1:]):
-        e0, e1 = ends(c)
+    cur = _col_ends(columns[0])[1]
+    for k, c in enumerate(columns[1:]):
+        e0, e1 = _col_ends(c)
         start, far = (e0, e1) if math.dist(cur, e0) <= math.dist(cur, e1) else (e1, e0)
         if math.dist(cur, start) > 1e-6:
             mm = LineString([cur, start]).difference(glyph).length
@@ -1196,3 +1204,98 @@ def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
                 out.append((k, mm))
         cur = far
     return out
+
+
+def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
+    """(k, mm) for each travel from column k to column k+1, sewn in planned order, that would lie
+    on bare fabric for more than a hair (exposed_travel_mm sums these)."""
+    if len(letter.columns) < 2:
+        return []
+    glyph = _glyph_polygon(letter)
+    if glyph is None:
+        return []
+    return _walk_hops(letter.columns, glyph)
+
+
+def route_order(letter: PlannedLetter) -> list[int]:
+    """A sewing order for the letter's columns that lays less travel on bare
+    fabric than the planned order, or the planned order unchanged when nothing
+    beats it.
+
+    The planner cuts a shape into strokes at its junctions in drawing order,
+    which is not the order that sews the shape end to end: a connected shape
+    can end up sewing one part, jumping across bare fabric, and filling the
+    rest from the other way (the engine's auto_satin would then cut a column
+    at the crossing, and shapes-to-satin --travel trim drops a trim there).
+    Reordering the columns so consecutive ones meet, or so the travel between
+    them runs under the shape body instead of across open fabric, removes
+    those mid-shape jumps/trims.
+
+    This only reorders whole columns; it never changes a column's geometry,
+    reverses a rail (start_at_nearest_point, not rail order, decides a column's
+    entry end for every column after a previous stitch, so reversing rails
+    would not move the real needle), or touches a ring/closed column. The cost
+    of an order is measured with the same walk exposed_hops uses, so the trims
+    shapes-to-satin then places match the reordered sew. The planned order is
+    returned unless another order is strictly better (fewer exposed hops, then
+    less exposed mm), so a shape that already sews cleanly is left untouched.
+    """
+    import itertools
+
+    n = len(letter.columns)
+    identity = list(range(n))
+    if n < 2 or any(c.closed for c in letter.columns):
+        return identity
+    glyph = _glyph_polygon(letter)
+    if glyph is None:
+        return identity
+
+    def cost(order):
+        hops = _walk_hops([letter.columns[i] for i in order], glyph)
+        big = [mm for _, mm in hops if mm > EXPOSED_TRAVEL_MM]
+        return (len(big), round(sum(big), 3))
+
+    base = cost(identity)
+    if base == (0, 0.0):
+        return identity
+    best_order, best_cost = identity, base
+    # Exact for small shapes (a logo stroke-shape rarely exceeds a handful of
+    # columns); a nearest-neighbour seed for anything larger.
+    candidates = (itertools.permutations(identity) if n <= 7
+                  else _route_heuristic(letter.columns, glyph))
+    for order in candidates:
+        order = list(order)
+        c = cost(order)
+        if c < best_cost or (c == best_cost and order == identity):
+            best_cost, best_order = c, order
+    # Only disturb the planned order when it is strictly beaten.
+    return best_order if best_cost < base else identity
+
+
+def _route_heuristic(columns, glyph):
+    """Nearest-neighbour orders, one per possible first column, for shapes with
+    too many columns to permute exhaustively. route_order keeps a candidate
+    only when it beats the planned order, so a weak heuristic never regresses."""
+    n = len(columns)
+    ends = [_col_ends(c) for c in columns]
+
+    def hop_mm(a_far, b):
+        from shapely.geometry import LineString
+        e0, e1 = ends[b]
+        start, far = (e0, e1) if math.dist(a_far, e0) <= math.dist(a_far, e1) else (e1, e0)
+        mm = LineString([a_far, start]).difference(glyph).length if math.dist(a_far, start) > 1e-6 else 0.0
+        return mm, far
+
+    seeds = []
+    for first in range(n):
+        order = [first]
+        used = {first}
+        cur = ends[first][1]
+        while len(order) < n:
+            best = min((j for j in range(n) if j not in used),
+                       key=lambda j: hop_mm(cur, j)[0])
+            _, cur = hop_mm(cur, best)
+            order.append(best)
+            used.add(best)
+        seeds.append(order)
+    return seeds

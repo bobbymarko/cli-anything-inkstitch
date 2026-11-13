@@ -1221,6 +1221,18 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
         planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)],
                                  one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns,
                                  tidy_joins_on=tidy_joins)
+        if travel == "trim":
+            # Sew each shape's columns in an order that keeps travel off bare
+            # fabric, so a connected shape runs end to end instead of filling
+            # one part, jumping, and filling the rest from the other way (the
+            # mid-shape jump --travel trim would otherwise trim). Column
+            # geometry is unchanged; only the sew order is. route_order leaves
+            # a shape that already sews cleanly exactly as planned. Routing via
+            # auto_satin (--travel route) does its own ordering, so skip it there.
+            for lt in planned:
+                sew = gc.route_order(lt)
+                if sew != list(range(len(lt.columns))):
+                    lt.columns = [lt.columns[i] for i in sew]
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         made_groups, cases = [], []
         for (el, _fill), color, lt, spec, gh in zip(targets, thread_of, planned, spec_of, hashes):
