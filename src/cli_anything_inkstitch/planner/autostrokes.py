@@ -1138,16 +1138,23 @@ def islands(contours: list[np.ndarray]) -> list[list[np.ndarray]]:
     return out
 
 
-def letter_strokes(contours: list[np.ndarray], cap_mm: float, overlap_feet: bool = False) -> list[Stroke]:
+def letter_strokes(contours: list[np.ndarray], cap_mm: float, overlap_feet: bool = False,
+                   junctions_out: list | None = None) -> list[Stroke]:
     """Proposed strokes for one letter (contours in mm, y up), in sewing order, in the letter's ink
     box (u, v from 0 to 1). Each separate piece of the letter (an i's dot) gets its own strokes.
     overlap_feet (flat work): legs meeting in a V at the letter's edge both run on to it and overlap at
-    the tip (a W's feet), rather than one butting against the other; off for puff, where it'd perforate twice."""
+    the tip (a W's feet), rather than one butting against the other; off for puff, where it'd perforate twice.
+
+    junctions_out (optional): a list the per-piece junction classification is appended to, each entry
+    {"concavities": [(x, y), ...], "junctions": [{pos, radius, type, n_ends, ...}, ...]} in the input
+    contours' mm frame. This carries the medial-axis junction reading forward so a later stage need
+    not re-derive it; None (the default) collects nothing and changes nothing."""
     # The thresholds here (how far a tip may veer, a mitre's reach, a stub's length) are in mm, tuned
     # on strokes at least PLAN_MIN_STROKE_MM wide (bold letters about 20 mm tall). Thinner ones (small
     # lettering) are planned scaled up to that width: the strokes come back in u, v of the box, which
     # scaling doesn't change. (At 5.75 mm, half the benchmark's letters failed before.)
     w = stroke_width_mm(contours)
+    k = 1.0
     if 0 < w < PLAN_MIN_STROKE_MM:
         k = PLAN_MIN_STROKE_MM / w
         contours = [np.asarray(c, float) * k for c in contours]
@@ -1156,11 +1163,18 @@ def letter_strokes(contours: list[np.ndarray], cap_mm: float, overlap_feet: bool
     box = (allp[:, 0].min(), allp[:, 1].min(), allp[:, 0].max(), allp[:, 1].max())
     strokes = []
     for piece in islands(contours):
+        jout = [] if junctions_out is not None else None
         try:
-            got = _piece_strokes(piece, cap_mm, box, overlap_feet)
+            got = _piece_strokes(piece, cap_mm, box, overlap_feet, jout)
         except (ValueError, IndexError, KeyError):
             got = []
         strokes += got or _blob_stroke(piece, box)
+        if junctions_out is not None:
+            for jd in jout:                            # un-scale positions back to the input mm frame
+                for jr in jd["junctions"]:
+                    jr["pos"] = (jr["pos"][0] / k, jr["pos"][1] / k)
+                junctions_out.append({"concavities": [(p[0] / k, p[1] / k) for p in jd["concavities"]],
+                                      "junctions": jd["junctions"]})
     return order_strokes(strokes)
 
 
@@ -1195,8 +1209,14 @@ def _blob_stroke(contours: list[np.ndarray], box) -> list[Stroke]:
     return [Stroke([uv(a), uv(b)])]
 
 
-def _piece_strokes(contours: list[np.ndarray], cap_mm: float, box, overlap_feet: bool = False) -> list[Stroke]:
-    """Strokes for one connected piece, in `box`'s u, v units, not yet in sewing order."""
+def _piece_strokes(contours: list[np.ndarray], cap_mm: float, box, overlap_feet: bool = False,
+                   jout: list | None = None) -> list[Stroke]:
+    """Strokes for one connected piece, in `box`'s u, v units, not yet in sewing order.
+
+    jout (optional): a list the piece's junction classification is appended to as
+    {"concavities": [(x, y), ...], "junctions": [{pos, radius, type, n_ends, through, butting}, ...]},
+    positions in this piece's mm frame (the medial-axis frame). Used to carry the junction reading
+    forward; None (the default) means don't collect it and changes nothing."""
     from shapely.geometry import MultiLineString
 
     from .columns import Letter
@@ -1248,6 +1268,7 @@ def _piece_strokes(contours: list[np.ndarray], cap_mm: float, box, overlap_feet:
     smooth_at: list = []          # junctions resolved by smooth pairing: their bends stay curves
     dropped: set[int] = set()     # stub pieces into a V's foot, covered by both legs
     stub_links = _stub_links(pieces)
+    jrecs: list[dict] = []        # the junction classification, carried forward (see letter_strokes)
     for j, es in ends.items():
         dirs = {e: pieces[e[0]].direction_from(e[1]) for e in es}
         # A V's foot at a junction (two legs, and a short stub on down into a flat foot): both legs
@@ -1261,6 +1282,8 @@ def _piece_strokes(contours: list[np.ndarray], cap_mm: float, box, overlap_feet:
                 for e in legs:
                     _clear_tip(pieces[e[0]], e[1], V_FOOT_CLEAR * float(radius[j]) + pieces[e[0]].half_width())
                 dropped |= {e[0] for e in es if e not in legs}
+                jrecs.append({"pos": (float(v[j][0]), float(v[j][1])), "radius": float(radius[j]),
+                              "type": "v_foot", "n_ends": len(es)})
                 continue
         # Branches whose outline between them runs on smoothly are one stroke; a sharp inside corner
         # between two branches separates them (a dancer: left arm round her head into the raised arm,
@@ -1329,6 +1352,16 @@ def _piece_strokes(contours: list[np.ndarray], cap_mm: float, box, overlap_feet:
         for e in es:
             if e not in through:
                 butts[e] = target
+        if smooth:
+            jtype = "smooth"                       # branches run on through (a Y that reads as one stroke)
+        elif not butting:
+            jtype = "through"                      # a straightest pair continues, nothing butts
+        elif any(e in links for e in es):
+            jtype = "butt"                         # a through pair plus one or more butting ends (a T)
+        else:
+            jtype = "corner"                       # no pair ran through: a sharp corner (an L, a V apex)
+        jrecs.append({"pos": (float(v[j][0]), float(v[j][1])), "radius": float(radius[j]),
+                      "type": jtype, "n_ends": len(es), "through": len(through), "butting": len(butting)})
 
     # Chains of linked pieces become strokes.
     used = set()
@@ -1459,6 +1492,9 @@ def _piece_strokes(contours: list[np.ndarray], cap_mm: float, box, overlap_feet:
         res = np.column_stack([np.interp(t, s, pts[:, 0]), np.interp(t, s, pts[:, 1])])
         strokes.append(Stroke([uv(p) for p in res], smooth=True, closed=closed,
                               start_cut=cuts[0], end_cut=cuts[1]))
+    if jout is not None:
+        jout.append({"concavities": [(float(p[0]), float(p[1])) for p in corners],
+                     "junctions": jrecs})
     return order_strokes(strokes)
 
 

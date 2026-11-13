@@ -106,3 +106,32 @@ def test_clipped_foot_keeps_its_level_end():
     for (a, b) in (c.pairs[0], c.pairs[-1]):
         assert abs(a[1] - b[1]) < 0.03, (a, b)          # level, on the line
         assert math.dist(a, b) >= ac.MIN_TIP_MM
+
+
+def _tee_outline():
+    """A T: a horizontal bar on a vertical stem, which gives a 3-way medial-axis junction."""
+    return [np.array([(0, 8), (9, 8), (9, 0), (11, 0), (11, 8), (20, 8), (20, 11), (0, 11)], float)]
+
+
+def test_junction_classification_is_carried_forward():
+    """plan_shape carries the medial-axis junction reading + concavities in check (for the tidy stage)."""
+    from cli_anything_inkstitch.planner import art_columns as ac
+    sc = ac.plan_shape(0, _tee_outline())
+    assert sc.ok
+    juncs = sc.check.get("junctions")
+    assert juncs, "a T has a junction that should be recorded"
+    for j in juncs:
+        assert {"pos", "radius", "type", "n_ends"} <= set(j)
+        assert j["type"] in ("butt", "corner", "smooth", "through", "v_foot")
+    assert "concavities" in sc.check            # the T's two inside corners under the bar
+
+
+def test_junctions_out_does_not_change_the_plan():
+    """Collecting the junction reading is a pure side channel: the strokes are byte-identical."""
+    from cli_anything_inkstitch.planner.autostrokes import letter_strokes
+    c = _tee_outline()
+    without = letter_strokes(c, 20.0, overlap_feet=True)
+    out = []
+    with_ = letter_strokes(c, 20.0, overlap_feet=True, junctions_out=out)
+    assert with_ == without                      # Stroke is a dataclass: equality compares the plan
+    assert out and any(pc["junctions"] for pc in out)
