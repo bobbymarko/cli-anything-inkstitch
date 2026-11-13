@@ -131,6 +131,145 @@ class TestRouteWalk:
         assert hops          # there IS an exposed hop across the gap
 
 
+class TestRouteWalkAsDrawn:
+    """end_at_nearest_point off: the engine sews a column end_a -> end_b as drawn
+    (lib/elements/satin_column.py end_point / _split_top_layer), so the walk must not pick the
+    nearer end; with start_at_nearest_point on the needle lands on the nearest centre-line point
+    and runs back under the column to end_a."""
+
+    def _cols(self):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn
+        a = PlannedColumn(left=[(0, 0), (10, 0)], right=[(0, 2), (10, 2)])
+        # drawn away from a: its end_a is the FAR end (24, 1)
+        b = PlannedColumn(left=[(24, 0), (12, 0)], right=[(24, 2), (12, 2)])
+        return [a, b]
+
+    def test_exit_is_end_b_even_when_the_other_end_is_nearer(self):
+        from cli_anything_inkstitch.trace.glyph_columns import column_ends, route_walk
+        cols = self._cols()
+        recs = route_walk([column_ends(c.left, c.right) for c in cols], as_drawn=True)
+        assert recs[1]["entry"] == (24.0, 1.0) and recs[1]["exit"] == (12.0, 1.0)
+        assert recs[1]["arrive"] == (24.0, 1.0) and recs[1]["travel"] == pytest.approx(14.0)
+
+    def test_start_at_nearest_lands_on_the_centre_line_with_a_hidden_run(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import centre_line, column_ends, route_walk
+        cols = self._cols()
+        recs = route_walk([column_ends(c.left, c.right) for c in cols], as_drawn=True,
+                          centre_lines=[centre_line(c.left, c.right) for c in cols])
+        assert recs[1]["arrive"] == pytest.approx((12.0, 1.0))
+        assert recs[1]["travel"] == pytest.approx(2.0)
+        assert recs[1]["hidden_run"] == pytest.approx(12.0)   # back along the column to (24, 1)
+
+    def test_exact_start_lands_on_end_a(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import centre_line, column_ends, route_walk
+        cols = self._cols()
+        recs = route_walk([column_ends(c.left, c.right) for c in cols], as_drawn=True,
+                          centre_lines=[centre_line(c.left, c.right) for c in cols], exact={1})
+        assert recs[1]["arrive"] == (24.0, 1.0) and recs[1]["hidden_run"] == 0.0
+
+    def test_start_gives_column_zero_its_travel(self):
+        from cli_anything_inkstitch.trace.glyph_columns import column_ends, route_walk
+        cols = self._cols()
+        recs = route_walk([column_ends(c.left, c.right) for c in cols], as_drawn=True, start=(0.0, 5.0))
+        assert recs[0]["travel"] == pytest.approx(4.0)
+
+    def test_default_model_is_unchanged(self):
+        from cli_anything_inkstitch.trace.glyph_columns import column_ends, route_walk
+        cols = self._cols()
+        recs = route_walk([column_ends(c.left, c.right) for c in cols])
+        assert recs[1]["entry"] == (12.0, 1.0) and recs[1]["exit"] == (24.0, 1.0)
+
+
+def _bar(x0, y0, x1, y1, w=2.0):
+    """A straight column from (x0, y0) to (x1, y1), w wide, two pairs."""
+    from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn
+    dx, dy = x1 - x0, y1 - y0
+    n = math.hypot(dx, dy)
+    ox, oy = -dy / n * w / 2, dx / n * w / 2
+    return PlannedColumn(left=[(x0 + ox, y0 + oy), (x1 + ox, y1 + oy)],
+                         right=[(x0 - ox, y0 - oy), (x1 - ox, y1 - oy)])
+
+
+def _letter(cols):
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from cli_anything_inkstitch.trace.glyph_columns import PlannedLetter
+    u = unary_union([Polygon(c.left + c.right[::-1]) for c in cols])
+    polys = list(getattr(u, "geoms", [u]))
+    return PlannedLetter("x", cols, [list(p.exterior.coords)[:-1] for p in polys], True)
+
+
+class TestPlanOnePass:
+    """One pass per satin: each column finishes nearest the next, trims where the handoff would
+    jump (> collapse_len) or cross bare fabric, exact starts after a trim."""
+
+    def test_column_is_turned_to_finish_at_the_next_one(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import column_ends, plan_one_pass
+        # an L: the stem is drawn from its corner end upward, so as drawn it would finish far from
+        # the foot; it must be reversed to finish at the corner
+        stem = _bar(1, 0, 1, 20)
+        foot = _bar(0, 1, 12, 1)
+        plan = plan_one_pass(_letter([stem, foot]))
+        assert 0 in plan["reversed"]
+        assert column_ends(stem.left, stem.right)[1][1] < 2.0       # exit at the corner
+        assert plan["trim_after"] == []                                # covered 1 mm handoff
+        assert plan["start_exact"] == [0]
+
+    def test_already_good_order_is_left_alone(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import plan_one_pass
+        stem = _bar(1, 20, 1, 0)
+        foot = _bar(0, 1, 12, 1)
+        before = (list(stem.left), list(stem.right))
+        plan = plan_one_pass(_letter([stem, foot]))
+        assert 0 not in plan["reversed"] and (stem.left, stem.right) == before
+
+    def test_long_handoff_is_trimmed_and_the_next_column_starts_exactly(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import plan_one_pass
+        # two separate bars 10 mm apart: the handoff is a jump over bare fabric
+        a, b = _bar(0, 0, 20, 0), _bar(0, 10, 20, 10)
+        plan = plan_one_pass(_letter([a, b]))
+        assert plan["trim_after"] == [0]
+        assert plan["start_exact"] == [0, 1]
+
+    def test_covered_handoff_over_collapse_len_is_trimmed(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import plan_one_pass
+        # a T: the bar ends at its right, the stem leaves from the bar's middle, 10 mm back along
+        # covered thread -- no bare fabric, but longer than collapse_len, so the engine would jump
+        bar = _bar(0, 20, 20, 20)
+        stem = _bar(10, 19, 10, 0)
+        plan = plan_one_pass(_letter([bar, stem]))
+        assert plan["trim_after"] == [0]
+        plan_off = plan_one_pass(_letter([_bar(0, 20, 20, 20), _bar(10, 19, 10, 0)]), trim_handoffs=False)
+        assert plan_off["trim_after"] == []
+
+    def test_trimmed_column_starts_nearest_its_arrival(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import column_ends, plan_one_pass
+        # one column, the needle arrives near its END: it is turned to start there
+        bar = _bar(0, 0, 20, 0)
+        plan = plan_one_pass(_letter([bar]), arrival=(22.0, 0.0))
+        assert plan["reversed"] == [0]
+        assert column_ends(bar.left, bar.right)[0][0] == pytest.approx(20.0)
+        assert plan["exit"][0] == pytest.approx(0.0)
+
+    def test_ring_is_never_reversed(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn, plan_one_pass
+        n = 24
+        ring = PlannedColumn(left=[(10 * math.cos(2 * math.pi * i / n), 10 * math.sin(2 * math.pi * i / n)) for i in range(n + 1)],
+                             right=[(8 * math.cos(2 * math.pi * i / n), 8 * math.sin(2 * math.pi * i / n)) for i in range(n + 1)],
+                             closed=True)
+        tail = _bar(9, 0, 30, 0)
+        plan = plan_one_pass(_letter([ring, tail]), arrival=(50.0, 0.0))
+        assert 0 not in plan["reversed"]
+
+
 class TestOldStyleSatinSurvivesSimplify:
     def test_two_subpath_satin_passes_through(self):
         """Engine pairs a rung-less satin's rails node for node
@@ -336,3 +475,67 @@ class TestShapesToSatinEngine:
         pts = _stitches(_export(proj, tmp_path, "ring"))
         w = max(x for x, _ in pts) - min(x for x, _ in pts)
         assert abs(w - 30.0) < 1.2          # 20 mm ring x scale(1.5), within pull compensation
+
+
+def _bar_and_post_svg(k=96 / 25.4):
+    """A 40 x 4 mm bar and, below its middle, a separate 3 mm post: the bar's nearest point to
+    the post is mid-column, which is where end_at_nearest_point splits it."""
+    bar = f"M {5 * k},{5 * k} L {45 * k},{5 * k} L {45 * k},{9 * k} L {5 * k},{9 * k} Z"
+    post = f"M {23.5 * k},{15 * k} L {26.5 * k},{15 * k} L {26.5 * k},{35 * k} L {23.5 * k},{35 * k} Z"
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="50mm" height="40mm" '
+            f'viewBox="0 0 {50 * k:.4f} {40 * k:.4f}"><path id="bar" d="{bar}" style="fill:#2e7d32"/>'
+            f'<path id="post" d="{post}" style="fill:#2e7d32"/></svg>')
+
+
+def _top_layer_runs(pattern, min_dy_mm=3.0):
+    """Passes of the bar's top layer: its zigzag is the only stitching that crosses ~4 mm in y
+    (the post zigzags in x, underlay runs along x). Consecutive crossings advancing < 1.5 mm in x
+    are one run; runs of 10+ crossings are passes."""
+    pts = _stitches(pattern, with_jumps=True)
+    xs = [(a[0] + b[0]) / 2 for a, b in zip(pts, pts[1:]) if abs(b[1] - a[1]) > min_dy_mm]
+    runs, cur = [], [xs[0]] if xs else []
+    for x in xs[1:]:
+        if abs(x - cur[-1]) < 1.5:
+            cur.append(x)
+        else:
+            runs.append(cur)
+            cur = [x]
+    if cur:
+        runs.append(cur)
+    return [r for r in runs if len(r) >= 10]
+
+
+@needs_planner
+@needs_binary
+class TestOnePassEngine:
+    """Behavioural proof (CLAUDE.md rule 3): with --one-pass the engine sews the bar's top layer
+    in one pass; with --no-one-pass (end_at_nearest_point on) it splits it to finish near the
+    post."""
+
+    @pytest.fixture(autouse=True)
+    def real_schema(self):
+        """conftest isolates the cache (bootstrap schema, which doesn't know the nearest-point
+        params): mine the real one from the engine source, as test_differential_params does."""
+        import os
+        cands = [Path(__file__).parent.parent / "inkstitch", Path(os.environ.get("INKSTITCH_SOURCE", "/nonexistent"))]
+        src = next((c for c in cands if (c / "lib" / "elements").exists()), None)
+        if src is None:
+            pytest.skip("inkstitch source checkout not present")
+        from cli_anything_inkstitch.schema.extract import extract_schema, write_cache
+        write_cache(extract_schema(src))
+
+    def _run(self, tmp_path, flag):
+        svg = tmp_path / f"{flag}.svg"
+        svg.write_text(_bar_and_post_svg())
+        proj = tmp_path / f"{flag}.json"
+        assert CliRunner().invoke(root, ["document", "open", "--project", str(proj), "--svg", str(svg)]).exit_code == 0
+        r = CliRunner().invoke(root, ["--json", "tools", "shapes-to-satin", "--project", str(proj), "--keep-order", flag])
+        assert r.exit_code == 0, r.output
+        assert "params_skipped" not in json.loads(r.output)
+        return _top_layer_runs(_export(proj, tmp_path, flag[2:]))
+
+    def test_default_sews_the_bar_in_one_pass_and_the_engine_default_splits_it(self, tmp_path):
+        one = self._run(tmp_path, "--one-pass")
+        split = self._run(tmp_path, "--no-one-pass")
+        assert len(one) == 1 and max(one[0]) - min(one[0]) > 35
+        assert len(split) == 2
