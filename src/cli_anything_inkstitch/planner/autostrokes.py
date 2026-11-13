@@ -353,10 +353,14 @@ def _smooth_pairs(es, dirs, at, r, corners, near_lines) -> list:
         elif e[0] != f[0]:
             pairs.append((e, f))
     used = [x for p in pairs for x in p]
-    # Only a full reading: every branch has exactly one smooth partner, so the junction resolves into
-    # continuous strokes meeting between the corners, with nothing left to butt. Where a branch would
-    # be left over (an R's leg, a T's stem) the straightest pair runs through as before.
-    if not pairs or sharp == 0 or len(used) != len(set(used)) or set(used) != set(es):
+    # A clear reading: no branch is paired twice, and at most one branch is left over. That left-over
+    # branch is the junction's root and butts against the pair that runs through (a Y: an R's bowl
+    # runs on round as one stroke while the leg branches off its underside; a T's bar runs through
+    # while the stem butts). For a T the smooth pair is also the straightest, so this changes nothing;
+    # it only matters at a Y, where the smooth (curving) pair differs from the straightest and the
+    # bowl, not the leg, should run through. A junction with no smooth pair, or more than one branch
+    # left over, is still left to the straightest-pair reading below.
+    if not pairs or sharp == 0 or len(used) != len(set(used)) or len(set(es) - set(used)) > 1:
         return []
     return pairs
 

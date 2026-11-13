@@ -135,3 +135,23 @@ def test_junctions_out_does_not_change_the_plan():
     with_ = letter_strokes(c, 20.0, overlap_feet=True, junctions_out=out)
     assert with_ == without                      # Stroke is a dataclass: equality compares the plan
     assert out and any(pc["junctions"] for pc in out)
+
+
+def test_y_junction_runs_the_smooth_pair_through_with_a_leg_left_over():
+    """At a Y (an R's bowl + leg), the two branches that run on smoothly pair as the through stroke
+    and the leg is left over to butt — even though the straightest pair would be leg+bowl. The old
+    rule needed every branch paired and so fell back to the straightest; this is the fix that lets an
+    R's bowl run on as one U with the leg a separate column."""
+    from cli_anything_inkstitch.planner import autostrokes as A
+    at = (0.0, 0.0)
+    # three branches: two curving up (the bowl's sides) and one hanging down (the leg)
+    es = [(0, True), (1, True), (2, True)]
+    dirs = {(0, True): (-0.7, 0.7), (1, True): (0.7, 0.7), (2, True): (0.2, -1.0)}
+    near_lines = {(0, True): [(0.0, 0.0), (-2.0, 2.0)],
+                  (1, True): [(0.0, 0.0), (2.0, 2.0)],
+                  (2, True): [(0.0, 0.0), (0.4, -2.0)]}
+    # inside corners either side of the leg, splitting it off from the two bowl branches
+    corners = [np.array([-0.6, -0.5]), np.array([0.8, -0.5])]
+    out = A._smooth_pairs(es, dirs, at, 1.0, corners, near_lines)
+    assert len(out) == 1                                   # the bowl pair runs through
+    assert set(out[0]) == {(0, True), (1, True)}           # ...the two smooth branches, not the leg
