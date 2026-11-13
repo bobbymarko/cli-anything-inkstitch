@@ -10,7 +10,8 @@ from typing import Any
 MAX_UNTRIMMED_MOVE_MM = 3.0       # an untrimmed needle-up move longer than this is a thread float
 MAX_LONGEST_STITCH_MM = 8.0       # a longer stitch is a snagging loop
 TRIM_INCREASE_ABS = 2             # trims may rise by max(this, ...
-TRIM_INCREASE_FRAC = 0.10         # ... this fraction of the baseline) before it is a regression
+TRIM_INCREASE_FRAC = 0.10         # ... this fraction of the baseline) before it is a regression;
+                                  # with a reference DST, a rise that lands nearer its trim count only warns
 STITCH_COUNT_WARN_FRAC = 0.05     # stitch count moving more than this is a warning only
 _EPS = 0.05                       # mm: rounding noise on a longest-stitch comparison
 
@@ -61,7 +62,13 @@ def judge(base: dict | None, new: dict | None) -> dict[str, Any]:
         (reg if nl > bl + _EPS else warn).append(
             f"longest stitch {nl} mm > {MAX_LONGEST_STITCH_MM:g}" + ("" if nl > bl + _EPS else f" (baseline {bl}, not worse)"))
     if new["trims"] - base["trims"] > max(TRIM_INCREASE_ABS, TRIM_INCREASE_FRAC * base["trims"]):
-        reg.append(f"trims {base['trims']} -> {new['trims']}")
+        ref = (new.get("reference") or {}).get("reference_trims")
+        if ref is not None and abs(new["trims"] - ref) < abs(base["trims"] - ref):
+            # more trims, but nearer what the reference file (EmbroideryStudio's) has
+            warn.append(f"trims {base['trims']} -> {new['trims']}, closer to the reference's {ref}")
+        else:
+            reg.append(f"trims {base['trims']} -> {new['trims']}: trims up; check whether intended"
+                       + (f" (reference has {ref})" if ref is not None else ""))
     if base["stitches"] and abs(new["stitches"] - base["stitches"]) > STITCH_COUNT_WARN_FRAC * base["stitches"]:
         warn.append(f"stitches {base['stitches']} -> {new['stitches']} "
                     f"({(new['stitches'] - base['stitches']) / base['stitches']:+.0%})")

@@ -125,6 +125,19 @@ class TestJudge:
         assert K.judge(_ok(trims=100), _ok(trims=111))["regressions"]
         assert not K.judge(_ok(trims=10), _ok(trims=2))["regressions"]        # fewer is fine
 
+    def test_trim_rise_toward_the_reference_is_a_warning(self):
+        ref = {"reference_trims": 62}
+        v = K.judge(_ok(trims=42), _ok(trims=62, reference=ref))
+        assert not v["regressions"] and "closer to the reference" in v["warnings"][0]
+        v = K.judge(_ok(trims=42), _ok(trims=90, reference=ref))      # past it, and farther away
+        assert v["regressions"]
+        v = K.judge(_ok(trims=70), _ok(trims=90, reference=ref))      # up, but away from it
+        assert v["regressions"]
+
+    def test_trim_rise_without_a_reference_says_check_intent(self):
+        v = K.judge(_ok(trims=42), _ok(trims=62))
+        assert "trims up; check whether intended" in v["regressions"][0]
+
     def test_stitch_count_is_a_warning(self):
         v = K.judge(_ok(), _ok(stitches=1060))
         assert v["warnings"] and not v["regressions"]
