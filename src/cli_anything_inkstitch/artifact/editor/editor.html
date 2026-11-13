@@ -567,6 +567,15 @@
                    A3 3 0 0 1 13.5 6.2 C13.5 8.5 12 11 8 14 Z"/>
         </svg>
       </button>
+      <button class="tool" id="toggleRoute" type="button"
+              title="Entry/exit points — where each satin column's sewing starts (green) and ends (red); dashed red = jump across bare fabric">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+          <path d="M3 12 L8 5 L13 12"/>
+          <circle cx="3" cy="12" r="1.8" fill="#3fbf6a" stroke="none"/>
+          <circle cx="13" cy="12" r="1.8" fill="#e8564a" stroke="none"/>
+        </svg>
+      </button>
     </div>
     <div id="timelineBar">
       <button id="tlPlay" type="button" title="Play stitch-out">▶</button>
@@ -1628,6 +1637,67 @@ $("toggleDensity").onclick = () => {
   if (densityOn && !stitchData) scheduleTier2();
   renderDensity();
 };
+/* entry/exit overlay: per satin column, where its sewing starts (green dot)
+   and ends (red dot), in sewing order; a thin connector runs from each
+   column's exit to the next column's entry, dashed red where that travel
+   crosses bare fabric (a jump). Lets you confirm each shape sews as one
+   continuous run and spot shapes that still jump. Off by default; the data is
+   the server's /route plan (the engine's start_at_nearest_point walk, shared
+   with the trim model), so markers match auto-route and the exposed checks. */
+let routeOn = false;
+let routeData = null;        // {columns:[{order,shape_id,element_id,entry,exit,is_jump_before}], ...}
+$("toggleRoute").onclick = async () => {
+  routeOn = !routeOn;
+  $("toggleRoute").classList.toggle("on", routeOn);
+  if (routeOn && !routeData) await fetchRoute();
+  renderRoute();
+};
+async function fetchRoute() {
+  try {
+    const r = await fetch(api("/route"));
+    if (r.ok) routeData = await r.json();
+  } catch (e) { routeData = null; }
+}
+function renderRoute() {
+  if (!routeLayer) return;
+  routeLayer.textContent = "";
+  if (!routeOn || !routeData || !routeData.columns) return;
+  const cols = routeData.columns;
+  // when something is selected, show only the selected shapes' markers so a
+  // crowded design stays legible; otherwise show the whole design's route
+  const selSet = selection.length
+    ? new Set(cols.filter(c => selection.includes(c.element_id)
+                               || selection.includes(c.shape_id))
+                  .map(c => c.shape_id))
+    : null;
+  const shown = selSet ? cols.filter(c => selSet.has(c.shape_id)) : cols;
+  const dot = px(4), halo = px(5.5), connW = px(1.25), jumpW = px(1.75);
+  // connectors between consecutive columns IN the shown set and adjacent in
+  // sewing order (so travel into a column tracks from the previous column)
+  const byOrder = new Map(cols.map(c => [c.order, c]));
+  for (const c of shown) {
+    const prev = byOrder.get(c.order - 1);
+    if (prev && (!selSet || selSet.has(prev.shape_id))) {
+      const jump = c.is_jump_before;
+      el("line", { x1: prev.exit[0], y1: prev.exit[1], x2: c.entry[0], y2: c.entry[1],
+        stroke: jump ? "#e8564a" : "#8ea6c8",
+        "stroke-width": jump ? jumpW : connW,
+        ...(jump ? { "stroke-dasharray": px(3) + " " + px(2.5) } : {}),
+        "stroke-linecap": "round", fill: "none" }, routeLayer);
+    }
+  }
+  // dots on top of connectors; green = entry (start), red = exit (end)
+  for (const c of shown) {
+    el("circle", { cx: c.entry[0], cy: c.entry[1], r: halo, fill: "#0b0f17",
+      "fill-opacity": .55, stroke: "none" }, routeLayer);
+    el("circle", { cx: c.exit[0], cy: c.exit[1], r: halo, fill: "#0b0f17",
+      "fill-opacity": .55, stroke: "none" }, routeLayer);
+    el("circle", { cx: c.exit[0], cy: c.exit[1], r: dot, fill: "#e8564a",
+      stroke: "#fff", "stroke-width": px(0.6) }, routeLayer);
+    el("circle", { cx: c.entry[0], cy: c.entry[1], r: dot, fill: "#3fbf6a",
+      stroke: "#fff", "stroke-width": px(0.6) }, routeLayer);
+  }
+}
 function renderDensity() {
   if (!densityLayer) return;
   densityLayer.textContent = "";
@@ -1995,7 +2065,7 @@ function el(tag, attrs, parent) {
   if (parent) parent.appendChild(e);
   return e;
 }
-let artworkLayer, planLayer, editLayer, refLayer, densityLayer;
+let artworkLayer, planLayer, editLayer, refLayer, densityLayer, routeLayer;
 // editor-local canvas visibility (Layers panel eye toggles). Deliberately NOT
 // persisted anywhere: hiding is a tracing aid, and the design must stitch
 // identically whether or not something is hidden on screen.
@@ -2027,12 +2097,14 @@ function renderAll() {
   planLayer = el("g", { class: "planLayer" }, canvas);
   densityLayer = el("g", {}, canvas);   // heat overlay above plan, below guides
   guideLayer = el("g", {}, canvas);
+  routeLayer = el("g", {}, canvas);     // entry/exit markers, above the artwork
   editLayer = el("g", {}, canvas);
   renderPlanLayer();
   renderGrid();
   renderReference();
   renderDensity();
   renderGuides();
+  renderRoute();
   drawRulers();
   for (const o of design.objects) {
     if (!o.d) continue;
@@ -2393,6 +2465,7 @@ function renderAvailableParams(o, body) {
 function renderEditLayer() {
   if (!editLayer) return;
   editLayer.textContent = "";
+  if (typeof renderRoute === "function") renderRoute();  // track selection + zoom
   const objs = selection.map(byId).filter(Boolean);
   renderInspect(objs);
   if (activeTool === "pen") {
@@ -4113,6 +4186,8 @@ $("helpOverlay").addEventListener("click", (ev) => {
 /* ---------- boot ---------- */
 async function refresh() {
   design = await getDesign();
+  routeData = null;                 // entry/exit plan is stale after any edit
+  if (routeOn) await fetchRoute();  // reload before renderAll draws the overlay
   // the header IS the filename — with several designs open, "which file am
   // I editing" should never need a hover. Full path stays in the tooltip,
   // and the tab title matches so the right tab is findable too.

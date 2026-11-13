@@ -52,6 +52,85 @@ needs_binary = pytest.mark.skipif(discover() is None,
 
 # ---------------------------------------------------------------- pure contracts
 
+class TestRouteWalk:
+    """The shared start_at_nearest_point sew-walk behind both exposed_hops and
+    the artifact /route endpoint: per column, where it enters and exits."""
+
+    def _cols(self):
+        # three horizontal bands; the middle one placed to the right of the
+        # first, the third drawn right-to-left so its NEAR end is its index -1
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn
+        a = PlannedColumn(left=[(0, 0), (10, 0)], right=[(0, 2), (10, 2)])
+        b = PlannedColumn(left=[(12, 0), (22, 0)], right=[(12, 2), (22, 2)])
+        c = PlannedColumn(left=[(34, 0), (24, 0)], right=[(34, 2), (24, 2)])
+        return [a, b, c]
+
+    def test_entry_exit_follow_nearest_end(self):
+        from cli_anything_inkstitch.trace.glyph_columns import column_ends, route_walk
+        cols = self._cols()
+        ends = [column_ends(c.left, c.right) for c in cols]
+        recs = route_walk(ends)
+        # column 0 is sewn end_a -> end_b by definition
+        assert recs[0]["entry"] == (0.0, 1.0)
+        assert recs[0]["exit"] == (10.0, 1.0)
+        assert recs[0]["is_jump_before"] is False
+        # column 1 enters at the end nearer the previous exit (10,1): (12,1)
+        assert recs[1]["entry"] == (12.0, 1.0)
+        assert recs[1]["exit"] == (22.0, 1.0)
+        # column 2 is drawn reversed; its near end to (22,1) is its index -1
+        assert recs[2]["entry"] == (24.0, 1.0)
+        assert recs[2]["exit"] == (34.0, 1.0)
+
+    def test_order_preserved_and_one_record_per_column(self):
+        from cli_anything_inkstitch.trace.glyph_columns import column_ends, route_walk
+        cols = self._cols()
+        recs = route_walk([column_ends(c.left, c.right) for c in cols])
+        assert [r["order"] for r in recs] == [0, 1, 2]
+
+    def test_no_covered_means_no_jumps(self):
+        from cli_anything_inkstitch.trace.glyph_columns import column_ends, route_walk
+        cols = self._cols()
+        recs = route_walk([column_ends(c.left, c.right) for c in cols], covered=None)
+        assert all(r["is_jump_before"] is False for r in recs)
+        assert all(r["exposed"] == 0.0 for r in recs)
+
+    def test_bare_travel_is_a_jump_covered_travel_is_not(self):
+        shapely = pytest.importorskip("shapely")
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        from cli_anything_inkstitch.trace.glyph_columns import (
+            PlannedColumn, column_ends, route_walk)
+        # two bands with a wide bare gap between them: the travel across the gap
+        # is a jump; a third band abutting the second gives a covered travel
+        a = PlannedColumn(left=[(0, 0), (0, 10)], right=[(2, 0), (2, 10)])
+        b = PlannedColumn(left=[(20, 10), (20, 0)], right=[(22, 10), (22, 0)])
+        c = PlannedColumn(left=[(20, 0), (20, -10)], right=[(22, 0), (22, -10)])
+        cols = [a, b, c]
+        covered = unary_union([Polygon(col.left + col.right[::-1]) for col in cols])
+        recs = route_walk([column_ends(col.left, col.right) for col in cols], covered)
+        assert recs[1]["is_jump_before"] is True        # across the bare gap
+        assert recs[1]["exposed"] > 0.0
+        assert recs[2]["is_jump_before"] is False        # b -> c stays in thread
+
+    def test_exposed_hops_reads_the_same_walk(self):
+        """exposed_hops must agree with route_walk — one source of truth."""
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import (
+            PlannedColumn, PlannedLetter, column_ends, exposed_hops, glyph_polygon,
+            route_walk)
+        a = PlannedColumn(left=[(0, 0), (0, 10)], right=[(2, 0), (2, 10)])
+        b = PlannedColumn(left=[(20, 10), (20, 0)], right=[(22, 10), (22, 0)])
+        contours = [[(0, 0), (2, 0), (2, 10), (0, 10)],
+                    [(20, 0), (22, 0), (22, 10), (20, 10)]]
+        letter = PlannedLetter("x", [a, b], contours, True)
+        hops = dict(exposed_hops(letter))
+        glyph = glyph_polygon(contours).buffer(0.05)
+        recs = route_walk([column_ends(c.left, c.right) for c in [a, b]], glyph)
+        assert hops == {r["order"] - 1: r["exposed"]
+                        for r in recs[1:] if r["exposed"] > 0.0}
+        assert hops          # there IS an exposed hop across the gap
+
+
 class TestOldStyleSatinSurvivesSimplify:
     def test_two_subpath_satin_passes_through(self):
         """Engine pairs a rung-less satin's rails node for node
