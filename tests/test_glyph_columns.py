@@ -539,3 +539,60 @@ class TestOnePassEngine:
         split = self._run(tmp_path, "--no-one-pass")
         assert len(one) == 1 and max(one[0]) - min(one[0]) > 35
         assert len(split) == 2
+
+
+def _stem_runs(pattern, x_max, min_dx=1.5):
+    """Top-layer passes over a letter's left stem (x < x_max, DST mm): its zigzag crosses the stem
+    in x; consecutive crossings advancing < 1.5 mm in y are one run; runs of 10+ are passes."""
+    pts = _stitches(pattern, with_jumps=True)
+    ys = [(a[1] + b[1]) / 2 for a, b in zip(pts, pts[1:])
+          if a[0] < x_max and b[0] < x_max and abs(b[0] - a[0]) > min_dx and abs(b[1] - a[1]) < 1.0]
+    runs, cur = [], [ys[0]] if ys else []
+    for y in ys[1:]:
+        if abs(y - cur[-1]) < 1.5:
+            cur.append(y)
+        else:
+            runs.append(cur)
+            cur = [y]
+    if cur:
+        runs.append(cur)
+    return [r for r in runs if len(r) >= 10]
+
+
+@needs_planner
+@needs_binary
+class TestLetteringOnePass:
+    """text-to-satin sews every column in one pass, as shapes-to-satin does (behavioural proof,
+    CLAUDE.md rule 3): an H's first stem ends beside its crossbar, and with the engine default
+    (end_at_nearest_point on) its top layer splits to finish near the bar."""
+
+    @pytest.fixture(autouse=True)
+    def real_schema(self):
+        import os
+        cands = [Path(__file__).parent.parent / "inkstitch", Path(os.environ.get("INKSTITCH_SOURCE", "/nonexistent"))]
+        src = next((c for c in cands if (c / "lib" / "elements").exists()), None)
+        if src is None:
+            pytest.skip("inkstitch source checkout not present")
+        from cli_anything_inkstitch.schema.extract import extract_schema, write_cache
+        write_cache(extract_schema(src))
+
+    def _run(self, tmp_path, flag):
+        d = tmp_path / flag[2:]
+        d.mkdir()
+        proj = _project(d)
+        r = CliRunner().invoke(root, ["--json", "tools", "text-to-satin", "--project", str(proj), "--font", FONT,
+                                      "--text", "H", "--height-mm", "20", flag])
+        assert r.exit_code == 0, r.output
+        assert "params_skipped" not in json.loads(r.output)
+        tree = etree.parse(json.loads(Path(proj).read_text())["svg_path"])
+        sat = [e for e in tree.getroot().iter() if (e.get("{http://inkstitch.org/namespace}satin_column") or "").lower() == "true"]
+        pattern = _export(proj, tmp_path / flag[2:], "h")
+        xs = [x for x, _ in _stitches(pattern)]
+        return sat, _stem_runs(pattern, min(xs) + 6.0)          # the stem is 5.2 mm wide
+
+    def test_every_column_one_pass_and_the_default_splits(self, tmp_path):
+        sat, runs = self._run(tmp_path, "--one-pass")
+        assert sat and all(e.get("{http://inkstitch.org/namespace}end_at_nearest_point") == "False" for e in sat)
+        assert len(runs) == 1
+        _, split = self._run(tmp_path, "--no-one-pass")
+        assert len(split) == 2

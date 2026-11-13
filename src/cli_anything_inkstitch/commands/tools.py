@@ -1551,6 +1551,11 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
 @click.option("--auto-params/--no-auto-params", default=True, show_default=True,
               help="Underlay, pull compensation and split satin chosen per "
                    "column (see _lettering_satin_params).")
+@click.option("--one-pass/--no-one-pass", default=True, show_default=True,
+              help="Sew every satin in one pass (as shapes-to-satin): end_at_nearest_point off, each "
+                   "column oriented to finish nearest the next, a trim where a handoff inside a letter "
+                   "would jump (> 3 mm) or cross bare fabric, columns after a trim starting exactly at "
+                   "their start. Letters routed through auto_satin keep its order and direction.")
 @click.option("--route/--no-route", default=True, show_default=True,
               help="Route letters whose planned order would leave travel "
                    "on bare fabric (an E's arms) with the engine's "
@@ -1559,7 +1564,7 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
 @click.pass_context
 def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                   letter_spacing_pct, width_mm, cx_mm, cy_mm, rotate_deg, merge_joins,
-                  fallback, color, pull_comp_mm, auto_params, route):
+                  fallback, color, pull_comp_mm, auto_params, one_pass, route):
     """Set TEXT from a TTF as per-stroke satin columns: no rung review.
 
     Each letter is cut at its junctions into strokes, and each stroke gets
@@ -1613,12 +1618,16 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
         top.set(f"{{{INKSCAPE_NS}}}label", text)
         report, last_elems, param_errors = [], [], []
         to_route, groups = [], []
+        skipped: set = set()
+        routed_groups: list[str] = []
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
+        arrival = None                      # where the needle is before this letter (one-pass plan)
         for li, lt in enumerate(letters):
             g = etree.SubElement(top, f"{{{SVG_NS}}}g")
             g.set("id", f"text{n}_l{li}")
             g.set(f"{{{INKSCAPE_NS}}}label", lt.char)
             as_fill = (not lt.ok and fallback == "fill") or not lt.columns
+            routes = False
             made = []
             if as_fill:
                 for k, d in enumerate(gc.fill_ds(lt.contours, tx)):
@@ -1629,6 +1638,15 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                     made.append((p, "auto_fill", {}))
             else:
                 band_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole glyph
+                # A letter auto_satin will route keeps auto_satin's order and direction (it reverses
+                # each satin to follow its route); the rest get the one-pass plan, in sewing order.
+                routes = route and len(lt.columns) >= 2 and gc.exposed_travel_mm(lt) > gc.EXPOSED_TRAVEL_MM
+                op = None
+                if one_pass and not routes:
+                    op = gc.plan_one_pass(lt, arrival=arrival, trim_handoffs=True)
+                    arrival = op["exit"]
+                else:
+                    arrival = None
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"text{n}_l{li}_c{k}")
@@ -1636,17 +1654,30 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
                     extra = (_lettering_satin_params(c.widths(), pull_comp_mm, band_width_mm=band_w)
                              if auto_params else {})
+                    if op is not None:
+                        # readers: lib/elements/satin_column.py end_at_nearest_point (end_point /
+                        # _split_top_layer), start_at_nearest_point (start_point / first_stitch),
+                        # lib/elements/element.py trim_after
+                        one = {"end_at_nearest_point": "false"}
+                        if k in op["start_exact"]:
+                            one["start_at_nearest_point"] = "false"
+                        if k in op["trim_after"]:
+                            one["trim_after"] = "true"
+                        extra.update(_schema_known(schema, "satin_column", one, skipped))
                     made.append((p, "satin_column", extra))
+                if one_pass and routes:
+                    routed_groups.append(g.get("id"))
             for p, st, extra in made:
                 try:
                     _apply_params_to_element(p, st, extra, schema, force=True)
                 except UserError as exc:
                     param_errors.append({"id": p.get("id"), "error": str(exc)})
+            if as_fill:
+                arrival = None
             if made:
                 last_elems.append(made[-1][0])
             ids_here = [p.get("id") for p, st, _ in made if st == "satin_column"]
-            travel = 0.0 if as_fill else gc.exposed_travel_mm(lt)
-            if route and len(ids_here) >= 2 and travel > gc.EXPOSED_TRAVEL_MM:
+            if routes:
                 to_route.append(ids_here)
             groups.append(g.get("id"))
             chk = lt.check or {}
@@ -1686,6 +1717,17 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
         root = tree.getroot()
         before_xml = etree.tostring(root).decode("utf-8")
         sat, ptype = qname("satin_column"), qname("path_type")
+        for gid in routed_groups:
+            g = next((e for e in root.iter() if e.get("id") == gid), None)
+            for e in (g.iter(f"{{{SVG_NS}}}path") if g is not None else []):
+                if (e.get(sat) or "").lower() != "true":
+                    continue
+                one = _schema_known(schema, "satin_column", {"end_at_nearest_point": "false"}, skipped)
+                if one:
+                    try:
+                        _apply_params_to_element(e, None, one, schema, force=True)
+                    except UserError as exc:
+                        param_errors.append({"id": e.get("id"), "error": str(exc)})
         for gid in groups[:-1]:
             g = next((e for e in root.iter() if e.get("id") == gid), None)
             if g is None:
@@ -1705,6 +1747,9 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
             command="tools text-to-satin (trims between letters)",
             patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
     payload["routed_letters"] = len(to_route)
+    if skipped:
+        payload["params_skipped"] = {"names": sorted(skipped),
+                                     "why": "the loaded schema doesn't know them (run with the engine source mined)"}
     if param_errors:
         payload["param_errors"] = param_errors
     emit(ctx, payload)
