@@ -124,6 +124,42 @@ def _normalize_new_satins(extension_name: str, new_tree) -> int:
     return fixed
 
 
+def _color_satin_underpaths(extension_name: str, new_tree) -> int:
+    """Give auto_satin's travel strokes the stroke colour of the satins they run under.
+
+    auto_satin builds each travel stroke's style from its source satin's `style` attribute only
+    (lib/stitches/auto_satin.py RunningStitch.to_element). Once _normalize_new_satins has lifted a
+    satin's colour out of `style` into a `stroke` attribute (any earlier engine tool run on the same
+    document: text-to-satin routes one letter at a time), the next run's travel strokes come out with
+    no stroke colour at all, and the engine never sews a path without one
+    (lib/elements/utils/nodes.py node_to_elements: Stroke only when stroke_color is set). Their travel
+    then sews as a jump instead of a running stitch under the satins (measured: a 9.4 mm untrimmed
+    jump across a routed 'a'). The colour is taken from a satin in the same parent group (one
+    auto_satin run routes one group of one colour). Returns how many strokes were coloured."""
+    if extension_name != "auto_satin":
+        return 0
+    import re as _re
+    ptype = "{http://inkstitch.org/namespace}path_type"
+    ink_sat = "{http://inkstitch.org/namespace}satin_column"
+
+    def colour(el):
+        m = _re.search(r"(?:^|;)\s*stroke\s*:\s*([^;]+)", el.get("style") or "")
+        c = (m.group(1).strip() if m else None) or el.get("stroke")
+        return None if c in (None, "", "none") else c
+
+    n = 0
+    for el in new_tree.getroot().iter():
+        if not isinstance(el.tag, str) or el.get(ptype) != "satin-underpath" or colour(el):
+            continue
+        parent = el.getparent()
+        sib = next((colour(s) for s in (parent if parent is not None else [])
+                    if isinstance(s.tag, str) and (s.get(ink_sat) or "").lower() == "true" and colour(s)), None)
+        if sib:
+            el.set("stroke", sib)
+            n += 1
+    return n
+
+
 def _simplify_new_satin_rails(extension_name: str, before_xml: str,
                               new_tree) -> dict | None:
     """RDP-simplify rails of satins the tool created or rewrote.
@@ -265,6 +301,9 @@ def run_tool_core(ctx, project_path, extension_name, ids, args, *,
         normalized = _normalize_new_satins(extension_name, new_tree)
         if normalized:
             extra_payload["normalized_satins"] = normalized
+        colored = _color_satin_underpaths(extension_name, new_tree)
+        if colored:
+            extra_payload["colored_underpaths"] = colored
         # node economy: engine satin output samples its rails from the input
         # density — simplify NEW/CHANGED satin rails before they enter the
         # document (helper contract + reader citation: trace/satinize.py

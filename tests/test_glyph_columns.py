@@ -606,3 +606,30 @@ class TestLetteringOnePass:
         assert len(runs) == 1
         _, split = self._run(tmp_path, "--no-one-pass")
         assert len(split) == 2
+
+
+class TestRoutedTravelIsSewn:
+    """auto_satin copies only a source satin's `style` into its travel strokes (lib/stitches/
+    auto_satin.py RunningStitch.to_element); once a satin's colour lives in a `stroke` attribute the
+    travel stroke has none, and the engine never sews a path without a stroke colour
+    (lib/elements/utils/nodes.py node_to_elements)."""
+
+    SVG = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkstitch="http://inkstitch.org/namespace">'
+           '<g><path id="s" stroke="#123456" inkstitch:satin_column="True" d="M0,0 L9,0 M0,2 L9,2"/>'
+           '<path id="r" style="fill:none;stroke-dasharray:1,0.2" inkstitch:path_type="satin-underpath" d="M0,0 L9,0"/>'
+           '<path id="ok" style="fill:none;stroke:#ff0000" inkstitch:path_type="satin-underpath" d="M0,0 L9,0"/></g>'
+           '<g><path id="lone" style="fill:none" inkstitch:path_type="satin-underpath" d="M0,0 L9,0"/></g></svg>')
+
+    def test_uncoloured_travel_takes_its_satins_colour(self):
+        from cli_anything_inkstitch.commands.tools import _color_satin_underpaths
+        t = etree.ElementTree(etree.fromstring(self.SVG))
+        by = lambda i: next(e for e in t.getroot().iter() if e.get("id") == i)
+        assert _color_satin_underpaths("auto_satin", t) == 1
+        assert by("r").get("stroke") == "#123456"
+        assert by("ok").get("stroke") is None          # already coloured: left alone
+        assert by("lone").get("stroke") is None        # no satin beside it to take a colour from
+
+    def test_only_after_auto_satin(self):
+        from cli_anything_inkstitch.commands.tools import _color_satin_underpaths
+        t = etree.ElementTree(etree.fromstring(self.SVG))
+        assert _color_satin_underpaths("fill_to_satin", t) == 0
