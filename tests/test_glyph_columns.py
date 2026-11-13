@@ -248,6 +248,16 @@ class TestPlanOnePass:
         plan_off = plan_one_pass(_letter([_bar(0, 20, 20, 20), _bar(10, 19, 10, 0)]), trim_handoffs=False)
         assert plan_off["trim_after"] == []
 
+    def test_handoff_is_measured_from_the_rail_end_not_the_centre(self):
+        pytest.importorskip("shapely")
+        from cli_anything_inkstitch.trace.glyph_columns import plan_one_pass
+        # a 6 mm wide bar ending at x = 10, then a post whose centre line starts 1.5 mm from the bar's
+        # centre-line end, but 3.35 mm from its top rail corner, where the last stitch can land
+        wide = _bar(0, 3, 10, 3, w=6.0)
+        post = _bar(11.5, 3, 11.5, -10, w=2.0)
+        plan = plan_one_pass(_letter([wide, post]))
+        assert plan["trim_after"] == [0]
+
     def test_trimmed_column_starts_nearest_its_arrival(self):
         pytest.importorskip("shapely")
         from cli_anything_inkstitch.trace.glyph_columns import column_ends, plan_one_pass
