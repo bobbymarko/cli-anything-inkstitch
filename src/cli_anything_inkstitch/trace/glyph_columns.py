@@ -1312,7 +1312,7 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
     n = len(cols)
     if n == 0:
         return {"trim_after": [], "start_exact": [], "reversed": [], "exit": arrival, "hidden_runs": []}
-    from shapely.geometry import Point, Polygon
+    from shapely.geometry import LineString, Point, Polygon
 
     def band(c):
         p = Polygon(list(c.left) + list(c.right)[::-1])
@@ -1337,8 +1337,17 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
     if trim_handoffs:                            # 2. trims where the handoff is a jump or bare
         recs = route_walk([column_ends(c.left, c.right) for c in cols], covered, as_drawn=True,
                           centre_lines=[centre_line(c.left, c.right) for c in cols])
+        lines = [LineString(centre_line(c.left, c.right)) for c in cols]
+
+        def rail_travel(k):
+            # The top layer's last stitch lands on a RAIL at the column's end, up to half its width
+            # from the centre-line end the walk uses: a 1.5 mm centre handoff sewed as a 3.2 mm jump.
+            # Measure from whichever end rail point is farther from the next column's centre line.
+            prev = cols[k - 1]
+            return max(lines[k].distance(Point(prev.left[-1])), lines[k].distance(Point(prev.right[-1])))
+
         trims |= {k - 1 for k in range(1, n)
-                  if recs[k]["travel"] > trim_mm or recs[k]["exposed"] > exposed_mm}
+                  if max(recs[k]["travel"], rail_travel(k)) > trim_mm or recs[k]["exposed"] > exposed_mm}
     cur = arrival                                # 3. a trimmed column starts nearest its arrival
     for k in range(n):
         a, b = column_ends(cols[k].left, cols[k].right)
