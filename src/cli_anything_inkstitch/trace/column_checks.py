@@ -102,6 +102,32 @@ def turns(pairs) -> list[dict]:
     return out
 
 
+KINK_NEAR_MM = 1.0       # a concavity this close to a rail's interior is a kink on that rail
+KINK_END_MARGIN = 3      # ...if it is at least this many pairs in from either end (not the junction)
+
+
+def short_stitch_kink(pairs, concavities) -> bool:
+    """Whether this column has a sharp inner-rail kink where short stitches would pile into bare
+    wedges: a tight turn (short stitches are on there) AND a concavity (a carried medial-axis inside
+    corner — a tail joining a ring, say) in the middle of a rail. At such a kink the short-stitch
+    inset bunches into two bare wedges instead of thinning a smooth turn, and the column reads better
+    with the inset off (the density is the same either way). A plain tight bowl (no mid-rail
+    concavity) and a mid-rail concavity with no tight turn (short stitches never trigger) are both
+    left alone. `concavities`: inside-corner points (mm, the column's frame)."""
+    if not concavities or not turns(pairs):
+        return False
+    n = len(pairs)
+    if n < 2 * KINK_END_MARGIN + 2:
+        return False
+    for side in (0, 1):
+        rail = [p[side] for p in pairs]
+        for i in range(KINK_END_MARGIN, n - KINK_END_MARGIN):
+            rx, ry = rail[i]
+            if any((rx - cx) ** 2 + (ry - cy) ** 2 < KINK_NEAR_MM ** 2 for cx, cy in concavities):
+                return True
+    return False
+
+
 def sharp_corners(contours, span_mm: float = CORNER_SPAN_MM, turn_deg: float = CORNER_TURN_DEG):
     """Points where the outline turns at least turn_deg within span_mm either side: a drawn corner
     (an L's elbow, a D's stem meeting its bowl), not a curve (an S's bowl). One point per corner."""

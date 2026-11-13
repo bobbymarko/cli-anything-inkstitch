@@ -211,3 +211,36 @@ class TestEaseEnds:
         assert pl.check.get("eased_ends") == [0]
         assert len(cc.fans(new)) <= before_fans
         assert gc._crossed(new) == 0
+
+
+def _tight_bowl(r_in=2.0, r_out=8.0, n=22):
+    """A smooth quarter-turn bowl: the inner rail runs ~1/4 of the outer, so turns() flags it (a
+    genuine tight turn where short stitches thin the inside), and it is not a fan."""
+    pairs = []
+    for k in range(n + 1):
+        a = math.pi / 2 * k / n
+        pairs.append(((r_in * math.cos(a), r_in * math.sin(a)), (r_out * math.cos(a), r_out * math.sin(a))))
+    return pairs
+
+
+class TestShortStitchKink:
+    """A sharp inner-rail kink on a tight turn (a tail joining a ring) suppresses the short-stitch
+    inset; a plain tight bowl, and a kink without a tight turn, are left alone."""
+
+    def test_kink_on_a_tight_turn_is_flagged(self):
+        from cli_anything_inkstitch.trace import column_checks as cc
+        pairs = _tight_bowl()
+        assert cc.turns(pairs)                               # a genuine tight turn
+        mid = len(pairs) // 2
+        assert cc.short_stitch_kink(pairs, [pairs[mid][0]]) is True   # concavity mid inner rail -> kink
+
+    def test_a_plain_tight_bowl_is_left_alone(self):
+        from cli_anything_inkstitch.trace import column_checks as cc
+        pairs = _tight_bowl()
+        assert cc.short_stitch_kink(pairs, []) is False      # no concavity -> keep short stitches
+
+    def test_a_kink_without_a_tight_turn_is_left_alone(self):
+        from cli_anything_inkstitch.trace import column_checks as cc
+        pairs = [((0.0, y), (2.0, y)) for y in np.linspace(0, 20, 21)]   # a straight bar, no turn
+        assert not cc.turns(pairs)
+        assert cc.short_stitch_kink(pairs, [pairs[10][0]]) is False      # short stitches never trigger
