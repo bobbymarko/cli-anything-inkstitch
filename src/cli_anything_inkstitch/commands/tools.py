@@ -160,6 +160,66 @@ def _color_satin_underpaths(extension_name: str, new_tree) -> int:
     return n
 
 
+def _routed_handoffs_to_trim(group, uu_per_mm: float) -> list:
+    """The elements of an auto_satin-routed group to trim after: those whose handoff to the next
+    sewn element would be a jump (longer than ONE_PASS_TRIM_MM less its margin), the same rule as
+    plan_one_pass. auto_satin's own routing assumes the engine's end_at_nearest_point, which pulls a
+    satin's end toward the next element; with one-pass satins (that setting off) a satin finishes at
+    its drawn end and the gap to the next element can exceed collapse_len.
+
+    Exit: a satin's farther end rail point (its last stitch lands on a rail); a running stitch's last
+    point. Entry: a satin's centre line nearest that exit (start_at_nearest_point, on by default), or
+    its first rail point when that is off (lib/elements/satin_column.py first_stitch); a running
+    stitch's first point. Elements the engine won't sew (no stroke colour, no fill) are skipped."""
+    import math
+    import re as _re
+
+    from shapely.geometry import LineString, Point
+
+    from cli_anything_inkstitch.artifact.design_model import split_subpaths
+    from cli_anything_inkstitch.artifact.gate import flatten_path
+    from cli_anything_inkstitch.svg.attrs import qname
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+
+    sat, start_near, trim = qname("satin_column"), qname("start_at_nearest_point"), qname("trim_after")
+
+    def stroked(e):
+        m = _re.search(r"(?:^|;)\s*stroke\s*:\s*([^;]+)", e.get("style") or "")
+        c = (m.group(1).strip() if m else None) or e.get("stroke")
+        return c not in (None, "", "none")
+
+    items = []
+    for e in group.iter(f"{{{SVG_NS}}}path"):
+        d = e.get("d")
+        if not d or not stroked(e):
+            continue
+        subs = split_subpaths(d)
+        if (e.get(sat) or "").lower() == "true":
+            if len(subs) < 2:
+                continue
+            L, R = flatten_path(subs[0]), flatten_path(subs[1])
+            if len(L) < 2 or len(R) < 2:
+                continue
+            r_end = R[-1] if math.dist(R[-1], L[-1]) <= math.dist(R[0], L[-1]) else R[0]
+            exact = (e.get(start_near) or "").lower() in ("false", "0")
+            items.append({"e": e, "exits": [L[-1], r_end], "entry_pt": L[0],
+                          "entry_line": None if exact else LineString(gc.centre_line(L, R))})
+        else:
+            P = flatten_path(subs[0])
+            if len(P) >= 2:
+                items.append({"e": e, "exits": [P[-1]], "entry_pt": P[0], "entry_line": None})
+    limit = (gc.ONE_PASS_TRIM_MM - gc.ONE_PASS_TRIM_MARGIN_MM) * uu_per_mm
+    out = []
+    for a, b in zip(items, items[1:]):
+        if (a["e"].get(trim) or "").lower() == "true":
+            continue
+        travel = max((b["entry_line"].distance(Point(p)) if b["entry_line"] is not None
+                      else math.dist(p, b["entry_pt"])) for p in a["exits"])
+        if travel > limit:
+            out.append(a["e"])
+    return out
+
+
 def _simplify_new_satin_rails(extension_name: str, before_xml: str,
                               new_tree) -> dict | None:
     """RDP-simplify rails of satins the tool created or rewrote.
@@ -1756,6 +1816,9 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
         root = tree.getroot()
         before_xml = etree.tostring(root).decode("utf-8")
         sat, ptype = qname("satin_column"), qname("path_type")
+        routed_trims = 0
+        from cli_anything_inkstitch.svg.units import document_scale as _ds
+        uu_routed = gc.PX_PER_MM / ((_ds(root) or (1.0, 1.0))[0])
         for gid in routed_groups:
             g = next((e for e in root.iter() if e.get("id") == gid), None)
             for e in (g.iter(f"{{{SVG_NS}}}path") if g is not None else []):
@@ -1767,6 +1830,13 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                         _apply_params_to_element(e, None, one, schema, force=True)
                     except UserError as exc:
                         param_errors.append({"id": e.get("id"), "error": str(exc)})
+            # the route's handoffs, now that its satins end where they are drawn
+            for e in (_routed_handoffs_to_trim(g, uu_routed) if g is not None else []):
+                try:
+                    _apply_params_to_element(e, None, {"trim_after": "true"}, schema, force=True)
+                    routed_trims += 1
+                except UserError as exc:
+                    param_errors.append({"id": e.get("id"), "error": str(exc)})
         for gid in groups[:-1]:
             g = next((e for e in root.iter() if e.get("id") == gid), None)
             if g is None:
@@ -1786,6 +1856,8 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
             command="tools text-to-satin (trims between letters)",
             patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
     payload["routed_letters"] = len(to_route)
+    if routed_trims:
+        payload["routed_trims"] = routed_trims
     if skipped:
         payload["params_skipped"] = {"names": sorted(skipped),
                                      "why": "the loaded schema doesn't know them (run with the engine source mined)"}

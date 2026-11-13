@@ -633,3 +633,37 @@ class TestRoutedTravelIsSewn:
         from cli_anything_inkstitch.commands.tools import _color_satin_underpaths
         t = etree.ElementTree(etree.fromstring(self.SVG))
         assert _color_satin_underpaths("fill_to_satin", t) == 0
+
+
+class TestRoutedHandoffs:
+    """A routed letter's satins end where drawn once end_at_nearest_point is off; any handoff to the
+    next sewn element that would be a jump gets a trim (same rule as plan_one_pass). 1 unit = 1 mm."""
+
+    def _group(self, body):
+        return etree.fromstring('<g xmlns="http://www.w3.org/2000/svg" '
+                                'xmlns:inkstitch="http://inkstitch.org/namespace">' + body + '</g>')
+
+    def test_long_handoff_trimmed_short_one_not(self):
+        from cli_anything_inkstitch.commands.tools import _routed_handoffs_to_trim
+        g = self._group(
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
+            # b starts 4 mm on from a's end: a jump
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M14,0 L14,10 M16,0 L16,10"/>'
+            # a running stitch picking up right at b's end: no jump
+            '<path id="r" style="fill:none;stroke:#000" d="M15,10 L15,20"/>'
+            # an unsewn stroke (no colour) is not an element the engine sews
+            '<path id="x" style="fill:none" d="M40,40 L50,50"/>')
+        assert [e.get("id") for e in _routed_handoffs_to_trim(g, 1.0)] == ["a"]
+
+    def test_handoff_just_under_collapse_len_is_trimmed_for_the_overshoot(self):
+        from cli_anything_inkstitch.commands.tools import _routed_handoffs_to_trim
+        # a's end rail points are 2.7 mm from b's centre line (x = 12.7): under collapse_len (3 mm) but
+        # within the 0.5 mm overshoot margin, so trimmed
+        g = self._group(
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M11.7,2 L11.7,-10 M13.7,2 L13.7,-10"/>')
+        assert [e.get("id") for e in _routed_handoffs_to_trim(g, 1.0)] == ["a"]
+        far = self._group(
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M11.0,2 L11.0,-10 M13.0,2 L13.0,-10"/>')
+        assert _routed_handoffs_to_trim(far, 1.0) == []          # 2.0 mm: stitched through
