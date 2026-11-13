@@ -103,6 +103,10 @@ cli-anything-inkstitch regress compare /path/to/base.json /path/to/new.json --ou
   max(2, 10%), or a case that now fails. A stitch count moving more than 5% is a warning. The
   thresholds are named constants at the top of
   [`regress/compare.py`](src/cli_anything_inkstitch/regress/compare.py).
+- To measure a PR branch without checking it out, point the suite at its source:
+  `python tools/regress_with_src.py /path/to/branch/src --label branch@rev -- regress run --results new.json`
+  (that checkout's planner sews the cases; this one supplies the suite and the engine gate; the
+  checkout is not modified; `git archive <branch> src` makes a throwaway copy).
 - Runs are sequential: each case takes the host render lock (`/tmp/inkstitch-render.lock`) around
   every engine run, as `engine_gate` does. Do not wrap `regress run` in another `flock` on it.
 

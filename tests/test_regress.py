@@ -177,6 +177,15 @@ class TestCompare:
         assert res.exit_code == 0, res.output
         assert "PASS" in res.output
 
+    def test_quick_run_against_a_full_baseline_ignores_the_rest(self, tmp_path):
+        base = _write_results(tmp_path, "base", {"a": _ok(), "b": _ok()})
+        new = _write_results(tmp_path, "new", {"a": _ok()})
+        doc = json.loads(new.read_text())
+        doc["meta"]["quick"] = True
+        new.write_text(json.dumps(doc))
+        res = K.compare(K.load(base), K.load(new), None, images=False)
+        assert [r["id"] for r in res["rows"]] == ["a"] and res["not_run"] == 1 and res["warned"] == 0
+
     def test_json_output(self, tmp_path):
         base = _write_results(tmp_path, "base", {"a": _ok()})
         res = CliRunner().invoke(root, ["regress", "compare", str(base), str(base), "--no-images", "--json"])

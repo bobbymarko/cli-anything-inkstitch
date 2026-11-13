@@ -81,9 +81,12 @@ def compare(base: dict, new: dict, out_dir: str | Path | None = None, *,
             images: bool = True) -> dict[str, Any]:
     from cli_anything_inkstitch.regress.sheet import side_by_side
     ids = list(new["cases"]) + [i for i in base["cases"] if i not in new["cases"]]
-    rows, regressed, warned = [], 0, 0
+    rows, regressed, warned, not_run = [], 0, 0, 0
     for cid in ids:
         b, n = base["cases"].get(cid), new["cases"].get(cid)
+        if (n is None and new.get("meta", {}).get("quick")) or (b is None and base.get("meta", {}).get("quick")):
+            not_run += 1                      # one side is a --quick run: the rest was never run
+            continue
         v = judge(b, n)
         row = {"id": cid, **v}
         if b and n and b["status"] == "ok" and n["status"] == "ok":
@@ -109,7 +112,7 @@ def compare(base: dict, new: dict, out_dir: str | Path | None = None, *,
         rows.append(row)
     return {"rows": rows, "regressed": regressed, "warned": warned,
             "ok": regressed == 0,
-            "changed": sum(1 for r in rows if r["changed"]),
+            "changed": sum(1 for r in rows if r["changed"]), "not_run": not_run,
             "base_meta": base.get("meta", {}), "new_meta": new.get("meta", {})}
 
 
@@ -135,5 +138,7 @@ def format_table(result: dict) -> str:
     nb, nn = result["base_meta"], result["new_meta"]
     foot = [f"baseline: {nb.get('git_branch')}@{nb.get('git_rev')}   new: {nn.get('git_branch')}@{nn.get('git_rev')}",
             f"{len(result['rows'])} cases, {result['changed']} changed, {result['regressed']} regressed, "
-            f"{result['warned']} with warnings -> {'FAIL' if result['regressed'] else 'PASS'}"]
+            f"{result['warned']} with warnings"
+            + (f", {result['not_run']} not in the quick run" if result.get("not_run") else "")
+            + f" -> {'FAIL' if result['regressed'] else 'PASS'}"]
     return "\n".join(lines + ([""] + detail if detail else []) + [""] + foot)
