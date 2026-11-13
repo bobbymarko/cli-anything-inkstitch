@@ -277,7 +277,7 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
 
 def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
                 overrides: dict | None = None, spread_turns_on: bool = True,
-                tidy_joins_on: bool = True) -> list[PlannedLetter]:
+                tidy_joins_on: bool = True, joint_overlap_mm: float | None = None) -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
     outlines) as satin columns, one shape at a time: the planner's
     `art_columns.plan_shape`, the same planner that drove an all-satin client
@@ -300,8 +300,10 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
     along the inner curve instead of pinching at one point (spread_turns).
     A shape with hand-placed rungs is left as placed.
 
-    tidy_joins_on: where columns meet, trim overlaps deeper than about 1 mm back to a 0.4 mm
-    overlap, and close bare wedges at junctions (trace/joins.py).
+    tidy_joins_on: where columns meet, trim deep overlaps, close bare wedges at junctions, and lay
+    every butting end flat along the edge it meets, joint_overlap_mm under it (default
+    joins.KEEP_MM, 0.4), sewn before the column it tucks under (trace/joins.py). A shape's
+    override "joint_overlap_mm" sets its own.
     """
     import numpy as np
 
@@ -342,8 +344,9 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
             # Run even on a rungs-override shape: tidy_joins works on where the shape's own
             # columns MEET (overlaps/wedges), which is orthogonal to interior rung placement,
             # and place_rungs has already run above. Skipping it left override shapes un-tidied.
-            from cli_anything_inkstitch.trace.joins import tidy_joins
-            planned = tidy_joins(planned)
+            from cli_anything_inkstitch.trace.joins import KEEP_MM, tidy_joins
+            keep = ov.get("joint_overlap_mm", joint_overlap_mm)
+            planned = tidy_joins(planned, keep_mm=KEEP_MM if keep is None else float(keep))
         if do_ease:
             # After tidy_joins, so the ease works on the final end cuts (a junction end may have been
             # trimmed/snapped) and nothing undoes it. A hand-placed-rungs shape is left as placed.

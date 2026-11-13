@@ -794,16 +794,19 @@ def _style_autorun_tops(ctx, project_path, stitch_length_mm, bean_repeats):
 # in a run), so thread doesn't pile up there. short_dist_mm must stay below the rail's normal spacing
 # (about the satin spacing): above it every stitch is shortened and the whole column thins. None keeps
 # the engine's default (15 %, 0.25 mm).
+# joint_overlap_mm: how far a butting column's end runs under the column it meets (trace/joins.py
+# KEEP_MM). 0.4 matches a commercial digitizer's 0.3-0.4 mm on twill; knit and fleece stretch and
+# pull joints apart, so they tuck further (0.6: a starting point, not yet measured on a sew-out).
 FABRICS = {
     #            spacing  pull  centre walk below  zigzag from (mm)
     "standard": dict(spacing_mm=None, pull_comp_mm=0.2, center_below_mm=1.5, zigzag_from_mm=4.0,
-                     short_inset=None, short_dist_mm=None),
+                     short_inset=None, short_dist_mm=None, joint_overlap_mm=0.4),
     "twill":    dict(spacing_mm=0.4, pull_comp_mm=0.2, center_below_mm=2.0, zigzag_from_mm=5.0,
-                     short_inset="30 50", short_dist_mm=0.25),
+                     short_inset="30 50", short_dist_mm=0.25, joint_overlap_mm=0.4),
     "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=4.0,
-                     short_inset="30 50", short_dist_mm=0.25),
+                     short_inset="30 50", short_dist_mm=0.25, joint_overlap_mm=0.6),
     "fleece":   dict(spacing_mm=0.38, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=3.0,
-                     short_inset="30 50", short_dist_mm=0.25),
+                     short_inset="30 50", short_dist_mm=0.25, joint_overlap_mm=0.6),
 }
 
 
@@ -1025,7 +1028,7 @@ def _override_params(spec: dict, satin: bool) -> dict:
     return p
 
 
-OVERRIDE_KEYS = {"split", "seam", "rungs", "underlay", "density_mm", "pull_comp_mm", "short_stitch_inset",
+OVERRIDE_KEYS = {"split", "seam", "rungs", "joint_overlap_mm", "underlay", "density_mm", "pull_comp_mm", "short_stitch_inset",
                  "short_stitch_distance_mm", "angle", "stitch", "reason"}
 
 
@@ -1118,9 +1121,15 @@ def _doc_mm_frame(root, uu_per_mm):
               help="Tilt the rungs into tight turns so the inner ends spread along the inner curve "
                    "instead of pinching at one point (the inside of an S's bowl).")
 @click.option("--tidy-joins/--no-tidy-joins", default=True, show_default=True,
-              help="Where columns meet: trim overlaps deeper than ~1 mm back to a 0.4 mm overlap (an arm's "
-                   "end sewn across its bar, a strand behind a crossing jutting out), and close bare "
-                   "wedges at junctions by running the nearest end on into its neighbour.")
+              help="Where columns meet: every butting end is laid flat along the edge it meets and runs "
+                   "--joint-overlap-mm under it (deep overlaps cut back, short ends run on), the column "
+                   "on top sews after the one tucked under it, and bare wedges at junctions are closed "
+                   "by running the nearest end on into its neighbour.")
+@click.option("--joint-overlap-mm", type=float, default=None,
+              help="How far a column's end runs under the column it butts into (laid flat along its "
+                   "edge; that one sews on top). Default: the fabric preset's (0.4 mm; more on knit and "
+                   "fleece, which pull apart). 0 butts the ends exactly on the edge. Per shape: the "
+                   "override key joint_overlap_mm.")
 @click.option("--one-pass/--no-one-pass", default=True, show_default=True,
               help="Sew every satin in one pass: end_at_nearest_point off (the engine default splits a "
                    "column's top layer to finish near the next element, a seam mid-column), each column "
@@ -1147,7 +1156,7 @@ def _doc_mm_frame(root, uu_per_mm):
                    "this JSON-lines file, a fixture for planner tests (default: next to the project).")
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
-                    spread_turns, tidy_joins, one_pass, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
+                    spread_turns, tidy_joins, joint_overlap_mm, one_pass, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
                     cases_path):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
@@ -1233,11 +1242,15 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 ov["seam"] = from_doc(tuple(map(float, spec["seam"])))
             if spec.get("rungs"):
                 ov["rungs"] = [tuple(from_doc(tuple(map(float, q))) for q in seg) for seg in spec["rungs"]]
+            if spec.get("joint_overlap_mm") is not None:
+                ov["joint_overlap_mm"] = float(spec["joint_overlap_mm"])
             if ov:
                 plan_ov[el.get("id")] = ov
         planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)],
                                  one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns,
-                                 tidy_joins_on=tidy_joins)
+                                 tidy_joins_on=tidy_joins,
+                                 joint_overlap_mm=FABRICS[fabric]["joint_overlap_mm"]
+                                 if joint_overlap_mm is None else joint_overlap_mm)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         fill_of = [_sews_as_fill(lt, spec, fallback) for lt, spec in zip(planned, spec_of)]
         # One pass per satin, decided in SEWING order (thread order), so each shape's first column
@@ -1338,6 +1351,9 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                            **({"spread_turns": chk["spread_turns"]} if chk.get("spread_turns") else {}),
                            **({"joins_trimmed": len(chk["joins_trimmed"])} if chk.get("joins_trimmed") else {}),
                            **({"wedges_closed": len(chk["wedges_closed"])} if chk.get("wedges_closed") else {}),
+                           **({"joint_ends_flattened": len(chk["joint_ends_flattened"])}
+                              if chk.get("joint_ends_flattened") else {}),
+                           **({"sew_order_changed": True} if chk.get("sew_order_changed") else {}),
                            **({"rungs_placed": chk["rungs_placed"]} if "rungs_placed" in chk else {}),
                            **({"one_pass": {"reversed": len(op["reversed"]), "trims_inside": len(op["trim_after"]),
                                             "longest_entry_run_mm": round(max(op["hidden_runs"] or [0.0]), 1)}}
