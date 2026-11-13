@@ -515,7 +515,7 @@ artifact stop
 | `open` | Open or resume the editor session (spawns the server if needed, opens the browser unless `--no-browser`). A session the user ended from the browser refuses a plain reopen; `--reopen` overrides. |
 | `poll` | Long-poll for the next feedback batch: `{objects, manipulation, text}` items. `--agent-reply` sends a chat reply before waiting. Queued feedback survives server restarts. |
 | `reply` | Send a chat message into the editor without polling |
-| `gate` | Stitchability audit (spec §8 of the design doc): error severity = desynced rung pairing, rail count/self-crossing, satin width outside 0.5–12 mm, twist risk; warning severity = narrow/wide-but-stitchable, satin >150 mm, fill handle >10 mm off its boundary. Errors should be fixed before handback. |
+| `gate` | Stitchability audit (spec §8 of the design doc): error severity = desynced rung pairing, rail count/self-crossing, satin width outside 0.5–12 mm, twist risk (a rung-less satin whose rails differ in node count; an editor `set_path` that produces one gets square pairing rungs added, rails untouched); warning severity = narrow/wide-but-stitchable, satin >150 mm, fill handle >10 mm off its boundary. Errors should be fixed before handback. |
 | `end` | End the session as the agent (plain `open` can revive it) |
 | `stop` | Shut down the background server |
 

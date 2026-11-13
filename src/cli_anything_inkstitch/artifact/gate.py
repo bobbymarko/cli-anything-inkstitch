@@ -307,6 +307,12 @@ def _finding(severity: str, obj_id: str, check: str, message: str, **data) -> di
             "message": message, **data}
 
 
+def rail_node_count(rail_d: str) -> int:
+    """Nodes on one satin rail as twist_risk counts them (one per M/L/C command). Shared with
+    trace/rungs.py pair_unpaired_rails, so the fix fires exactly where this check does."""
+    return len(re.findall(r"[MLCmlc]", rail_d))
+
+
 def check_satin(obj: dict[str, Any], scale: float) -> list[dict]:
     out: list[dict] = []
     rails = obj.get("rails") or []
@@ -361,8 +367,7 @@ def check_satin(obj: dict[str, Any], scale: float) -> list[dict]:
 
     # no rungs at all: node-count mismatch means the zigzag can twist
     if not rungs:
-        n_a = len(re.findall(r"[MLCmlc]", rails[0]))
-        n_b = len(re.findall(r"[MLCmlc]", rails[1]))
+        n_a, n_b = rail_node_count(rails[0]), rail_node_count(rails[1])
         if n_a != n_b:
             out.append(_finding(
                 "error", obj["id"], "twist_risk",
