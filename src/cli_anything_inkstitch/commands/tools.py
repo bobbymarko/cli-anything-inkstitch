@@ -840,7 +840,8 @@ def shape_band_width_mm(columns) -> float | None:
 
 
 def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None = None,
-                            fabric: str = "standard", band_width_mm: float | None = None) -> dict:
+                            fabric: str = "standard", band_width_mm: float | None = None,
+                            suppress_short_stitch: bool = False) -> dict:
     """Satin params for one planned column, from its median width and the fabric preset.
 
     Underlay by width (FABRICS): a centre walk below center_below_mm, an edge
@@ -869,7 +870,9 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
     if f["spacing_mm"] is not None:
         p["zigzag_spacing_mm"] = f"{f['spacing_mm']:g}"
     if f.get("short_inset") is not None:
-        p["short_stitch_inset"] = f["short_inset"]
+        # A sharp inner-rail kink (a tail joining a ring) piles the short-stitch inset into two bare
+        # wedges; the column reads better with it off, at the same density (see short_stitch_kink).
+        p["short_stitch_inset"] = "0" if suppress_short_stitch else f["short_inset"]
         p["short_stitch_distance_mm"] = f"{f['short_dist_mm']:g}"
     if bw < f["center_below_mm"]:
         p["center_walk_underlay"] = "true"
@@ -1245,13 +1248,25 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
                     if travel == "trim" else set()
                 band_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole shape
+                from cli_anything_inkstitch.trace import column_checks as _cc
+                from cli_anything_inkstitch.trace import joins as _joins
+                concavities = lt.check.get("concavities") or []
+                # Columns that fill to an acute-V point keep their short stitches (that tip is handled
+                # by the fill, not a kink); the suppression is for a ring/bowl with a tail-join kink.
+                acute_cols: set[int] = set()
+                for ai in range(len(lt.columns)):
+                    for bj in range(ai + 1, len(lt.columns)):
+                        if _joins._acute_v(lt.columns[ai], lt.columns[bj]):
+                            acute_cols |= {ai, bj}
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"{el.get('id')}_c{k}")
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
+                    kink = k not in acute_cols and _cc.short_stitch_kink(list(zip(c.left, c.right)), concavities)
                     extra = _schema_known(schema, "satin_column",
-                                          _lettering_satin_params(c.widths(), pull_comp_mm, fabric, band_w), skipped)
+                                          _lettering_satin_params(c.widths(), pull_comp_mm, fabric, band_w,
+                                                                  suppress_short_stitch=kink), skipped)
                     extra.update(_override_params(spec, True))
                     if k in hops:            # reader: lib/elements/element.py trim_after
                         extra["trim_after"] = "true"
