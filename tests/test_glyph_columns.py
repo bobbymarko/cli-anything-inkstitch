@@ -636,34 +636,45 @@ class TestRoutedTravelIsSewn:
 
 
 class TestRoutedHandoffs:
-    """A routed letter's satins end where drawn once end_at_nearest_point is off; any handoff to the
-    next sewn element that would be a jump gets a trim (same rule as plan_one_pass). 1 unit = 1 mm."""
+    """A routed letter's satins end where drawn once end_at_nearest_point is off; a handoff to the
+    next sewn element that would be a jump is sewn as a travel under stitching still to come when
+    that line is covered, else trimmed (same distance rule as plan_one_pass). 1 unit = 1 mm."""
 
     def _group(self, body):
         return etree.fromstring('<g xmlns="http://www.w3.org/2000/svg" '
                                 'xmlns:inkstitch="http://inkstitch.org/namespace">' + body + '</g>')
 
-    def test_long_handoff_trimmed_short_one_not(self):
-        from cli_anything_inkstitch.commands.tools import _routed_handoffs_to_trim
+    def _fixes(self, g):
+        from cli_anything_inkstitch.commands.tools import _routed_handoffs
+        return [(h["after"].get("id"), h["hide"] is not None) for h in _routed_handoffs(g, 1.0)]
+
+    def test_bare_long_handoff_is_trimmed_short_one_left(self):
         g = self._group(
             '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
-            # b starts 4 mm on from a's end: a jump
+            # b starts 4 mm on from a's end, across bare fabric: trim
             '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M14,0 L14,10 M16,0 L16,10"/>'
-            # a running stitch picking up right at b's end: no jump
+            # a running stitch picking up right at b's end: nothing to do
             '<path id="r" style="fill:none;stroke:#000" d="M15,10 L15,20"/>'
             # an unsewn stroke (no colour) is not an element the engine sews
             '<path id="x" style="fill:none" d="M40,40 L50,50"/>')
-        assert [e.get("id") for e in _routed_handoffs_to_trim(g, 1.0)] == ["a"]
+        assert self._fixes(g) == [("a", False)]
 
-    def test_handoff_just_under_collapse_len_is_trimmed_for_the_overshoot(self):
-        from cli_anything_inkstitch.commands.tools import _routed_handoffs_to_trim
+    def test_covered_handoff_is_hidden_travel_not_a_trim(self):
+        g = self._group(
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M14,5 L14,30 M16,5 L16,30"/>'
+            # c, sewn later, covers the straight line from a's end to b's start
+            '<path id="c" stroke="#000" inkstitch:satin_column="True" d="M8,-2 L18,-2 M8,6 L18,6"/>')
+        assert self._fixes(g) == [("a", True), ("b", False)]       # b -> c is a bare jump: trimmed
+
+    def test_handoff_just_under_collapse_len_counts_for_the_overshoot(self):
         # a's end rail points are 2.7 mm from b's centre line (x = 12.7): under collapse_len (3 mm) but
-        # within the 0.5 mm overshoot margin, so trimmed
+        # within the 0.5 mm overshoot margin
         g = self._group(
             '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
             '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M11.7,2 L11.7,-10 M13.7,2 L13.7,-10"/>')
-        assert [e.get("id") for e in _routed_handoffs_to_trim(g, 1.0)] == ["a"]
+        assert self._fixes(g) == [("a", False)]
         far = self._group(
             '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
             '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M11.0,2 L11.0,-10 M13.0,2 L13.0,-10"/>')
-        assert _routed_handoffs_to_trim(far, 1.0) == []          # 2.0 mm: stitched through
+        assert self._fixes(far) == []                      # 2.0 mm: stitched through

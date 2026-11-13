@@ -160,21 +160,26 @@ def _color_satin_underpaths(extension_name: str, new_tree) -> int:
     return n
 
 
-def _routed_handoffs_to_trim(group, uu_per_mm: float) -> list:
-    """The elements of an auto_satin-routed group to trim after: those whose handoff to the next
-    sewn element would be a jump (longer than ONE_PASS_TRIM_MM less its margin), the same rule as
-    plan_one_pass. auto_satin's own routing assumes the engine's end_at_nearest_point, which pulls a
-    satin's end toward the next element; with one-pass satins (that setting off) a satin finishes at
-    its drawn end and the gap to the next element can exceed collapse_len.
+def _routed_handoffs(group, uu_per_mm: float) -> list:
+    """Handoffs in an auto_satin-routed group that would sew as a jump, each with how to fix it.
 
-    Exit: a satin's farther end rail point (its last stitch lands on a rail); a running stitch's last
-    point. Entry: a satin's centre line nearest that exit (start_at_nearest_point, on by default), or
-    its first rail point when that is off (lib/elements/satin_column.py first_stitch); a running
-    stitch's first point. Elements the engine won't sew (no stroke colour, no fill) are skipped."""
+    auto_satin's route assumes the engine's end_at_nearest_point, which pulls a satin's end toward
+    the next element; with one-pass satins (that setting off) a satin finishes at its drawn end, and
+    the gap to the next sewn element can exceed collapse_len. A handoff counts when, from either end
+    rail point of the element (its last stitch lands on a rail; a running stitch's last point), the
+    next element's entry is farther than ONE_PASS_TRIM_MM less its margin (as plan_one_pass). Entry:
+    a satin's centre line (start_at_nearest_point, on by default) or its first rail point when that
+    is off (lib/elements/satin_column.py first_stitch); a running stitch's first point.
+
+    Returns [{"after": element, "hide": (start, end) | None}]: "hide" is a straight travel from the
+    element's end-pair middle to the next element's entry, when that line lies wholly under elements
+    still to be sewn (the travel auto_satin itself sews under satins); otherwise None: trim after.
+    Elements the engine won't sew (no stroke colour) are skipped."""
     import math
     import re as _re
 
-    from shapely.geometry import LineString, Point
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
 
     from cli_anything_inkstitch.artifact.design_model import split_subpaths
     from cli_anything_inkstitch.artifact.gate import flatten_path
@@ -202,21 +207,38 @@ def _routed_handoffs_to_trim(group, uu_per_mm: float) -> list:
                 continue
             r_end = R[-1] if math.dist(R[-1], L[-1]) <= math.dist(R[0], L[-1]) else R[0]
             exact = (e.get(start_near) or "").lower() in ("false", "0")
-            items.append({"e": e, "exits": [L[-1], r_end], "entry_pt": L[0],
+            poly = Polygon(list(L) + list(R)[::-1]).buffer(0)
+            items.append({"e": e, "exits": [L[-1], r_end],
+                          "mid": ((L[-1][0] + r_end[0]) / 2, (L[-1][1] + r_end[1]) / 2),
+                          "entry_pt": L[0], "poly": poly,
                           "entry_line": None if exact else LineString(gc.centre_line(L, R))})
         else:
             P = flatten_path(subs[0])
             if len(P) >= 2:
-                items.append({"e": e, "exits": [P[-1]], "entry_pt": P[0], "entry_line": None})
+                items.append({"e": e, "exits": [P[-1]], "mid": P[-1], "entry_pt": P[0],
+                              "entry_line": None, "poly": None})
     limit = (gc.ONE_PASS_TRIM_MM - gc.ONE_PASS_TRIM_MARGIN_MM) * uu_per_mm
     out = []
-    for a, b in zip(items, items[1:]):
+    for i, (a, b) in enumerate(zip(items, items[1:])):
         if (a["e"].get(trim) or "").lower() == "true":
             continue
-        travel = max((b["entry_line"].distance(Point(p)) if b["entry_line"] is not None
-                      else math.dist(p, b["entry_pt"])) for p in a["exits"])
-        if travel > limit:
-            out.append(a["e"])
+
+        def entry(p):
+            if b["entry_line"] is None:
+                return b["entry_pt"]
+            q = b["entry_line"].interpolate(b["entry_line"].project(Point(p)))
+            return (q.x, q.y)
+
+        travel = max(math.dist(p, entry(p)) for p in a["exits"])
+        if travel <= limit:
+            continue
+        later = [x["poly"] for x in items[i + 1:] if x["poly"] is not None]
+        start, end = a["mid"], entry(a["mid"])
+        hide = None
+        if later and math.dist(start, end) > 0:
+            if unary_union(later).buffer(0.05 * uu_per_mm).contains(LineString([start, end])):
+                hide = (start, end)
+        out.append({"after": a["e"], "hide": hide})
     return out
 
 
@@ -1816,7 +1838,7 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
         root = tree.getroot()
         before_xml = etree.tostring(root).decode("utf-8")
         sat, ptype = qname("satin_column"), qname("path_type")
-        routed_trims = 0
+        routed_trims = routed_travel = 0
         from cli_anything_inkstitch.svg.units import document_scale as _ds
         uu_routed = gc.PX_PER_MM / ((_ds(root) or (1.0, 1.0))[0])
         for gid in routed_groups:
@@ -1830,8 +1852,24 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                         _apply_params_to_element(e, None, one, schema, force=True)
                     except UserError as exc:
                         param_errors.append({"id": e.get("id"), "error": str(exc)})
-            # the route's handoffs, now that its satins end where they are drawn
-            for e in (_routed_handoffs_to_trim(g, uu_routed) if g is not None else []):
+            # the route's handoffs, now that its satins end where they are drawn: a travel run under
+            # stitching still to come where the straight line is covered (as auto_satin's own travel),
+            # else a trim
+            for h in (_routed_handoffs(g, uu_routed) if g is not None else []):
+                e = h["after"]
+                if h["hide"] is not None:
+                    (x0, y0), (x1, y1) = h["hide"]
+                    t = etree.Element(f"{{{SVG_NS}}}path")
+                    t.set("id", f"{e.get('id')}_travel")
+                    t.set("d", f"M {x0:.3f},{y0:.3f} L {x1:.3f},{y1:.3f}")
+                    # a stroked, un-dashed path sews as running stitch (lib/elements/stroke.py
+                    # stroke_method, default running_stitch); marked as auto_satin marks its travel
+                    t.set("style", f"fill:none;stroke-width:{0.1 * uu_routed:.3f}")
+                    t.set("stroke", color)
+                    t.set(qname("path_type"), "satin-underpath")
+                    e.addnext(t)
+                    routed_travel += 1
+                    continue
                 try:
                     _apply_params_to_element(e, None, {"trim_after": "true"}, schema, force=True)
                     routed_trims += 1
@@ -1858,6 +1896,8 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
     payload["routed_letters"] = len(to_route)
     if routed_trims:
         payload["routed_trims"] = routed_trims
+    if routed_travel:
+        payload["routed_travel"] = routed_travel
     if skipped:
         payload["params_skipped"] = {"names": sorted(skipped),
                                      "why": "the loaded schema doesn't know them (run with the engine source mined)"}
