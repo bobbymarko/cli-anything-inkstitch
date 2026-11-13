@@ -1409,6 +1409,10 @@ def route_walk(ends, covered=None, *, as_drawn=None, centre_lines=None, exact=No
 # min_jump_stitch_len and stitch_groups_to_stitch_plan): travel longer than
 # this becomes a jump the machine sews as a long loose stitch unless it is trimmed.
 ONE_PASS_TRIM_MM = 3.0
+# ...measured from the planned rails, which the needle overshoots: pull compensation widens a satin
+# (0.2-0.3 mm a side) and the last stitch lands past the rail, so a 2.99 mm planned handoff sewed as
+# a 3.2 mm jump. Handoffs within this margin of trim_mm are trimmed too.
+ONE_PASS_TRIM_MARGIN_MM = 0.5
 
 
 def _reverse_column(c: PlannedColumn) -> None:
@@ -1416,7 +1420,8 @@ def _reverse_column(c: PlannedColumn) -> None:
 
 
 def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = True,
-                  trim_mm: float = ONE_PASS_TRIM_MM, exposed_mm: float = EXPOSED_TRAVEL_MM) -> dict:
+                  trim_mm: float = ONE_PASS_TRIM_MM, exposed_mm: float = EXPOSED_TRAVEL_MM,
+                  margin_mm: float = ONE_PASS_TRIM_MARGIN_MM) -> dict:
     """Orient a shape's columns so each sews in ONE pass, and say where to trim.
 
     The engine's satin default end_at_nearest_point splits a column's top layer into two passes
@@ -1426,8 +1431,9 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
     place; their rail pairing is kept):
 
       1. each column but the last finishes at the end nearest the next column;
-      2. trim after a column whose handoff to the next one is longer than trim_mm (the engine
-         would jump it) or lies on bare fabric for more than exposed_mm (route_walk, as drawn);
+      2. trim after a column whose handoff to the next one, from its farther end rail point, is
+         longer than trim_mm less margin_mm (the engine would jump it: the needle overshoots the
+         planned rail by the pull compensation) or lies on bare fabric for more than exposed_mm (route_walk, as drawn);
          the shape's last column always trims (shapes-to-satin trims between shapes);
       3. a column that trims afterwards instead starts at the end nearest where the needle
          arrives (a shorter hidden entry run, or a shorter jump), and a column the needle reaches
@@ -1477,7 +1483,7 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
             return max(lines[k].distance(Point(prev.left[-1])), lines[k].distance(Point(prev.right[-1])))
 
         trims |= {k - 1 for k in range(1, n)
-                  if max(recs[k]["travel"], rail_travel(k)) > trim_mm or recs[k]["exposed"] > exposed_mm}
+                  if max(recs[k]["travel"], rail_travel(k)) > trim_mm - margin_mm or recs[k]["exposed"] > exposed_mm}
     cur = arrival                                # 3. a trimmed column starts nearest its arrival
     for k in range(n):
         a, b = column_ends(cols[k].left, cols[k].right)
