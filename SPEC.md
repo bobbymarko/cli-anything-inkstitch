@@ -781,6 +781,19 @@ Default WARNING to stderr. `--verbose` ⇒ INFO. `--debug` ⇒ DEBUG with subpro
 - **End-to-end tests** (gated on `INKSTITCH_BINARY` env var, skipped in CI by default): `params set` → `validate run` → `preview stats` → `export file --format dst`, asserting non-empty output and exit 0.
 - Schema cache versioning: tests must pass against at least the two latest released inkstitch versions.
 
+### 4.11a Planner regression suite
+
+`cli-anything-inkstitch regress run|compare` (package `cli_anything_inkstitch.regress`) is the
+acceptance check for planner changes. A case is a declared input (a font and text at a cap height,
+or synthetic strokes/polys, or an SVG with overrides) plus the CLI command that plans it
+(`tools text-to-satin`, `tools shapes-to-satin --fabric twill`). The measurement is the engine's own
+output through `artifact.engine_gate`: per-column top-layer pass counts, trims, untrimmed travel,
+longest stitch and stitch count. `run` writes a results JSON and one contact-sheet PNG per case;
+`compare` applies fixed thresholds (constants in `regress/compare.py`) and exits nonzero on a
+regression. Private cases (client art) load from a case file outside the repo with `--cases`.
+Workflow: run before and after a planner change, attach the compare to the PR. Usage: README,
+"Planner regression suite".
+
 ### 4.12 What is explicitly out of scope for v1.0
 
 - No bitmap/PNG-to-SVG tracing (use cli-anything-inkscape upstream).
