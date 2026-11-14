@@ -1008,21 +1008,58 @@ function nearestOnPoly(pts, x, y) {
 }
 
 /* ---------- api ---------- */
+/* Edit ordering. Every drag paints its result locally first and then
+   posts it; the server answers when it can, and while a stitch plan is
+   rendering it holds the project lock for seconds. Two things used to go
+   wrong over a slow link (measured: 2 of 4 rapid-drag trials lost a move,
+   on screen AND on disk):
+   - edits raced each other: each set_path carries the whole path, so a
+     request that reached the server late overwrote a newer one;
+   - a `reload` (sent after every edit, and by the file watcher) fetched
+     the design while a newer edit was still in flight — or mid-drag,
+     where it was simply dropped — and painted the old geometry back.
+   So mutations run strictly one after another, in the order they were
+   made, and a design fetch only lands if no local edit was made or was
+   pending since it started; otherwise it is re-run once things settle. */
+let editChain = Promise.resolve();
+let editsInFlight = 0;          // queued + running mutations
+let editSeq = 0;                // bumps whenever a mutation is queued
+let reloadPending = false;      // a reload arrived while edits/drag were live
+function serialMutation(fn) {
+  editsInFlight++;
+  editSeq++;
+  const run = editChain.then(fn);
+  editChain = run.catch(() => {}).finally(() => {
+    editsInFlight--;
+    settleReload();
+  });
+  return run;
+}
+function requestReload() {
+  if (dragging || editsInFlight) { reloadPending = true; return; }
+  reloadPending = false;
+  refresh().catch((e) => console.error("[reload]", e));
+}
+function settleReload() {
+  if (reloadPending && !dragging && !editsInFlight) requestReload();
+}
 async function getDesign() {
   const r = await fetch(api("/design"));
   if (!r.ok) throw new Error((await r.json()).error || r.status);
   return r.json();
 }
-async function postEdit(ops) {
-  const r = await fetch(api("/edit"), { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ops }) });
-  if (!r.ok) {
-    const err = (await r.json()).error || r.status;
-    showToast("edit failed: " + err, true);
-    throw new Error(err);
-  }
-  scheduleTier2();
-  return r.json();
+function postEdit(ops) {
+  return serialMutation(async () => {
+    const r = await fetch(api("/edit"), { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ops }) });
+    if (!r.ok) {
+      const err = (await r.json()).error || r.status;
+      showToast("edit failed: " + err, true);
+      throw new Error(err);
+    }
+    scheduleTier2();
+    return r.json();
+  });
 }
 async function postFeedback(payload) {
   await fetch(api("/feedback"), { method: "POST",
@@ -3060,6 +3097,7 @@ function startDrag(ev, desc) {
     window.removeEventListener("pointerup", up);
     dragging = null;
     if (!movedAny) {
+      settleReload();
       // click, not a drag — node clicks target the anchor: Delete removes
       // it, and its bezier handles (if any) become visible and draggable
       if (desc.type === "fill-node") {
@@ -3216,8 +3254,8 @@ async function deleteRung(o, ri) {
    Cmd/Ctrl+1         actual size */
 async function historyStep(redo = false) {
   try {
-    const r = await fetch(api(redo ? "/redo" : "/undo"), { method: "POST" });
-    const result = await r.json();
+    const result = await serialMutation(async () =>
+      (await fetch(api(redo ? "/redo" : "/undo"), { method: "POST" })).json());
     showToast(result.applied
       ? (redo ? "redid: " : "undid: ") + result.command
       : "nothing to " + (redo ? "redo" : "undo"));
@@ -3605,7 +3643,7 @@ function connectSSE() {
     $("presenceBanner").classList.toggle("show", state === "waiting");
     setWorking(state === "working");
   });
-  es.addEventListener("reload", () => { if (!dragging) refresh(); });
+  es.addEventListener("reload", requestReload);   // deferred, never dropped
   es.addEventListener("ended", () => { $("endedOverlay").classList.add("show"); es.close(); });
   es.onerror = () => { es.close(); setTimeout(connectSSE, 2000); };
 }
@@ -4074,8 +4112,8 @@ async function flagState(entry) {
   renderHistory();
 }
 async function restoreCheckpoint(c) {
-  const r = await (await fetch(api(`/checkpoints/${c.id}/restore`),
-                               { method: "POST" })).json();
+  const r = await serialMutation(async () =>
+    (await fetch(api(`/checkpoints/${c.id}/restore`), { method: "POST" })).json());
   if (r.error) showToast(r.error, true);
   else showToast(`Restored “${c.annotation || c.id}” (undo to go back)`);
   renderHistory();
@@ -4089,10 +4127,12 @@ async function annotateCheckpoint(c) {
 }
 async function jumpToHistory(index, cursor) {
   const dir = cursor > index ? "/undo" : "/redo";
-  for (let i = 0; i < Math.abs(cursor - index); i++) {
-    const r = await (await fetch(api(dir), { method: "POST" })).json();
-    if (!r.applied) break;
-  }
+  await serialMutation(async () => {
+    for (let i = 0; i < Math.abs(cursor - index); i++) {
+      const r = await (await fetch(api(dir), { method: "POST" })).json();
+      if (!r.applied) break;
+    }
+  });
   renderHistory();
 }
 
@@ -4184,8 +4224,19 @@ $("helpOverlay").addEventListener("click", (ev) => {
 });
 
 /* ---------- boot ---------- */
+let refreshGen = 0;
 async function refresh() {
-  design = await getDesign();
+  const gen = ++refreshGen, seq = editSeq;
+  const fresh = await getDesign();
+  if (gen !== refreshGen) return;            // a newer fetch is on its way
+  if (seq !== editSeq || editsInFlight || dragging) {
+    // the server answered from before a local edit landed — painting it
+    // would snap the user's geometry back. Fetch again once settled.
+    reloadPending = true;
+    settleReload();
+    return;
+  }
+  design = fresh;
   routeData = null;                 // entry/exit plan is stale after any edit
   if (routeOn) await fetchRoute();  // reload before renderAll draws the overlay
   // the header IS the filename — with several designs open, "which file am
