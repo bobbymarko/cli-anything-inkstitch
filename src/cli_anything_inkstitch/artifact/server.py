@@ -637,14 +637,17 @@ class ArtifactHandler(BaseHTTPRequestHandler):
             return
         import json as _json
         from pathlib import Path as _Path
-        from cli_anything_inkstitch.binary import require, run_extension
+        from cli_anything_inkstitch.artifact.design_model import engine_snapshot
+        from cli_anything_inkstitch.binary import run_extension
         data = _json.loads(_Path(session["file"]).read_text())
         fmt = (query.get("format") or [None])[0] \
             or (data.get("session") or {}).get("machine_target") or "dst"
-        binary = require(None, data.get("session") or {})
-        payload = run_extension(binary, "output", data["svg_path"],
-                                args={"format": fmt}, ids=[],
-                                capture_stdout=True)
+        # a consistent copy taken under the project lock — reading the live
+        # file could catch an edit's save half-written
+        with engine_snapshot(session["file"]) as (binary, path):
+            payload = run_extension(binary, "output", path,
+                                    args={"format": fmt}, ids=[],
+                                    capture_stdout=True)
         if not payload:
             self._json({"error": "engine produced no output"}, 500)
             return

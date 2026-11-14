@@ -297,12 +297,24 @@ class TestStitchSequenceExclude:
     The engine call is faked — what's under test is the include-list math."""
 
     def _capture(self, monkeypatch):
+        # fake the whole engine boundary — snapshot, plan AND the trim pass.
+        # Faking only the plan left _cut_moves calling the real binary, so
+        # these tests failed on every CI machine (no Ink/Stitch installed)
+        from contextlib import contextmanager
         from cli_anything_inkstitch.artifact import design_model as dm
         captured = {}
-        def fake_plan(project_file, *, binary_override=None, ids=None):
+
+        @contextmanager
+        def fake_snapshot(project_file, *, binary_override=None):
+            yield "fake-binary", "fake.svg"
+
+        def fake_plan(binary, svg_path, ids):
             captured["ids"] = ids
             return TestExtractStitchBlocks.PLAN
-        monkeypatch.setattr(dm, "stitch_plan_svg", fake_plan)
+
+        monkeypatch.setattr(dm, "engine_snapshot", fake_snapshot)
+        monkeypatch.setattr(dm, "_render_plan", fake_plan)
+        monkeypatch.setattr(dm, "_cut_moves", lambda binary, path, ids: None)
         return captured
 
     def test_exclude_selects_the_others(self, project, monkeypatch):
