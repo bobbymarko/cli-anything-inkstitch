@@ -200,6 +200,32 @@
    "notes": "short name at small/medium/large cap height"
   },
   {
+   "id": "sans-caps-7p6",
+   "kind": "text",
+   "font": "sans",
+   "lines": [
+    "ABCDEFGHIJKLM",
+    "NOPQRSTUVWXYZ"
+   ],
+   "height_mm": 7.6,
+   "line_gap_mm": 10.8,
+   "letter_spacing_pct": 8,
+   "notes": "capital alphabet at small lettering size (strokes about 1.7 mm): density, underlay, junctions"
+  },
+  {
+   "id": "sans-caps-13",
+   "kind": "text",
+   "font": "sans",
+   "lines": [
+    "ABCDEFGHIJKLM",
+    "NOPQRSTUVWXYZ"
+   ],
+   "height_mm": 13,
+   "line_gap_mm": 18.3,
+   "letter_spacing_pct": 8,
+   "notes": "capital alphabet at chest-name size: corners, junctions (W, M, R, B, G, K), S spine"
+  },
+  {
    "id": "shape-T",
    "kind": "shapes",
    "strokes": [
