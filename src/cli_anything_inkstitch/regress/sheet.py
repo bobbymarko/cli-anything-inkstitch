@@ -33,7 +33,7 @@ def draw_sheet(stream, rails_multi: list[dict], header: list[str], out: str | Pa
             segs.append((prev, (x, y)))
         elif cmd == "JUMP" and prev is not None:
             cut = last_cmd in ("TRIM", "COLOR_CHANGE")
-            if not in_jump:
+            if not in_jump or not floats:
                 floats.append([prev, (x, y), cut])
             else:
                 floats[-1][1] = (x, y)

@@ -130,6 +130,8 @@ def compare(base: dict, new: dict, out_dir: str | Path | None = None, *,
     rows, regressed, warned, not_run = [], 0, 0, 0
     for cid in ids:
         b, n = base["cases"].get(cid), new["cases"].get(cid)
+        if (b or n or {}).get("contender"):
+            continue                          # a contender's result: `regress versus` reports those
         if (n is None and new.get("meta", {}).get("quick")) or (b is None and base.get("meta", {}).get("quick")):
             not_run += 1                      # one side is a --quick run: the rest was never run
             continue

@@ -99,8 +99,59 @@ def _where(col: dict, letters: dict[str, str], groups: dict[str, str]) -> str:
     return col.get("shape") or col["id"]
 
 
+def _bbox(stream) -> list[float] | None:
+    pts = [(x, y) for c, x, y in stream if c == "STITCH"]
+    if not pts:
+        return None
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return [round(max(xs) - min(xs), 1), round(max(ys) - min(ys), 1)]
+
+
+def run_contender_case(case: Case, out_dir: Path, sheets_name: str, *, sheets: bool = True,
+                       keep_work: bool = False) -> dict[str, Any]:
+    """A contender's case (Bold Bobbin): measured from the DST it exports."""
+    from cli_anything_inkstitch.artifact import engine_gate as eg
+    from cli_anything_inkstitch.regress import bb
+    from cli_anything_inkstitch.regress.sheet import draw_sheet
+
+    res: dict[str, Any] = {"id": case.id, "kind": case.kind, "family": case.family, "private": case.private,
+                           "contender": case.contender, "font": case.notes, "notes": case.notes}
+    if case.skip_reason:
+        return {**res, "status": "skipped", "reason": case.skip_reason}
+    work = out_dir / f"{sheets_name}_work" / case.id
+    try:
+        sewn = bb.sew(case, work, out_dir / f"{sheets_name}_dst")
+        stream = eg.stream_from_dst(str(sewn["dst"]))
+        st = eg.stream_stats(stream)
+    except Exception as e:
+        return {**res, "status": "error", "error": f"{type(e).__name__}: {e}"[:600]}
+    rep = sewn["report"]
+    res.update({
+        "status": "ok", "satin_columns": None, "multi_pass_columns": None, "multi_pass": [],
+        "trims": st["trims"], "untrimmed_moves": len(st["untrimmed_moves"]),
+        "untrimmed_mm": [m["mm"] for m in st["untrimmed_moves"]], "entry_jump_mm": st["entry_jump_mm"],
+        "longest_stitch_mm": st["longest_stitch_mm"], "longest_stitch_at": st["longest_stitch_at"],
+        "stitches": st["stitches"], "failed_plans": [], "runtime_s": sewn["seconds"],
+        "size_mm": _bbox(stream), "bb_size_mm": round(rep["sizeMm"], 2),
+        "bb_check": rep["verdict"], "bb_run_minutes": rep["runMinutes"],
+        "planner_h_ink_mm": round(sewn["planner_h_ink_mm"], 2)})
+    if sheets:
+        head = [f"{case.id}   [{case.family}]   contender {case.contender}",
+                f"multi-pass n/a   trims {res['trims']}   untrimmed {res['untrimmed_moves']}"
+                + (f" {res['untrimmed_mm']}" if res["untrimmed_mm"] else "")
+                + f"   longest {res['longest_stitch_mm']} mm   stitches {res['stitches']}"]
+        rel = f"{sheets_name}/{case.id}.png"
+        draw_sheet(stream, [], head, out_dir / rel)
+        res["sheet"] = rel
+    if not keep_work:
+        shutil.rmtree(work, ignore_errors=True)
+    return res
+
+
 def run_case(case: Case, out_dir: Path, sheets_name: str, *, sheets: bool = True,
              keep_work: bool = False, binary: str | None = None) -> dict[str, Any]:
+    if case.contender:
+        return run_contender_case(case, out_dir, sheets_name, sheets=sheets, keep_work=keep_work)
     from cli_anything_inkstitch.artifact import engine_gate as eg
     from cli_anything_inkstitch.regress.measure import measure
     from cli_anything_inkstitch.regress.sheet import draw_sheet
@@ -142,7 +193,7 @@ def run_case(case: Case, out_dir: Path, sheets_name: str, *, sheets: bool = True
         "stitches": summ["stitches"],
         "failed_plans": failed,
         "plan_seconds": round(t1 - t0, 1), "engine_seconds": round(t2 - t1, 1),
-        "runtime_s": round(t2 - t0, 1),
+        "runtime_s": round(t2 - t0, 1), "size_mm": _bbox(m["stream"]),
     })
     if case.reference_dst:
         try:
@@ -195,6 +246,7 @@ def _meta(cases: list[Case], case_files: list[str], quick: bool) -> dict:
 
 def summarize(results: dict[str, dict]) -> dict:
     fam: dict[str, dict] = {}
+    results = {k: r for k, r in results.items() if not r.get("contender")}   # not our planner
     for r in results.values():
         f = fam.setdefault(r["family"], {"cases": 0, "ok": 0, "satin_columns": 0,
                                          "multi_pass_columns": 0, "trims": 0,
@@ -226,7 +278,10 @@ def run_suite(cases: list[Case], results_path: Path, *, case_files: list[str],
     for i, case in enumerate(cases, 1):          # sequential: one heavy engine run at a time
         r = run_case(case, out_dir, sheets_name, sheets=sheets, keep_work=keep_work, binary=binary)
         results[case.id] = r
-        if r["status"] == "ok":
+        if r["status"] == "ok" and case.contender:
+            log(f"[{i}/{len(cases)}] {case.id}: {r['trims']} trims, longest {r['longest_stitch_mm']}, "
+                f"{r['stitches']} st, {r['runtime_s']}s")
+        elif r["status"] == "ok":
             log(f"[{i}/{len(cases)}] {case.id}: {r['satin_columns']} cols, {r['multi_pass_columns']} multi, "
                 f"{r['trims']} trims, longest {r['longest_stitch_mm']}, {r['stitches']} st, {r['runtime_s']}s")
         else:

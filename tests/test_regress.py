@@ -268,3 +268,37 @@ class TestAccepted:
         entries = K.load_accepted()
         assert entries and all(e["reason"] for e in entries)
         assert {e["case"] for e in entries} <= ids
+
+
+class TestVersus:
+    def test_versus_cases_pair_up_and_stay_out_of_the_default_run(self):
+        allc = C.load_cases()
+        vs = [c for c in allc if c.versus]
+        assert len(vs) == 36 and sum(bool(c.contender) for c in vs) == 18
+        ours = {c.id for c in vs if not c.contender}
+        assert {c.id.rsplit("@", 1)[0] for c in vs if c.contender} == ours
+        assert not any(c.versus for c in C.select(allc))
+        assert all(c.versus for c in C.select(allc, versus=True))
+
+    def test_versus_fonts_are_vendored(self):
+        for c in C.load_cases():
+            if c.versus and not c.contender:
+                assert c.skip_reason is None, (c.id, c.skip_reason)
+
+    def test_versus_report_pairs_and_draws(self, tmp_path):
+        from cli_anything_inkstitch.regress import versus as V
+        p = _write_results(tmp_path, "r", {"vs-a": _ok(size_mm=[50, 10], runtime_s=9.0),
+                                           "vs-a@boldbobbin": _ok(contender="boldbobbin", multi_pass_columns=None,
+                                                                  runtime_s=3.0, size_mm=[50, 11], trims=0)})
+        doc = json.loads(p.read_text())
+        res = V.versus(doc, p.parent, tmp_path / "img")
+        (row,) = res["rows"]
+        assert row["planner"]["trims"] == 10 and row["contender"]["trims"] == 0
+        assert (tmp_path / "img" / "vs-a.png").exists()
+        assert "vs-a" in V.format_table(res)
+
+    def test_contender_results_do_not_trip_compare(self, tmp_path):
+        r = {"vs-a@boldbobbin": _ok(contender="boldbobbin", multi_pass_columns=None)}
+        p = _write_results(tmp_path, "r", r)
+        res = K.compare(K.load(p), K.load(p), None, images=False)
+        assert res["rows"] == []

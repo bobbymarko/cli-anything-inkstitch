@@ -36,6 +36,15 @@ def main(argv):
         extra = str(mine / sub) if sub else str(mine)
         if extra not in mod.__path__:
             mod.__path__.append(extra)
+    # The suite itself always comes from this checkout, even when PLANNER_SRC carries an older copy of it.
+    import importlib.util
+    for name, file in (("cli_anything_inkstitch.regress", mine / "regress" / "__init__.py"),
+                       ("cli_anything_inkstitch.commands.regress", mine / "commands" / "regress.py")):
+        spec = importlib.util.spec_from_file_location(
+            name, file, submodule_search_locations=[str(file.parent)] if file.name == "__init__.py" else None)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
     from cli_anything_inkstitch.cli import root
     from cli_anything_inkstitch.commands import regress as _regress
     if "regress" not in root.commands:

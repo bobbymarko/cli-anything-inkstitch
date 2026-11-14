@@ -112,6 +112,14 @@ cli-anything-inkstitch regress compare /path/to/base.json /path/to/new.json --ou
   `python tools/regress_with_src.py /path/to/branch/src --label branch@rev -- regress run --results new.json`
   (that checkout's planner sews the cases; this one supplies the suite and the engine gate; the
   checkout is not modified; `git archive <branch> src` makes a throwaway copy).
+- **Contender: Bold Bobbin.** `regress run --versus --results vs.json` sews the same words in the same
+  fonts (vendored Lato Regular, Lora, Great Vibes) with our planner and with the Bold Bobbin CLI
+  (`$BOLDBOBBIN_CLI`, default `~/code/ext/boldbobbin-cli/1.4.4/boldbobbin`); `regress versus vs.json`
+  prints planner|contender per case (stitches, trims, untrimmed moves over 3 mm, longest stitch, time, ink
+  size) with a side-by-side image each. Its numbers come from its exported DST; its multi-pass is n/a.
+  BB's `sizeMm` is an em size, so it is set from the ink height of the planner's own "H"; it runs with the
+  app's defaults, without `optimizePorts`. Its exports are licensed to the signed-in account: keep its DSTs,
+  sheets and results outside the repository (the suite ships only the harness).
 - Runs are sequential: each case takes the host render lock (`/tmp/inkstitch-render.lock`) around
   every engine run, as `engine_gate` does. Do not wrap `regress run` in another `flock` on it.
 

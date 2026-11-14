@@ -55,6 +55,9 @@ class Case:
     skip_reason: str | None = None
     notes: str = ""
     source: str = ""
+    versus: bool = False             # half of a planner-versus-contender pair (run with --versus)
+    contender: str | None = None     # "boldbobbin": not our planner, see regress/bb.py
+    wght: float | None = None
     inputs: list[str] = field(default_factory=list)   # files the case reads (all must exist)
 
 
@@ -99,6 +102,39 @@ def load_file(path: str | Path, *, private: bool) -> list[Case]:
             if missing:
                 case.skip_reason = "missing input: " + ", ".join(missing)
         out.append(case)
+    out += _versus_cases(data.get("versus"), fonts, base, fabric, page_w, private, str(path))
+    return out
+
+
+def _versus_cases(v: dict | None, fonts: dict, base: Path, fabric: str, page_w: float,
+                  private: bool, source: str) -> list[Case]:
+    """Each (font, text) of a `versus` block becomes our planner's case and the contender's."""
+    if not v:
+        return []
+    from cli_anything_inkstitch.regress import bb
+    contender = v.get("contender", "boldbobbin")
+    out: list[Case] = []
+    for f in v["fonts"]:
+        for t in v["texts"]:
+            h = t["height_mm"]
+            cid = f"vs-{f['family']}-{t['slug']}-{h:g}"
+            spec = {"lines": [t["text"]], "height_mm": h}
+            fnt = fonts[f["font"]]
+            path = _expand(fnt["path"], base)
+            common = dict(kind="text", family=f["family"], quick=False, private=private,
+                          fabric=fabric, page_width_mm=page_w, font_path=path,
+                          font_name=fnt.get("name", f["font"]), source=source, versus=True,
+                          wght=fnt.get("wght"))
+            ours = Case(id=cid, spec=dict(spec, **({"wght": fnt["wght"]} if fnt.get("wght") else {})),
+                        inputs=[path], **common)
+            theirs = Case(id=f"{cid}@{contender}", spec=dict(spec, bb_font=f["bb_font"]),
+                          contender=contender, inputs=[path],
+                          notes=f"{contender} {f['bb_font']}", **common)
+            if not Path(path).exists():
+                ours.skip_reason = theirs.skip_reason = "missing input: " + path
+            elif contender == "boldbobbin" and not bb.available():
+                theirs.skip_reason = "Bold Bobbin CLI not found (set BOLDBOBBIN_CLI)"
+            out += [ours, theirs]
     return out
 
 
@@ -149,7 +185,10 @@ def load_cases(extra: list[str] | None = None, *, public: bool = True) -> list[C
     return cases
 
 
-def select(cases: list[Case], *, quick: bool = False, only: list[str] | None = None) -> list[Case]:
+def select(cases: list[Case], *, quick: bool = False, only: list[str] | None = None,
+           versus: bool = False) -> list[Case]:
+    """The default run leaves out the planner-versus-contender cases; --versus runs only those."""
+    cases = [c for c in cases if c.versus == versus]
     if quick:
         cases = [c for c in cases if c.quick]
     if only:
