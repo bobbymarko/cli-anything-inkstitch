@@ -549,3 +549,157 @@ class TestOnePassEngine:
         split = self._run(tmp_path, "--no-one-pass")
         assert len(one) == 1 and max(one[0]) - min(one[0]) > 35
         assert len(split) == 2
+
+
+def _stem_runs(pattern, x_max, min_dx=1.5):
+    """Top-layer passes over a letter's left stem (x < x_max, DST mm): its zigzag crosses the stem
+    in x; consecutive crossings advancing < 1.5 mm in y are one run; runs of 10+ are passes."""
+    pts = _stitches(pattern, with_jumps=True)
+    ys = [(a[1] + b[1]) / 2 for a, b in zip(pts, pts[1:])
+          if a[0] < x_max and b[0] < x_max and abs(b[0] - a[0]) > min_dx and abs(b[1] - a[1]) < 1.0]
+    runs, cur = [], [ys[0]] if ys else []
+    for y in ys[1:]:
+        if abs(y - cur[-1]) < 1.5:
+            cur.append(y)
+        else:
+            runs.append(cur)
+            cur = [y]
+    if cur:
+        runs.append(cur)
+    return [r for r in runs if len(r) >= 10]
+
+
+@needs_planner
+@needs_binary
+class TestLetteringOnePass:
+    """text-to-satin sews every column in one pass, as shapes-to-satin does (behavioural proof,
+    CLAUDE.md rule 3): an H's first stem ends beside its crossbar, and with the engine default
+    (end_at_nearest_point on) its top layer splits to finish near the bar."""
+
+    @pytest.fixture(autouse=True)
+    def real_schema(self):
+        import os
+        cands = [Path(__file__).parent.parent / "inkstitch", Path(os.environ.get("INKSTITCH_SOURCE", "/nonexistent"))]
+        src = next((c for c in cands if (c / "lib" / "elements").exists()), None)
+        if src is None:
+            pytest.skip("inkstitch source checkout not present")
+        from cli_anything_inkstitch.schema.extract import extract_schema, write_cache
+        write_cache(extract_schema(src))
+
+    def _run(self, tmp_path, flag):
+        d = tmp_path / flag[2:]
+        d.mkdir()
+        proj = _project(d)
+        r = CliRunner().invoke(root, ["--json", "tools", "text-to-satin", "--project", str(proj), "--font", FONT,
+                                      "--text", "H", "--height-mm", "20", flag])
+        assert r.exit_code == 0, r.output
+        assert "params_skipped" not in json.loads(r.output)
+        tree = etree.parse(json.loads(Path(proj).read_text())["svg_path"])
+        sat = [e for e in tree.getroot().iter() if (e.get("{http://inkstitch.org/namespace}satin_column") or "").lower() == "true"]
+        pattern = _export(proj, tmp_path / flag[2:], "h")
+        xs = [x for x, _ in _stitches(pattern)]
+        return sat, _stem_runs(pattern, min(xs) + 6.0)          # the stem is 5.2 mm wide
+
+    def test_every_column_one_pass_and_the_default_splits(self, tmp_path):
+        sat, runs = self._run(tmp_path, "--one-pass")
+        assert sat and all(e.get("{http://inkstitch.org/namespace}end_at_nearest_point") == "False" for e in sat)
+        assert len(runs) == 1
+        _, split = self._run(tmp_path, "--no-one-pass")
+        assert len(split) == 2
+
+
+class TestRoutedTravelIsSewn:
+    """auto_satin copies only a source satin's `style` into its travel strokes (lib/stitches/
+    auto_satin.py RunningStitch.to_element); once a satin's colour lives in a `stroke` attribute the
+    travel stroke has none, and the engine never sews a path without a stroke colour
+    (lib/elements/utils/nodes.py node_to_elements)."""
+
+    SVG = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkstitch="http://inkstitch.org/namespace">'
+           '<g><path id="s" stroke="#123456" inkstitch:satin_column="True" d="M0,0 L9,0 M0,2 L9,2"/>'
+           '<path id="r" style="fill:none;stroke-dasharray:1,0.2" inkstitch:path_type="satin-underpath" d="M0,0 L9,0"/>'
+           '<path id="ok" style="fill:none;stroke:#ff0000" inkstitch:path_type="satin-underpath" d="M0,0 L9,0"/></g>'
+           '<g><path id="lone" style="fill:none" inkstitch:path_type="satin-underpath" d="M0,0 L9,0"/></g></svg>')
+
+    def test_uncoloured_travel_takes_its_satins_colour(self):
+        from cli_anything_inkstitch.commands.tools import _color_satin_underpaths
+        t = etree.ElementTree(etree.fromstring(self.SVG))
+        by = lambda i: next(e for e in t.getroot().iter() if e.get("id") == i)
+        assert _color_satin_underpaths("auto_satin", t) == 1
+        assert by("r").get("stroke") == "#123456"
+        assert by("ok").get("stroke") is None          # already coloured: left alone
+        assert by("lone").get("stroke") is None        # no satin beside it to take a colour from
+
+    def test_only_after_auto_satin(self):
+        from cli_anything_inkstitch.commands.tools import _color_satin_underpaths
+        t = etree.ElementTree(etree.fromstring(self.SVG))
+        assert _color_satin_underpaths("fill_to_satin", t) == 0
+
+
+class TestRoutedHandoffs:
+    """A routed letter's satins end where drawn once end_at_nearest_point is off; a handoff to the
+    next sewn element that would be a jump is sewn as a travel under stitching still to come when
+    that line is covered, else trimmed (same distance rule as plan_one_pass). 1 unit = 1 mm."""
+
+    def _group(self, body):
+        return etree.fromstring('<g xmlns="http://www.w3.org/2000/svg" '
+                                'xmlns:inkstitch="http://inkstitch.org/namespace">' + body + '</g>')
+
+    def _fixes(self, g):
+        from cli_anything_inkstitch.commands.tools import _routed_handoffs
+        return [(h["after"].get("id"), h["hide"] is not None) for h in _routed_handoffs(g, 1.0)]
+
+    def test_bare_long_handoff_is_trimmed_short_one_left(self):
+        g = self._group(
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
+            # b starts 4 mm on from a's end, across bare fabric: trim
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M14,0 L14,10 M16,0 L16,10"/>'
+            # a running stitch picking up right at b's end: nothing to do
+            '<path id="r" style="fill:none;stroke:#000" d="M15,10 L15,20"/>'
+            # an unsewn stroke (no colour) is not an element the engine sews
+            '<path id="x" style="fill:none" d="M40,40 L50,50"/>')
+        assert self._fixes(g) == [("a", False)]
+
+    def test_covered_handoff_is_hidden_travel_not_a_trim(self):
+        g = self._group(
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M14,5 L14,30 M16,5 L16,30"/>'
+            # c, sewn later, covers the straight line from a's end to b's start
+            '<path id="c" stroke="#000" inkstitch:satin_column="True" d="M8,-2 L18,-2 M8,6 L18,6"/>')
+        assert self._fixes(g) == [("a", True), ("b", False)]       # b -> c is a bare jump: trimmed
+
+    def test_handoff_just_under_collapse_len_counts_for_the_overshoot(self):
+        # b's outline (x >= 12.7) is 2.7 mm from a's end: under collapse_len (3 mm), where the engine
+        # would stitch through, but within the 0.5 mm margin for the needle's overshoot
+        g = self._group(
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M12.7,2 L12.7,-10 M14.7,2 L14.7,-10"/>')
+        assert self._fixes(g) == [("a", False)]
+        far = self._group(
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M12.0,2 L12.0,-10 M14.0,2 L14.0,-10"/>')
+        assert self._fixes(far) == []                      # 2.0 mm: stitched through
+
+
+class TestRoutedHandoffRails:
+    def test_rails_are_found_like_the_engine_when_a_rung_comes_first(self):
+        """auto_satin output can list a rung before the rails; the engine takes the longest subpaths
+        as rails (satin_column.py rail_indices). Here a's rails run x 0 -> 10, so it ends at x = 10,
+        right beside b: no handoff, although its first subpath (a rung) ends at x = 1."""
+        from cli_anything_inkstitch.commands.tools import _routed_handoffs
+        g = etree.fromstring(
+            '<g xmlns="http://www.w3.org/2000/svg" xmlns:inkstitch="http://inkstitch.org/namespace">'
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" '
+            'd="M1,-0.5 L1,2.5 M0,0 L10,0 M0,2 L10,2 M5,-0.5 L5,2.5 M9,-0.5 L9,2.5"/>'
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M10.5,0 L10.5,10 M12.5,0 L12.5,10"/>'
+            '</g>')
+        assert _routed_handoffs(g, 1.0) == []
+
+    def test_rails_by_intersections_when_the_rung_is_longest(self):
+        """A short crossbar: its one rung (a slanted 6 mm cut) is longer than its 4.6 mm rails. The
+        engine takes the two paths crossing exactly one other as rails (rail_indices), not the two
+        longest."""
+        from cli_anything_inkstitch.commands.tools import _engine_rail_indices
+        rung = [(0.0, -1.0), (4.6, 5.0)]
+        rail_a, rail_b = [(4.6, 0.0), (0.0, 0.0)], [(4.6, 4.0), (0.0, 4.0)]
+        assert _engine_rail_indices([rung, rail_a, rail_b]) == (1, 2)
+        assert _engine_rail_indices([rail_a, rail_b]) == (0, 1)
