@@ -277,7 +277,7 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
 
 def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
                 overrides: dict | None = None, spread_turns_on: bool = True,
-                tidy_joins_on: bool = True) -> list[PlannedLetter]:
+                tidy_joins_on: bool = True, joint_overlap_mm: float | None = None) -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
     outlines) as satin columns, one shape at a time: the planner's
     `art_columns.plan_shape`, the same planner that drove an all-satin client
@@ -300,8 +300,10 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
     along the inner curve instead of pinching at one point (spread_turns).
     A shape with hand-placed rungs is left as placed.
 
-    tidy_joins_on: where columns meet, trim overlaps deeper than about 1 mm back to a 0.4 mm
-    overlap, and close bare wedges at junctions (trace/joins.py).
+    tidy_joins_on: where columns meet, trim deep overlaps, close bare wedges at junctions, and lay
+    every butting end flat along the edge it meets, joint_overlap_mm under it (default
+    joins.KEEP_MM, 0.4), sewn before the column it tucks under (trace/joins.py). A shape's
+    override "joint_overlap_mm" sets its own.
     """
     import numpy as np
 
@@ -342,12 +344,14 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
             # Run even on a rungs-override shape: tidy_joins works on where the shape's own
             # columns MEET (overlaps/wedges), which is orthogonal to interior rung placement,
             # and place_rungs has already run above. Skipping it left override shapes un-tidied.
-            from cli_anything_inkstitch.trace.joins import tidy_joins
-            planned = tidy_joins(planned)
+            from cli_anything_inkstitch.trace.joins import KEEP_MM, tidy_joins
+            keep = ov.get("joint_overlap_mm", joint_overlap_mm)
+            planned = tidy_joins(planned, keep_mm=KEEP_MM if keep is None else float(keep))
         if do_ease:
             # After tidy_joins, so the ease works on the final end cuts (a junction end may have been
             # trimmed/snapped) and nothing undoes it. A hand-placed-rungs shape is left as placed.
-            planned = ease_letter_ends(planned)
+            planned = ease_letter_ends(planned, keep_mm=None if not tidy_joins_on else
+                                       (KEEP_MM if keep is None else float(keep)))
         out.append(planned)
     return out
 
@@ -893,6 +897,113 @@ def ease_end(pairs, ease_mm: float = END_EASE_MM, point_mm: float = END_EASE_POI
     return [((float(a[0]), float(a[1])), (float(b[0]), float(b[1]))) for a, b in new]
 
 
+TUCK_RECAST_MM = 3.0      # a tucked end's rungs are re-cast over at least this far before its cut...
+TUCK_STEP_MM = 0.5        # ...every this far, all at one angle
+
+
+def straight_tucked_end(pairs, host, outline, others=None, keep_mm: float = 0.4,
+                        step_mm: float = TUCK_STEP_MM):
+    """Re-pair the near end (index 0) of a column whose end tucks under another column (`host`, a
+    polygon), so its stitches keep the band's own angle right to the end.
+
+    Stitch direction follows the stroke's path: perpendicular to its centre line, turning only where
+    the centre line turns. A slanted end cut does not rotate the stitches; they keep their angle and
+    simply end on the slanted edge, getting shorter (a hand-digitized band ending on a slanted strand;
+    EmbroideryStudio keeps such a band square too). So from just before the cut on, rungs are cast at
+    one angle, perpendicular to the band's centre line there, every step_mm, across the band's end
+    region, which is:
+      the column's own area, plus the shape's outline inside a strip that carries the band's two
+      sides straight on (so the band's outer edge runs all the way to the other piece: no notch where
+      the planned end cut stopped short of it), up to the host's edge moved keep_mm in (the tuck),
+      never into any other column (`others`).
+    Each rung is that region's extent along the rung line, so the band's end follows the host's edge
+    even where it bends, and ends with the last rung that still has width. Returns new pairs (end
+    first), or None when the end is already square or the column is too short."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+
+    if len(pairs) < 2:
+        return None
+    P = [(tuple(map(float, a)), tuple(map(float, b))) for a, b in pairs][::-1]   # body first, end last
+    width = math.dist(*P[-1]) or 1.0
+    mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in P]
+    cl = LineString(mids)
+    if cl.length < 3 * step_mm:
+        return None
+    body_w = sorted(math.dist(a, b) for a, b in P)[len(P) // 2]
+    # the band's direction just behind its end region (body -> end)
+    back = min(cl.length * 0.6, max(2.0 * body_w, 2.0))
+    q0, q1 = cl.interpolate(cl.length - back), cl.interpolate(cl.length - back / 2)
+    tx, ty = q1.x - q0.x, q1.y - q0.y
+    tn = math.hypot(tx, ty)
+    if tn == 0:
+        return None
+    tx, ty = tx / tn, ty / tn
+    nx, ny = -ty, tx                                   # rung direction: square to the band
+    (la, ra) = P[-1]
+    cut = (ra[0] - la[0], ra[1] - la[1])
+    if abs(cut[0] * tx + cut[1] * ty) / (math.hypot(*cut) or 1.0) < math.sin(math.radians(END_EASE_MIN_TILT_DEG)):
+        return None                                    # already square: nothing to do
+    proj = lambda p: (p[0] - q0.x) * tx + (p[1] - q0.y) * ty
+    inner = min(proj(la), proj(ra))                    # where the slanted cut begins
+    s0 = inner - max(TUCK_RECAST_MM, 1.5 * body_w)
+    if s0 < proj(mids[0]) + step_mm:
+        return None
+    # planned pairs wholly before the re-cast (a slanted one reaching past it would cross the first
+    # re-cast rung)
+    keep = [pr for pr in P if max(proj(pr[0]), proj(pr[1])) < s0 - 0.5 * step_mm]
+    if len(keep) < 1:
+        return None
+    # the band's two sides where the re-cast starts, carried straight on
+    side = lambda pt: (pt[0] - q0.x) * nx + (pt[1] - q0.y) * ny
+    base = keep[-1]
+    lo, hi = sorted((side(base[0]), side(base[1])))
+    left_is_hi = side(base[0]) > side(base[1])
+    far = proj(la) + proj(ra) + 4 * body_w + 10
+    pt = lambda s_, o_: (q0.x + tx * s_ + nx * o_, q0.y + ty * s_ + ny * o_)
+    strip = Polygon([pt(s0 - step_mm, lo - 0.05), pt(far, lo - 0.05), pt(far, hi + 0.05), pt(s0 - step_mm, hi + 0.05)])
+    own = Polygon([p[0] for p in P] + [p[1] for p in P][::-1]).buffer(0)
+    ink = strip.intersection(outline.buffer(0.02))
+    if others is not None and not others.is_empty:
+        ink = ink.difference(others)
+    # up to the host's edge: the piece of the outline joined to the band (not a sliver of the shape
+    # the host doesn't cover farther along), then on under the host by keep_mm
+    # (opened by 0.25 mm: a sliver of outline the host leaves along its own edge is not band)
+    fill = ink.difference(host).buffer(-0.25).buffer(0.25)
+    reach_ = own.union(fill).buffer(0)
+    pieces = [g for g in getattr(reach_, "geoms", [reach_]) if g.intersects(own.buffer(-0.01))]
+    if not pieces:
+        return None
+    region = unary_union(pieces)
+    if keep_mm > 0:
+        # the tuck: only the host's edge band keep_mm deep, next to the band
+        edge_band = host.difference(host.buffer(-keep_mm))
+        region = region.union(region.buffer(keep_mm).intersection(edge_band).intersection(ink))
+    region = region.union(own.difference(host.buffer(-keep_mm) if keep_mm > 0 else host)).buffer(0)
+    new = []
+    s = s0
+    reach = abs(hi - lo) + 4 * body_w + 5
+    while s < far:
+        o_mid = (lo + hi) / 2
+        line = LineString([pt(s, o_mid - reach), pt(s, o_mid + reach)])
+        x = line.intersection(region)
+        segs = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "LineString" and g.length > 0]
+        if not segs:
+            break
+        g = min(segs, key=lambda g: g.distance(Point(pt(s, o_mid))))
+        a_, b_ = g.coords[0], g.coords[-1]
+        if g.length < 0.2:
+            break
+        a_hi = side(a_) > side(b_)
+        pair = (a_, b_) if a_hi == left_is_hi else (b_, a_)
+        new.append(((float(pair[0][0]), float(pair[0][1])), (float(pair[1][0]), float(pair[1][1]))))
+        s += step_mm
+    if len(new) < 2:
+        return None
+    out = keep + new
+    return out[::-1]                                   # end first again
+
+
 def _head_turn_tilt(pairs, within_mm: float = 3.0) -> float:
     """Worst rung-to-rung angle step (deg) within `within_mm` of the head (index 0): how sharply the
     rungs turn as they approach that cut. The defect ease_end spreads out. Measured on the head alone
@@ -912,20 +1023,57 @@ def _head_turn_tilt(pairs, within_mm: float = 3.0) -> float:
     return worst
 
 
-def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM) -> PlannedLetter:
-    """Ease the rung angle into every open column's slanted or pointed ends (ease_end), one end at a
-    time. An end's new pairs are kept only if they leave no more crossings and no more fans than
-    before and actually reduce how sharply the rungs turn into that end. Rails (the outline) are never
-    moved. Lists the changed columns in check["eased_ends"]."""
-    from cli_anything_inkstitch.trace import column_checks as cc
+def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM,
+                     keep_mm: float | None = None) -> PlannedLetter:
+    """Ease the rung angle into every open column's free slanted or pointed ends (ease_end), one end
+    at a time. An end that tucks under another column (joins._host) is not eased: its rungs stay at
+    the band's own angle right to the end, and its end region runs to the other column's edge,
+    keep_mm under it (straight_tucked_end, check["squared_tucked_ends"]). An
+    end's new pairs are kept only if they leave no more crossings and no more fans than before and,
+    for an ease, actually reduce how sharply the rungs turn into that end. Rails (the outline) are
+    never moved. Lists the eased columns in check["eased_ends"]."""
+    from shapely.ops import unary_union
 
-    done = []
+    from cli_anything_inkstitch.trace import column_checks as cc
+    from cli_anything_inkstitch.trace.joins import KEEP_MM, _bare, _host, _outline, _poly
+
+    keep_mm = KEEP_MM if keep_mm is None else keep_mm
+    outline = _outline(planned.contours)
+    done, squared, kept_ease = [], [], []
+    # which ends tuck under which column, decided on the columns as they are now: a re-cast end
+    # grows to its host's edge, and must not make a neighbour's free end look tucked into it
+    hosts = {(k, end): _host(planned.columns, k, end, skip_acute_v=False)
+             for k, c in enumerate(planned.columns) if not c.closed and len(c.left) >= 2
+             for end in (0, -1)} if len(planned.columns) > 1 else {}
     for k, c in enumerate(planned.columns):
         if c.closed:
             continue
         for end in (0, -1):
             pairs = list(zip(c.left, c.right))
             work = pairs if end == 0 else pairs[::-1]       # the end being eased is now index 0
+            j = hosts.get((k, end))
+            if j is not None:
+                if outline is None:
+                    continue
+                others = unary_union([_poly(o) for n, o in enumerate(planned.columns) if n not in (k, j)]) \
+                    if len(planned.columns) > 2 else None
+                st = straight_tucked_end(work, _poly(planned.columns[j]), outline, others, keep_mm)
+                ok = st is not None and _crossed(st) <= _crossed(work)
+                if ok:
+                    trial = list(planned.columns)
+                    trial[k] = PlannedColumn(left=[p[0] for p in st], right=[p[1] for p in st], closed=c.closed)
+                    ok = (_bare(outline, trial) <= _bare(outline, planned.columns) + 0.05
+                          and _poly(trial[k]).difference(outline.buffer(0.1)).area < 0.05)
+                if ok:
+                    st = st if end == 0 else st[::-1]
+                    c.left, c.right = [p[0] for p in st], [p[1] for p in st]
+                    squared.append([k, end])
+                    continue
+                if st is not None:
+                    # the straight re-cast would cross pairs, leave the ink or bare fabric: ease that
+                    # end as before (ease_end), so its cut stays covered
+                    kept_ease.append([k, end])
+                # (st None: already square or too short; ease_end below leaves a square end alone)
             eased_head = ease_end(work, ease_mm)
             if eased_head is None:
                 continue
@@ -939,6 +1087,10 @@ def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM) -> Pl
                 done.append(k)
     if done:
         planned.check["eased_ends"] = done
+    if squared:
+        planned.check["squared_tucked_ends"] = squared
+    if kept_ease:
+        planned.check["tucked_ends_eased"] = kept_ease
     return planned
 
 
