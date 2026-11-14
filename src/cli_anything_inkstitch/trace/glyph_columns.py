@@ -196,10 +196,7 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
     # ink box centred on 0, 0), but each letter planned on its own: a planner
     # exception in one glyph (measured: a GEOS "endpoints are equal" error on
     # one Lato Regular lowercase letter at 10 mm) fails that letter to the
-    # fallback instead of the whole line. Steps per letter mirror
-    # art_columns.text_columns: letter_strokes → tuck_order → letter_columns
-    # (flat, tucked) → trim_tips → flat_check.
-    from cli_anything_inkstitch.planner.autostrokes import letter_strokes
+    # fallback instead of the whole line (plan_glyph).
     import numpy as np
 
     spacing = min(col.DEFAULT_SPACING_MM, max(ac.MIN_SPACING_MM, 0.075 * height_mm))
@@ -216,38 +213,170 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
         moved = [c + [x, 0.0] for c in contours]
         allp = np.vstack(moved)
         box = (allp[:, 0].min(), allp[:, 1].min(), allp[:, 0].max(), allp[:, 1].max())
-        raw.append((ch, moved, box))
+        raw.append((ch, moved, box, contours, x))
         x += adv + gap
     if not raw:
         raise UserError("nothing to stitch")
-    x0 = min(b[0] for _, _, b in raw)
-    x1 = max(b[2] for _, _, b in raw)
-    y0 = min(b[1] for _, _, b in raw)
-    y1 = max(b[3] for _, _, b in raw)
+    x0 = min(r[2][0] for r in raw)
+    x1 = max(r[2][2] for r in raw)
+    y0 = min(r[2][1] for r in raw)
+    y1 = max(r[2][3] for r in raw)
     dx, dy = -(x0 + x1) / 2, -(y0 + y1) / 2
     shells = []
-    for ch, moved, box in raw:
+    for ch, moved, box, _, _ in raw:
         moved = [c + [dx, dy] for c in moved]
         box = (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy)
         shells.append(col.Letter(ch, [], moved, box))
     if merge_joins:
         return _plan_merged(shells, ac)
-    out = []
-    for sh in shells:
+    # each glyph planned from the font's own outline, then moved into place (plan_glyph)
+    return [plan_glyph(sh.char, glyph, height_mm, spacing, at=(gx + dx, dy), placed=sh.outline)
+            for sh, (_, _, _, glyph, gx) in zip(shells, raw)]
+
+
+# Offsets (mm) a glyph is also planned at. The planner's reading of a junction can turn on a tie (two
+# branches equally close to an inside corner, an angle right at a threshold) that the last bit of a
+# coordinate decides; moving the outline by a few hundredths of a mm changes only that rounding, so
+# each offset is the same glyph read again. Measured on Avenir Black at 7.6 and 13 mm: 17 of 52
+# letters planned differently at some offset (an R's overlap 6.34, 0.79 or 2.98 mm2).
+READING_OFFSETS_MM = ((0.0, 0.0), (0.0101, 0.0), (0.0, 0.0103), (-0.0107, 0.0059))
+TIDY_READINGS = 2
+
+
+def plan_score(planned: PlannedLetter, height_mm: float) -> float:
+    """How well a letter's plan passes its own check: bare (of what satin can sew) + 2 x overhang
+    + overlap per cap height squared (x 100) + 5 per crossed pair; inf when the check fails. The same
+    weights a font builder used to pick between readings (lower is better)."""
+    c = planned.check or {}
+    if not planned.ok or not planned.columns:
+        return math.inf
+    return (c.get("sewable_bare_pct", 0.0) + 2 * c.get("outside_pct", 0.0)
+            + 100 * c.get("overlap_mm2", 0.0) / (height_mm * height_mm) + 5 * c.get("crossed_pairs", 0))
+
+
+def plan_glyph(char: str, outline, height_mm: float, spacing: float, at=(0.0, 0.0),
+               placed=None) -> PlannedLetter:
+    """One letter's satin columns (the steps of art_columns.text_columns: letter_strokes →
+    tuck_order → letter_columns (flat, tucked) → trim_tips → flat_check, then wrap_corners),
+    planned on the glyph's outline as the font gives it (mm, y up, at the glyph's own origin) and
+    then moved by `at`. `placed` is the outline already moved there (the letter's contours in the
+    result), so the layout's own arithmetic is kept exactly.
+
+    The plan must not depend on where the letter sits on the line. It did: the junction reading turns
+    on ties that rounding in the last bit of a coordinate decides, so a letter planned at another
+    offset (other letter spacing, another word) came out differently. Measured on Avenir Black at
+    13 mm: the R's overlap was 6.34, 0.79 or 2.98 mm2 depending only on letter spacing, so a word
+    and the same letters in a stitch font came out differently, and a font builder could only
+    "rescue" a letter by re-running it at another size. So every glyph is planned from the font's
+    own coordinates (the same bits every time) at each of READING_OFFSETS_MM, and the reading whose
+    plan passes its own check best (plan_score) is kept: the same plan for the glyph and size
+    wherever it is set, and the best of the readings, with no one choosing.
+    """
+    import numpy as np
+
+    local = [np.asarray(c, float) for c in outline]
+    ox, oy = at
+    as_given = [[tuple(map(float, p)) for p in c] for c in (placed if placed is not None
+                                                             else [c + [ox, oy] for c in local])]
+    readings = [_plan_reading(char, [c + [dx, dy] for c in local], height_mm, spacing,
+                              (ox - dx, oy - dy), as_given) for dx, dy in READING_OFFSETS_MM]
+    # the junction tools are the slow part: tried on the TIDY_READINGS best readings only
+    readings.sort(key=lambda p: plan_score(p, height_mm))
+    tidied = [_tidied(p, height_mm) for p in readings[:TIDY_READINGS]]
+    return min(tidied + readings, key=lambda p: plan_score(p, height_mm))
+
+
+def _plan_reading(char, local, height_mm, spacing, at, as_given) -> PlannedLetter:
+    """plan_glyph for one reading: plan on `local`, move the result by `at`."""
+    import numpy as np
+
+    ac, col = require_planner()
+    from cli_anything_inkstitch.planner.autostrokes import letter_strokes
+
+    lp = np.vstack(local)
+    box = (float(lp[:, 0].min()), float(lp[:, 1].min()), float(lp[:, 0].max()), float(lp[:, 1].max()))
+    ox, oy = at
+    try:
+        junctions: list = []
+        strokes = letter_strokes(local, height_mm, overlap_feet=True, junctions_out=junctions)
+        strokes = col.tuck_order(strokes, local, box)
+        cols = col.letter_columns(strokes, local, box, spacing,
+                                  col.RING_OVERLAP_MM, col.BUTT_OVERLAP_MM, tuck=True)
+        lt = col.Letter(char, [ac.trim_tips(c) for c in cols], local, box,
+                        strokes, butt_overlap=col.BUTT_OVERLAP_MM)
+        check = ac.flat_check(lt)
+        # the medial-axis junction reading, carried forward (as art_columns.plan_shape does): which
+        # inside corners are junctions of three strokes and which are corners of two (trace/corners.py)
+        check["junctions"] = [{**j, "pos": (j["pos"][0] + ox, j["pos"][1] + oy)}
+                              for pc in junctions for j in pc["junctions"]]
+        check["concavities"] = [[p[0] + ox, p[1] + oy] for pc in junctions for p in pc["concavities"]]
+    except Exception as exc:  # noqa: BLE001 - one unplannable glyph falls back alone
+        return PlannedLetter(char, [], as_given, False, {},
+                             f"no column plan ({type(exc).__name__}: {str(exc)[:80]})")
+    planned = _from_letter(lt, bool(check["ok"]), check)
+    # one stroke cut in two where nothing turns (an S split at its spine: a hard seam, the two ends
+    # meeting with a bare wedge between them) is joined and re-planned as one column, as
+    # shapes-to-satin does (plan_shapes one_column); kept when its own check rates it better
+    from types import SimpleNamespace
+    try:
+        joined = _join_seamed_strokes(0, local, SimpleNamespace(letter=lt), planned)
+    except Exception:  # noqa: BLE001 - keep the plan as it was
+        joined = None
+    if joined is not None and plan_score(joined, height_mm) < plan_score(planned, height_mm):
+        joined.check.update({k: check[k] for k in ("junctions", "concavities")})
+        planned = joined
+    for c in planned.columns:
+        c.left = [(x + ox, y + oy) for x, y in c.left]
+        c.right = [(x + ox, y + oy) for x, y in c.right]
+    planned.contours = as_given
+    # narrow strokes run on round their corners as one column (trace/corners.py)
+    from cli_anything_inkstitch.trace.corners import wrap_corners
+    return wrap_corners(planned)
+
+
+def _rechecked(planned: PlannedLetter) -> PlannedLetter:
+    """planned with its check's measures (bare, overhang, overlap, crossed, ok) taken again on its
+    columns as they now stand."""
+    from cli_anything_inkstitch.trace.corners import _check
+
+    if not planned.columns:
+        return planned
+    c = _check(planned)
+    planned.check.update({k: c[k] for k in ("sewable_bare_pct", "outside_pct", "overlap_mm2",
+                                            "crossed_pairs", "uncovered_pct") if k in c})
+    planned.ok = bool(planned.ok and c["ok"])
+    return planned
+
+
+def _tidied(planned: PlannedLetter, height_mm: float) -> PlannedLetter:
+    """The shapes planner's junction tools (trace/joins.py) tried on a letter: deep overlaps trimmed
+    (an A's legs past its apex, a K's arm into its leg), bare wedges at junctions closed (the notch
+    a K's arm leaves against its leg, an R's leg against its bowl, a B's waist). Each tool keeps only
+    changes that leave no more bare fabric, and of the letter as planned and each tidied version,
+    the one that passes its own check best (plan_score) is kept. Measured on Avenir Black: the K at
+    7.6 mm went from 3.8% bare to 1.1%, the R at 13 mm from 2.8% to 1.3%.
+
+    The joint ends are left where the planner tucked them (columns.BUTT_OVERLAP_MM under):
+    joins.flatten_joint_ends' deeper tuck is for fabric presets that ask for it (shapes-to-satin)."""
+    from copy import deepcopy
+
+    from cli_anything_inkstitch.trace import joins
+
+    if not planned.ok or len(planned.columns) < 2:
+        return planned
+    best, best_score = planned, plan_score(planned, height_mm)
+    for tools in ((joins.trim_overlaps,), (joins.close_wedges,), (joins.trim_overlaps, joins.close_wedges)):
+        trial = deepcopy(planned)
         try:
-            strokes = letter_strokes(sh.outline, height_mm, overlap_feet=True)
-            strokes = col.tuck_order(strokes, sh.outline, sh.box)
-            cols = col.letter_columns(strokes, sh.outline, sh.box, spacing,
-                                      col.RING_OVERLAP_MM, col.BUTT_OVERLAP_MM, tuck=True)
-            lt = col.Letter(sh.char, [ac.trim_tips(c) for c in cols], sh.outline, sh.box,
-                            strokes, butt_overlap=col.BUTT_OVERLAP_MM)
-            check = ac.flat_check(lt)
-        except Exception as exc:  # noqa: BLE001 - one unplannable glyph falls back alone
-            out.append(PlannedLetter(sh.char, [], [[tuple(map(float, p)) for p in c] for c in sh.outline],
-                                     False, {}, f"no column plan ({type(exc).__name__}: {str(exc)[:80]})"))
+            for tool in tools:
+                trial = tool(trial)
+        except Exception:  # noqa: BLE001 - a tool that can't handle this letter leaves it be
             continue
-        out.append(_from_letter(lt, bool(check["ok"]), check))
-    return out
+        trial = _rechecked(trial)
+        score = plan_score(trial, height_mm)
+        if score < best_score - 1e-6:
+            best, best_score = trial, score
+    return best
 
 
 def _plan_merged(letters, ac) -> list[PlannedLetter]:
