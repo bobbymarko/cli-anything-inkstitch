@@ -207,39 +207,60 @@ def _angle(pair):
 
 
 class TestTuckedEndsAreSquareNotEased:
-    """An end that tucks under another column keeps its stitches square to the band up to the cut's
-    inner corner; only the last section fans. A free end is still eased (glyph_columns.ease_end)."""
+    """An end that tucks under another column keeps the band's own stitch angle right to the end:
+    stitches follow the path (perpendicular to its centre line) and a slanted end cut only shortens
+    them; the band's edges run all the way to the other piece (no notch) and tuck keep_mm under it.
+    A free end is still eased (glyph_columns.ease_end)."""
 
-    def test_square_tucked_end_keeps_the_outline_and_stays_square(self):
-        from shapely.geometry import Polygon
-
-        from cli_anything_inkstitch.trace.glyph_columns import square_tucked_end
-        band = _slanted_band()
-        pairs = list(zip(band.left, band.right))[::-1]            # the cut is index 0
-        sq = square_tucked_end(pairs)
-        assert sq is not None
-        # the inner rail runs on along the cut: the column ends in a point at the cut's outer corner
-        assert math.dist(*sq[0]) < 0.5 and math.dist(sq[0][0], (30.0, 0.0)) < 1e-6
-        # ...and its outline (rails + cut) is unchanged, so is what it covers
-        poly = lambda ps: Polygon([p[0] for p in ps] + [p[1] for p in ps][::-1]).buffer(0)
-        assert abs(poly(sq).area - poly(pairs).area) < 0.1 and poly(sq).symmetric_difference(poly(pairs)).area < 0.1
-        # square to the band from well inside right up to the slanted edge
-        assert all(abs(_angle(p) - 90) < 3 for p in sq[1:] if (p[0][0] + p[1][0]) / 2 > 16.0)
-        # no zero-length rail piece next to the end (the engine drops such a section, satin_column.py
-        # flattened_sections, and that part of the column would not be sewn)
-        assert math.dist(sq[1][0], sq[0][0]) > 0.1 and math.dist(sq[1][1], sq[0][1]) > 0.1
-
-    def test_tucked_end_is_squared_and_free_end_is_eased(self):
+    def _outline(self, *cols):
         from shapely.geometry import Polygon
         from shapely.ops import unary_union
+        return unary_union([Polygon(list(c.left) + list(c.right)[::-1]) for c in cols]).buffer(0)
 
+    def test_stitches_keep_the_band_angle_to_the_end(self):
+        from shapely.geometry import Polygon
+
+        from cli_anything_inkstitch.trace.glyph_columns import straight_tucked_end
+        band, host = _slanted_band(), _diagonal_host()
+        outline = self._outline(band, host)
+        pairs = list(zip(band.left, band.right))[::-1]            # the cut is index 0
+        st = straight_tucked_end(pairs, J._poly(host), outline, None, keep_mm=0.4)
+        assert st is not None
+        recast = [p for p in st if min(p[0][0], p[1][0]) > 20.5]
+        assert len(recast) > 10 and all(abs(_angle(p) - 90) < 1.0 for p in recast)   # vertical, no fan
+        # the band ends 0.4 mm under the host's edge (x + y = 29.17 + 0.57) along both its rails
+        tip_x = max(max(p[0][0], p[1][0]) for p in st)
+        assert abs(tip_x - 29.74) < 0.3
+        # ... and covers everything the planned band did short of that tuck depth
+        band_poly = Polygon(list(band.left) + list(band.right)[::-1])
+        new_poly = Polygon([p[0] for p in st] + [p[1] for p in st][::-1]).buffer(0)
+        assert band_poly.difference(J._poly(host).buffer(-0.4)).difference(new_poly).area < 0.1
+
+    def test_no_notch_where_the_band_stopped_short_of_the_host(self):
+        from shapely.geometry import Polygon
+
+        from cli_anything_inkstitch.trace.glyph_columns import straight_tucked_end
+        # the planned cut stops 1 mm short of the host at its bottom corner: the outline runs on
+        band = PlannedColumn(left=[(30.0 * i / 30, 0.0) for i in range(30)] + [(28.0, 0.0)],
+                             right=[(26.0 * i / 30, 4.0) for i in range(30)] + [(25.4, 4.0)])
+        band.left = [(x * 28.0 / 29.0, y) for x, y in band.left[:-1]] + [band.left[-1]]
+        host = _diagonal_host()
+        outline = self._outline(_slanted_band(), host)            # the art: band reaching the host
+        pairs = list(zip(band.left, band.right))[::-1]
+        st = straight_tucked_end(pairs, J._poly(host), outline, None, keep_mm=0.4)
+        assert st is not None
+        new_poly = Polygon([p[0] for p in st] + [p[1] for p in st][::-1]).buffer(0)
+        bare = outline.difference(J._poly(host)).difference(new_poly)
+        assert bare.area < 0.1                                    # the corner is covered
+
+    def test_tucked_end_is_squared_and_free_end_is_eased(self):
         from cli_anything_inkstitch.trace.glyph_columns import ease_letter_ends
         band, host = _slanted_band(), _diagonal_host()
-        outline = unary_union([Polygon(c.left + c.right[::-1]) for c in (band, host)])
+        outline = self._outline(band, host)
         lt = ease_letter_ends(PlannedLetter("t", [band, host], [list(outline.exterior.coords)[:-1]], True, {}))
         assert [0, -1] in lt.check.get("squared_tucked_ends", [])
-        tucked = [p for p in zip(lt.columns[0].left, lt.columns[0].right) if (p[0][0] + p[1][0]) / 2 > 16.0]
-        assert tucked and all(abs(_angle(p) - 90) < 3 for p in tucked[:-1])  # square, not turned to the cut
+        tucked = [p for p in zip(lt.columns[0].left, lt.columns[0].right) if min(p[0][0], p[1][0]) > 20.5]
+        assert tucked and all(abs(_angle(p) - 90) < 1.0 for p in tucked)
         free = _slanted_band()
         lt2 = ease_letter_ends(PlannedLetter("f", [free], [free.left + free.right[::-1]], True, {}))
         assert lt2.check.get("eased_ends") == [0]
