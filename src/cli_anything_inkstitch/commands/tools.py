@@ -160,6 +160,28 @@ def _color_satin_underpaths(extension_name: str, new_tree) -> int:
     return n
 
 
+def _engine_rail_indices(paths) -> tuple[int, int]:
+    """Which two of a satin's flattened subpaths the engine takes as its rails, in index order (rail
+    0 sets the sewing direction). Mirrors lib/elements/satin_column.py rail_indices: with no rungs,
+    both; with exactly one rung (three paths), the two that cross exactly one other; with more, those
+    crossing more than two others; when that is ambiguous, the two longest. A rung can be longer than
+    the rails (a short crossbar), and auto_satin's output can list a rung first, so neither "the
+    first two" nor "the two longest" is safe on its own."""
+    from shapely.geometry import LineString
+
+    if len(paths) <= 2:
+        return 0, 1
+    ls = [LineString(p) for p in paths]
+    hits = [sum(ls[i].intersects(ls[j]) for j in range(len(ls)) if j != i) for i in range(len(ls))]
+    if len(ls) == 3:
+        rails = [i for i in range(3) if hits[i] == 1 and ls[i].length > 0.1]
+    else:
+        rails = [i for i in range(len(ls)) if hits[i] > 2 and ls[i].length > 0.1]
+    if len(rails) != 2:
+        rails = sorted(sorted(range(len(ls)), key=lambda i: -ls[i].length)[:2])
+    return rails[0], rails[1]
+
+
 def _routed_handoffs(group, uu_per_mm: float) -> list:
     """Handoffs in an auto_satin-routed group that would sew as a jump, each with how to fix it.
 
@@ -203,17 +225,11 @@ def _routed_handoffs(group, uu_per_mm: float) -> list:
         if (e.get(sat) or "").lower() == "true":
             if len(subs) < 2:
                 continue
-            flat = [flatten_path(x) for x in subs]
-            if len(flat) > 2:
-                # with rungs, the rails are not necessarily the first two subpaths (auto_satin's
-                # output can list a rung first): the engine takes the subpaths crossing more than two
-                # others, falling back to the two longest (lib/elements/satin_column.py
-                # rail_indices); rail 0, the lower index, sets the sewing direction
-                length = lambda f: sum(math.dist(p, q) for p, q in zip(f, f[1:]))
-                i0, i1 = sorted(sorted(range(len(flat)), key=lambda i: -length(flat[i]))[:2])
-                L, R = flat[i0], flat[i1]
-            else:
-                L, R = flat[0], flat[1]
+            flat = [f for f in (flatten_path(x) for x in subs) if len(f) > 1]
+            if len(flat) < 2:
+                continue
+            i0, i1 = _engine_rail_indices(flat)
+            L, R = flat[i0], flat[i1]
             if len(L) < 2 or len(R) < 2:
                 continue
             # rail 1 runs the same way as rail 0 or is reversed to (satin_column.py

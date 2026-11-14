@@ -693,3 +693,13 @@ class TestRoutedHandoffRails:
             '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M10.5,0 L10.5,10 M12.5,0 L12.5,10"/>'
             '</g>')
         assert _routed_handoffs(g, 1.0) == []
+
+    def test_rails_by_intersections_when_the_rung_is_longest(self):
+        """A short crossbar: its one rung (a slanted 6 mm cut) is longer than its 4.6 mm rails. The
+        engine takes the two paths crossing exactly one other as rails (rail_indices), not the two
+        longest."""
+        from cli_anything_inkstitch.commands.tools import _engine_rail_indices
+        rung = [(0.0, -1.0), (4.6, 5.0)]
+        rail_a, rail_b = [(4.6, 0.0), (0.0, 0.0)], [(4.6, 4.0), (0.0, 4.0)]
+        assert _engine_rail_indices([rung, rail_a, rail_b]) == (1, 2)
+        assert _engine_rail_indices([rail_a, rail_b]) == (0, 1)
