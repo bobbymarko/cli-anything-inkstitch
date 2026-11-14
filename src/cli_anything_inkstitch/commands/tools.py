@@ -1125,6 +1125,12 @@ def _doc_mm_frame(root, uu_per_mm):
                    "--joint-overlap-mm under it (deep overlaps cut back, short ends run on), the column "
                    "on top sews after the one tucked under it, and bare wedges at junctions are closed "
                    "by running the nearest end on into its neighbour.")
+@click.option("--end-style", type=click.Choice(["ease", "path", "engine"]), default="ease",
+              show_default=True,
+              help="Free slanted ends (a letter's terminal cut at an angle while the stroke runs straight): "
+                   "ease = turn the rungs into the slanted cut over ~15 mm; path = keep the stroke's own "
+                   "angle (perpendicular to its centre line, turning only where it turns) and shorten into "
+                   "the cut; engine = leave the planned pairs to the engine.")
 @click.option("--joint-overlap-mm", type=float, default=None,
               help="How far a column's end runs under the column it butts into (laid flat along its "
                    "edge; that one sews on top). Default: the fabric preset's (0.4 mm; more on knit and "
@@ -1156,7 +1162,7 @@ def _doc_mm_frame(root, uu_per_mm):
                    "this JSON-lines file, a fixture for planner tests (default: next to the project).")
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
-                    spread_turns, tidy_joins, joint_overlap_mm, one_pass, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
+                    spread_turns, tidy_joins, end_style, joint_overlap_mm, one_pass, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
                     cases_path):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
@@ -1250,7 +1256,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                                  one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns,
                                  tidy_joins_on=tidy_joins,
                                  joint_overlap_mm=FABRICS[fabric]["joint_overlap_mm"]
-                                 if joint_overlap_mm is None else joint_overlap_mm)
+                                 if joint_overlap_mm is None else joint_overlap_mm,
+                                 end_style=end_style)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         fill_of = [_sews_as_fill(lt, spec, fallback) for lt, spec in zip(planned, spec_of)]
         # One pass per satin, decided in SEWING order (thread order), so each shape's first column
@@ -1569,6 +1576,13 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
 @click.option("--auto-params/--no-auto-params", default=True, show_default=True,
               help="Underlay, pull compensation and split satin chosen per "
                    "column (see _lettering_satin_params).")
+@click.option("--end-style", type=click.Choice(["ease", "path", "engine"]), default="engine",
+              show_default=True,
+              help="Free slanted ends (a letter's terminal cut at an angle while the stroke runs straight): "
+                   "ease = turn the rungs into the slanted cut over ~15 mm; path = keep the stroke's own "
+                   "angle (perpendicular to its centre line, turning only where it turns) and shorten into "
+                   "the cut; engine = leave the planned pairs to the engine. Default engine: lettering as it has been (no end treatment).")
+
 @click.option("--route/--no-route", default=True, show_default=True,
               help="Route letters whose planned order would leave travel "
                    "on bare fabric (an E's arms) with the engine's "
@@ -1577,7 +1591,7 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
 @click.pass_context
 def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                   letter_spacing_pct, width_mm, cx_mm, cy_mm, rotate_deg, merge_joins,
-                  fallback, color, pull_comp_mm, auto_params, route):
+                  fallback, color, pull_comp_mm, auto_params, end_style, route):
     """Set TEXT from a TTF as per-stroke satin columns: no rung review.
 
     Each letter is cut at its junctions into strokes, and each stroke gets
@@ -1603,7 +1617,8 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
     font = gc.static_font(font_path, wght)
     letters = gc.plan_text(font, text, height_mm,
                            letter_spacing_pct=letter_spacing_pct,
-                           width_mm=width_mm, merge_joins=merge_joins)
+                           width_mm=width_mm, merge_joins=merge_joins,
+                           end_style=None if end_style == "engine" else end_style)
     schema = load_schema(prefer_version=installed_version(
         ctx.obj.get("binary_override") if ctx.obj else None))
 
