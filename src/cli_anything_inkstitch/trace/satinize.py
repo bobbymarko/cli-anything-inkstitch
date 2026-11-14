@@ -403,6 +403,46 @@ def simplify_polyline(pts, tolerance: float = 0.8):
     return [pts[i] for i in sorted(keep)]
 
 
+def _crossings(line, other) -> list[tuple[int, float]]:
+    """(segment index in `line`, parameter along it) of each point where polyline `other` crosses
+    polyline `line`. A touch at a shared vertex counts once."""
+    out = []
+    for i, (a, b) in enumerate(zip(line, line[1:])):
+        for c, d in zip(other, other[1:]):
+            den = (b[0] - a[0]) * (d[1] - c[1]) - (b[1] - a[1]) * (d[0] - c[0])
+            if abs(den) < 1e-15:
+                continue
+            t = ((c[0] - a[0]) * (d[1] - c[1]) - (c[1] - a[1]) * (d[0] - c[0])) / den
+            u = ((c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])) / den
+            if -1e-9 <= t <= 1 + 1e-9 and -1e-9 <= u <= 1 + 1e-9:
+                if out and abs((out[-1][0] + out[-1][1]) - (i + t)) < 1e-9:
+                    continue
+                out.append((i, t))
+    return out
+
+
+def _simplify_keeping_rungs(pts, rungs, tolerance):
+    """RDP on a satin rail that keeps every rung crossing it: the rail nodes either side of each
+    crossing are pinned, so the rail where a rung meets it doesn't move, and the result is checked
+    (each rung that crossed the rail once still does). A rail that would still lose a rung is
+    returned as it was. See simplify_satin_d."""
+    if not rungs:
+        return simplify_polyline(pts, tolerance=tolerance)
+    before = [len(_crossings(pts, r)) for r in rungs]
+    pins = {0, len(pts) - 1}
+    for r in rungs:
+        for i, t in _crossings(pts, r):
+            # the segment the rung crosses stays as it is (both its nodes), or the node it crosses at
+            pins.update([i] if t < 1e-6 else [i + 1] if t > 1 - 1e-6 else [i, i + 1])
+    pins = sorted(pins)
+    out = [pts[0]]
+    for lo, hi in zip(pins, pins[1:]):
+        out += simplify_polyline(pts[lo:hi + 1], tolerance=tolerance)[1:]
+    if any(n == 1 and len(_crossings(out, r)) != 1 for n, r in zip(before, rungs)):
+        return list(pts)
+    return out
+
+
 _POLYLINE_RE_TOKEN = None    # lazy-compiled in simplify_satin_d
 
 
@@ -431,6 +471,17 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
       which points pair up. Measured: auto_satin passed an unconnected
       old-style S through, simplification left its rails at 18 and 17
       nodes, and the S came out twisted.
+    * every rung still crosses each simplified rail exactly once. The
+      engine keeps only rungs that meet the two rails in exactly two points
+      (`SatinColumn._get_filtered_rungs`); a rung that no longer reaches a
+      rail makes the satin invalid, and the engine's preview then crashed
+      in `_get_center_line_stitches` and returned an empty document with
+      exit 0. Measured: auto_satin turned a Lora "H" stem's old-style
+      pairs into rungs scaled 1.1 (`_synthesize_rungs`); the 0.1 mm kink
+      the rung was drawn at fell under the tolerance, the straightened
+      rail moved 0.02 mm past the rung's end, and the whole letter
+      rendered as nothing. So the rail node at each rung crossing is
+      kept, and a rail that still loses a rung is left as it was.
 
     Returns (new_d, nodes_before, nodes_after); new_d is `d` unchanged when
     nothing was simplifiable.
@@ -478,6 +529,7 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
             pts.append((sx, sy))
         return pts, closed
 
+    rungs = [r for r in (parse_polyline(sub)[0] for sub in subs[2:]) if r and len(r) >= 2]
     before = after = 0
     out = []
     for idx, sub in enumerate(subs):
@@ -495,7 +547,7 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
         for p in pts[1:]:
             if math.dist(p, deduped[-1]) > 1e-6:
                 deduped.append(p)
-        simplified = simplify_polyline(deduped, tolerance=tolerance)
+        simplified = _simplify_keeping_rungs(deduped, rungs, tolerance)
         before += len(pts)
         after += len(simplified)
         out.append("M" + " ".join(f"{x:.3f},{y:.3f}" for x, y in simplified))
