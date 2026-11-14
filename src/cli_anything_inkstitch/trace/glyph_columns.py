@@ -235,11 +235,12 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
 
 
 # Offsets (mm) a glyph is also planned at. The planner's reading of a junction can turn on a tie (two
-# branches equally close to an inside corner, an angle right at a threshold) that the last bit of a
-# coordinate decides; moving the outline by a few hundredths of a mm changes only that rounding, so
-# each offset is the same glyph read again. Measured on Avenir Black at 7.6 and 13 mm: 17 of 52
-# letters planned differently at some offset (an R's overlap 6.34, 0.79 or 2.98 mm2).
-READING_OFFSETS_MM = ((0.0, 0.0), (0.0101, 0.0), (0.0, 0.0103), (-0.0107, 0.0059))
+# branches equally close to an inside corner, an angle or a coverage right at a threshold) that the
+# rounding of the coordinates decides; moving the whole outline changes only that rounding, so each
+# offset is the same glyph read again. Measured on Avenir Black at 7.6 and 13 mm: 17 of 52 letters
+# planned differently at some offset (an R's overlap 6.34, 0.79 or 2.98 mm2); a Pacifico "a" at 10 mm
+# was 4.96 or 5.35 % bare (its limit 5) by offset alone. Fixed values: the same readings every time.
+READING_OFFSETS_MM = ((0.0, 0.0), (0.0101, 0.0), (-0.0107, 0.0059), (-7.7, -4.1), (13.37, -3.3))
 TIDY_READINGS = 2
 
 
