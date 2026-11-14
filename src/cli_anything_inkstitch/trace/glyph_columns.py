@@ -1188,41 +1188,189 @@ def glyph_polygon(contours):
     return glyph
 
 
-def route_walk(ends, covered=None):
-    """Simulate the engine's start_at_nearest_point sew-walk over a sequence of
-    columns, given each column's two ends (column_ends) in SEWING ORDER.
+def centre_line(left, right, samples: int = 40):
+    """A column's centre line from its two rails: the midpoints of its rail pairs when the rails
+    pair node for node (the planner's columns, the engine's rung-less pairing), else both rails
+    resampled at `samples` even steps. The engine walks a satin's offset_center_line
+    (lib/elements/satin_column.py) for start_at_nearest_point's hidden entry run."""
+    if len(left) == len(right):
+        return [((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0) for a, b in zip(left, right)]
+    from shapely.geometry import LineString
+
+    ls, rs = LineString(left), LineString(right)
+    out = []
+    for i in range(samples + 1):
+        a, b = ls.interpolate(i / samples, normalized=True), rs.interpolate(i / samples, normalized=True)
+        out.append(((a.x + b.x) / 2.0, (a.y + b.y) / 2.0))
+    return out
+
+
+def _flags(v, n):
+    if v is None or isinstance(v, bool):
+        return [bool(v)] * n
+    if isinstance(v, (set, frozenset)):
+        return [k in v for k in range(n)]
+    return [bool(x) for x in v]
+
+
+def route_walk(ends, covered=None, *, as_drawn=None, centre_lines=None, exact=None, start=None):
+    """Simulate the engine's sew-walk over a sequence of columns, given each column's two ends
+    (column_ends) in SEWING ORDER.
 
     Returns one record per column, in order:
       {"order": k, "entry": (x, y), "exit": (x, y), "exposed": float,
-       "is_jump_before": bool}
-    The first column is taken to sew end_a -> end_b (entry=end_a, exit=end_b);
-    each later column starts at whichever of its ends is nearer where the
-    previous column left the needle and leaves it at the far end -- exactly as
+       "is_jump_before": bool, "arrive": (x, y), "travel": float, "hidden_run": float}
+
+    Default model (end_at_nearest_point on, the engine default): the first column is taken to sew
+    end_a -> end_b (entry=end_a, exit=end_b); each later column starts at whichever of its ends is
+    nearer where the previous column left the needle and leaves it at the far end -- exactly as
     exposed_hops measures travel, so the entry/exit decision lives in one place.
-    `exposed` is the length of the travel INTO this column that lies outside
-    `covered` (a shapely geometry, same units as the ends): 0 for the first
-    column and whenever `covered` is None. is_jump_before is True when that
-    travel crosses bare fabric at all; callers that only care about visible
-    jumps apply their own length threshold to `exposed`."""
+
+    as_drawn (one bool for all, or per column: a list of bools or a set of indexes): the column has
+    end_at_nearest_point off, so it sews end_a -> end_b as drawn: the engine neither picks the end
+    nor splits the top layer to finish near the next element (lib/elements/satin_column.py
+    end_point / _split_top_layer). Its exit is end_b. With start_at_nearest_point on
+    (start_point) the needle lands on the point of its centre line (centre_lines[k], when given)
+    nearest the previous exit and runs back along it, under the column, to end_a: that hidden
+    run's length is `hidden_run`. exact (same forms): start_at_nearest_point off, so the needle
+    lands on end_a itself.
+
+    `arrive` is where the travel into the column lands, `travel` its straight length. `exposed` is
+    the part of that travel outside `covered` (a shapely geometry, same units as the ends): 0 for
+    the first column (unless `start`, the needle's position before column 0, is given) and
+    whenever `covered` is None. is_jump_before is True when that travel crosses bare fabric at
+    all; callers that only care about visible jumps apply their own length threshold to
+    `exposed`."""
     out = []
     if not ends:
         return out
-    e0, e1 = ends[0]
-    out.append({"order": 0, "entry": e0, "exit": e1, "exposed": 0.0,
-                "is_jump_before": False})
-    cur = e1
-    if covered is not None:
-        from shapely.geometry import LineString
-    for k in range(1, len(ends)):
+    n = len(ends)
+    drawn, ex = _flags(as_drawn, n), _flags(exact, n)
+    if covered is not None or centre_lines is not None:
+        from shapely.geometry import LineString, Point
+    cur = start
+    for k in range(n):
         a, b = ends[k]
-        start, far = (a, b) if math.dist(cur, a) <= math.dist(cur, b) else (b, a)
+        hidden = 0.0
+        if drawn[k] or cur is None:
+            entry, far = a, b
+            arrive = a
+            if drawn[k] and not ex[k] and cur is not None and centre_lines is not None \
+                    and len(centre_lines[k]) >= 2:
+                cl = LineString(centre_lines[k])
+                t = cl.project(Point(cur))
+                q = cl.interpolate(t)
+                arrive, hidden = (q.x, q.y), t
+        else:
+            entry, far = (a, b) if math.dist(cur, a) <= math.dist(cur, b) else (b, a)
+            arrive = entry
+        travel = math.dist(cur, arrive) if cur is not None else 0.0
         exposed = 0.0
-        if covered is not None and math.dist(cur, start) > 1e-6:
-            exposed = LineString([cur, start]).difference(covered).length
-        out.append({"order": k, "entry": start, "exit": far,
-                    "exposed": exposed, "is_jump_before": exposed > 0.0})
+        if covered is not None and travel > 1e-6:
+            exposed = LineString([cur, arrive]).difference(covered).length
+        out.append({"order": k, "entry": entry, "exit": far, "exposed": exposed,
+                    "is_jump_before": exposed > 0.0, "arrive": arrive, "travel": travel,
+                    "hidden_run": hidden})
         cur = far
     return out
+
+
+# The engine's collapse_len default (metadata collapse_len_mm, 3 mm: read in lib/elements/satin_column.py
+# min_jump_stitch_len and stitch_groups_to_stitch_plan): travel longer than
+# this becomes a jump the machine sews as a long loose stitch unless it is trimmed.
+ONE_PASS_TRIM_MM = 3.0
+# ...measured from the planned rails, which the needle overshoots: pull compensation widens a satin
+# (0.2-0.3 mm a side) and the last stitch lands past the rail, so a 2.99 mm planned handoff sewed as
+# a 3.2 mm jump. Handoffs within this margin of trim_mm are trimmed too.
+ONE_PASS_TRIM_MARGIN_MM = 0.5
+
+
+def _reverse_column(c: PlannedColumn) -> None:
+    c.left, c.right = list(c.left)[::-1], list(c.right)[::-1]
+
+
+def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = True,
+                  trim_mm: float = ONE_PASS_TRIM_MM, exposed_mm: float = EXPOSED_TRAVEL_MM,
+                  margin_mm: float = ONE_PASS_TRIM_MARGIN_MM) -> dict:
+    """Orient a shape's columns so each sews in ONE pass, and say where to trim.
+
+    The engine's satin default end_at_nearest_point splits a column's top layer into two passes
+    that meet mid-column, so it can finish near the next element (lib/elements/satin_column.py
+    end_point / _split_top_layer): a visible seam. With it off a column sews end_a -> end_b as
+    drawn, so the planner picks the direction instead, in sewing order (columns are reversed in
+    place; their rail pairing is kept):
+
+      1. each column but the last finishes at the end nearest the next column;
+      2. trim after a column whose farther end rail point is more than trim_mm less margin_mm from
+         the next column's outline (the engine would jump it: within collapse_len of the outline it
+         stitches through; the margin is for the needle overshooting the planned rail by the pull
+         compensation) or lies on bare fabric for more than exposed_mm (route_walk, as drawn);
+         the shape's last column always trims (shapes-to-satin trims between shapes);
+      3. a column that trims afterwards instead starts at the end nearest where the needle
+         arrives (a shorter hidden entry run, or a shorter jump), and a column the needle reaches
+         after a trim starts exactly at its start (start_at_nearest_point off: `start_exact`).
+
+    arrival: where the needle is before this shape (the previous shape's exit), or None.
+    trim_handoffs False: no trims inside the shape (only the orientation).
+
+    Returns {"trim_after": [k...] (inside the shape, not the last column), "start_exact": [k...],
+    "reversed": [k...], "exit": (x, y), "hidden_runs": [mm per column]}."""
+    cols = letter.columns
+    n = len(cols)
+    if n == 0:
+        return {"trim_after": [], "start_exact": [], "reversed": [], "exit": arrival, "hidden_runs": []}
+    from shapely.geometry import LineString, Point, Polygon
+
+    def band(c):
+        p = Polygon(list(c.left) + list(c.right)[::-1])
+        return p if p.is_valid else p.buffer(0)
+
+    flipped: set[int] = set()
+
+    def flip(k):
+        _reverse_column(cols[k])
+        flipped.symmetric_difference_update({k})
+
+    for k in range(n - 1):                       # 1. finish nearest the next column
+        if cols[k].closed:
+            continue
+        a, b = column_ends(cols[k].left, cols[k].right)
+        nxt = band(cols[k + 1])
+        if nxt.distance(Point(a)) < nxt.distance(Point(b)):
+            flip(k)
+    covered = glyph_polygon(letter.contours)
+    covered = covered.buffer(0.05) if covered is not None else None
+    trims = {n - 1}
+    if trim_handoffs:                            # 2. trims where the handoff is a jump or bare
+        recs = route_walk([column_ends(c.left, c.right) for c in cols], covered, as_drawn=True,
+                          centre_lines=[centre_line(c.left, c.right) for c in cols])
+        bands = [band(c) for c in cols]
+
+        def jump_mm(k):
+            # The engine jumps into column k only when its outline is at least collapse_len from the
+            # needle; nearer, it starts from the outline and stitches through
+            # (lib/elements/satin_column.py start_point). The needle is wherever the top layer's
+            # last stitch landed: on a RAIL at the column's end, up to half its width from the
+            # centre-line end the walk uses, so measure from the farther end rail point.
+            prev = cols[k - 1]
+            return max(bands[k].distance(Point(prev.left[-1])), bands[k].distance(Point(prev.right[-1])))
+
+        trims |= {k - 1 for k in range(1, n)
+                  if jump_mm(k) > trim_mm - margin_mm or recs[k]["exposed"] > exposed_mm}
+    cur = arrival                                # 3. a trimmed column starts nearest its arrival
+    for k in range(n):
+        a, b = column_ends(cols[k].left, cols[k].right)
+        if k in trims and cur is not None and not cols[k].closed and math.dist(cur, b) < math.dist(cur, a):
+            flip(k)
+            a, b = b, a
+        cur = b
+    exact = {0} | {k + 1 for k in trims if k + 1 < n}
+    recs = route_walk([column_ends(c.left, c.right) for c in cols], None, as_drawn=True,
+                      centre_lines=[centre_line(c.left, c.right) for c in cols], exact=exact,
+                      start=arrival)
+    return {"trim_after": sorted(trims - {n - 1}), "start_exact": sorted(exact),
+            "reversed": sorted(flipped), "exit": recs[-1]["exit"],
+            "hidden_runs": [r["hidden_run"] for r in recs]}
 
 
 def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:

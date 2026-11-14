@@ -985,9 +985,15 @@ def route_plan(project_file: str) -> dict[str, Any]:
     from cli_anything_inkstitch.svg.geometry import apply_matrix, ctm_for
     from cli_anything_inkstitch.trace.glyph_columns import (
         EXPOSED_TRAVEL_MM,
+        centre_line,
         column_ends,
         route_walk,
     )
+
+    def _off(elem, name):
+        # readers: lib/elements/satin_column.py start_at_nearest_point / end_at_nearest_point
+        # (get_boolean_param, default True)
+        return (elem.get(f"{{http://inkstitch.org/namespace}}{name}") or "").strip().lower() in ("false", "0", "no", "off")
 
     with _open_locked(project_file) as (proj, tree):
         root = tree.getroot()
@@ -1021,6 +1027,10 @@ def route_plan(project_file: str) -> dict[str, Any]:
                     "shape_id": _shape_id_for(elem),
                     "ends": column_ends(left, right),
                     "band": left + right[::-1],
+                    "left": left, "right": right,
+                    # end_at_nearest_point off: sewn as drawn (route_walk as_drawn)
+                    "as_drawn": _off(elem, "end_at_nearest_point"),
+                    "exact": _off(elem, "start_at_nearest_point"),
                 })
             elif kind == "fill":
                 for sub in split_subpaths(d):
@@ -1047,7 +1057,14 @@ def route_plan(project_file: str) -> dict[str, Any]:
         covered = None
 
     ends = [c["ends"] for c in columns]
-    records = route_walk(ends, covered)
+    lines = None
+    if any(c["as_drawn"] for c in columns):
+        try:
+            lines = [centre_line(c["left"], c["right"]) for c in columns]
+        except Exception:  # noqa: BLE001 — without shapely: entry at end_a, no hidden run
+            lines = None
+    records = route_walk(ends, covered, as_drawn=[c["as_drawn"] for c in columns],
+                         centre_lines=lines, exact=[c["exact"] for c in columns])
     threshold_uu = EXPOSED_TRAVEL_MM * uu_per_mm
     rnd = lambda p: [round(p[0], 3), round(p[1], 3)]
     out = []
