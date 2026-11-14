@@ -1162,7 +1162,7 @@ def extract_stitch_blocks(svg_bytes: bytes) -> dict[str, Any]:
     return {"blocks": blocks, "total_stitches": total}
 
 
-def _cut_moves(project_file: str, *, binary_override: str | None = None,
+def _cut_moves(binary: str, svg_path: str,
                ids: list[str] | None = None) -> list[bool] | None:
     """For each needle-up move, in order: was the thread cut before it?
 
@@ -1172,10 +1172,7 @@ def _cut_moves(project_file: str, *, binary_override: str | None = None,
     thread between letters. Only the machine command stream carries TRIM, so
     this costs a second engine call.
     """
-    from cli_anything_inkstitch.binary import require, run_extension
-    with _open_locked(project_file) as (proj, _tree):
-        binary = require(binary_override, proj.session)
-        svg_path = proj.svg_path
+    from cli_anything_inkstitch.binary import run_extension
     try:
         out = run_extension(binary, "output", svg_path,
                             args={"format": "csv"}, ids=list(ids or []),
@@ -1241,10 +1238,11 @@ def stitch_sequence(project_file: str, *, binary_override: str | None = None,
         ids = [i for i in all_ids if i not in dropped]
         if not ids:
             return {"blocks": [], "total_stitches": 0}
-    out = extract_stitch_blocks(
-        stitch_plan_svg(project_file, binary_override=binary_override, ids=ids))
-    _mark_cut(out["blocks"],
-              _cut_moves(project_file, binary_override=binary_override, ids=ids))
+    # both engine passes read ONE snapshot: _mark_cut aligns their results
+    # move by move, so they must describe the same revision of the design
+    with engine_snapshot(project_file, binary_override=binary_override) as (binary, path):
+        out = extract_stitch_blocks(_render_plan(binary, path, ids))
+        _mark_cut(out["blocks"], _cut_moves(binary, path, ids))
     return out
 
 
@@ -1267,15 +1265,49 @@ def ensure_prepped(project_file: str) -> bool:
     return True
 
 
-def stitch_plan_svg(project_file: str, *, binary_override: str | None = None,
-                    ids: list[str] | None = None) -> bytes:
-    """Authoritative Tier-2 render: the binary's stitch-plan SVG for the design."""
-    from cli_anything_inkstitch.binary import require, run_extension
+@contextmanager
+def engine_snapshot(project_file: str, *, binary_override: str | None = None):
+    """Yield ``(binary, path)``: a private copy of the design for the engine.
+
+    Rendering used to run the binary while holding the project lock, so
+    every /edit and /design request from the editor queued behind a render
+    that takes seconds. Now the lock is held only to copy the file; the
+    engine reads the copy. The render may then describe a revision one edit
+    old — the editor re-requests the plan after every edit and drops
+    superseded answers (editor.html fetchTier2 / tier2Gen).
+
+    The copy lives in a temp dir under the original file name. Nothing the
+    engine reads depends on the file's location: the design name comes from
+    the in-file sodipodi:docname (inkstitch lib/extensions/base.py
+    get_base_file_name), and stitch_plan_preview / output write their own
+    temp files (lib/extensions/stitch_plan_preview.py, output.py).
+    """
+    import tempfile
+    from cli_anything_inkstitch.binary import require
 
     ensure_prepped(project_file)
     with _open_locked(project_file) as (proj, _tree):
         binary = require(binary_override, proj.session)
-        svg_path = proj.svg_path
-        return run_extension(binary, "stitch_plan_preview", svg_path,
-                             args=_PREVIEW_ARGS, ids=list(ids or []),
-                             capture_stdout=True) or b""
+        src = Path(proj.svg_path)
+        data = src.read_bytes()
+    with tempfile.TemporaryDirectory(prefix="inkstitch-render-") as td:
+        copy = Path(td) / src.name
+        copy.write_bytes(data)
+        yield binary, str(copy)
+
+
+def _render_plan(binary: str, svg_path: str, ids: list[str] | None) -> bytes:
+    from cli_anything_inkstitch.binary import run_extension
+    return run_extension(binary, "stitch_plan_preview", svg_path,
+                         args=_PREVIEW_ARGS, ids=list(ids or []),
+                         capture_stdout=True) or b""
+
+
+def stitch_plan_svg(project_file: str, *, binary_override: str | None = None,
+                    ids: list[str] | None = None) -> bytes:
+    """Authoritative Tier-2 render: the binary's stitch-plan SVG for the design.
+
+    Runs on an engine_snapshot, so the project lock is free while the
+    binary works."""
+    with engine_snapshot(project_file, binary_override=binary_override) as (binary, path):
+        return _render_plan(binary, path, ids)
