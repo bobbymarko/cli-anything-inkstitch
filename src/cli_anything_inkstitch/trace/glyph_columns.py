@@ -242,6 +242,7 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
 # was 4.96 or 5.35 % bare (its limit 5) by offset alone. Fixed values: the same readings every time.
 READING_OFFSETS_MM = ((0.0, 0.0), (0.0101, 0.0), (-0.0107, 0.0059), (-7.7, -4.1), (13.37, -3.3))
 TIDY_READINGS = 2
+LETTER_TRIM_DEPTH_MM = 0.5   # lettering: overlaps deeper than this (just past the 0.4 mm tuck) are trimmed
 
 
 def plan_score(planned: PlannedLetter, height_mm: float) -> float:
@@ -351,8 +352,10 @@ def _rechecked(planned: PlannedLetter) -> PlannedLetter:
 
 def _tidied(planned: PlannedLetter, height_mm: float) -> PlannedLetter:
     """The shapes planner's junction tools (trace/joins.py) tried on a letter: deep overlaps trimmed
-    (an A's legs past its apex, a K's arm into its leg), bare wedges at junctions closed (the notch
-    a K's arm leaves against its leg, an R's leg against its bowl, a B's waist). Each tool keeps only
+    (an A's legs past its apex, a K's arm into its leg; and, as trim_under, every overlap deeper than
+    the tuck, a V's point and a serif's foot included, the stroke underneath cut to the one on top
+    and sewn first), bare wedges at junctions closed (the notch a K's arm leaves against its leg,
+    an R's leg against its bowl, a B's waist). Each tool keeps only
     changes that leave no more bare fabric, and of the letter as planned and each tidied version,
     the one that passes its own check best (plan_score) is kept. Measured on Avenir Black: the K at
     7.6 mm went from 3.8% bare to 1.1%, the R at 13 mm from 2.8% to 1.3%.
@@ -365,8 +368,17 @@ def _tidied(planned: PlannedLetter, height_mm: float) -> PlannedLetter:
 
     if not planned.ok or len(planned.columns) < 2:
         return planned
+    def trim_under(p):
+        # every overlap deeper than the tuck, a V's point and a serif's foot included: the stroke
+        # underneath cut to the one on top, joins.KEEP_MM under it, and sewn first (Bobby on the
+        # letter-ends sheet, 11/13: "I'd expect the shape to be trimmed to match the shape of the
+        # overlap"; EmbroideryStudio's remove-overlaps)
+        p = joins.trim_overlaps(p, max_depth_mm=LETTER_TRIM_DEPTH_MM, fill_acute_v=False)
+        return joins.tucked_first(p) if p.check.get("joins_trimmed") else p
+
     best, best_score = planned, plan_score(planned, height_mm)
-    for tools in ((joins.trim_overlaps,), (joins.close_wedges,), (joins.trim_overlaps, joins.close_wedges)):
+    for tools in ((joins.trim_overlaps,), (joins.close_wedges,), (joins.trim_overlaps, joins.close_wedges),
+                  (trim_under,), (trim_under, joins.close_wedges)):
         trial = deepcopy(planned)
         try:
             for tool in tools:

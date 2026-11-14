@@ -82,6 +82,13 @@ class TestLettering:
         assert len(got["L"].columns) == 2 and got["L"].check["corners_butted"]
         assert len(got["D"].columns) == 2
 
+    def test_wide_apex_overlap_is_trimmed_not_sewn_twice(self):
+        """Above the wrap threshold an A's legs still overlap at the apex: the leg underneath is cut to
+        the one on top, a tuck under it, and sews first (trim_under; was 'filled to the point')."""
+        (a,) = gc.plan_text(LATO, "A", 30.0)
+        assert a.ok and a.check.get("joins_trimmed")
+        assert a.check["overlap_mm2"] < 16.0          # integ-final: 20.3 mm2
+
     def test_plan_does_not_depend_on_position(self):
         a = gc.plan_text(LATO, "RKYG", 10.0, letter_spacing_pct=0)
         b = gc.plan_text(LATO, "RKYG", 10.0, letter_spacing_pct=37)

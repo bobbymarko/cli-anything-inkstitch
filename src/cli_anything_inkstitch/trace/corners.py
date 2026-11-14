@@ -43,7 +43,8 @@ CORNER_TOUCH_MM = 0.4
 JUNCTION_REACH = 2.0             # an inside corner within this many junction radii of a 3-way junction is its
 TWO_STROKE_JUNCTIONS = ("corner", "v_foot")   # junction types (autostrokes) where only two strokes meet            # ...whose end part reaches the corner to within this, meets it there
 CORNER_MIN_TURN_DEG = 30.0       # the two legs turn at least this much (else it's one straight stroke)
-OUTER_SNAP = 0.6                 # an outside corner within this share of the width of the bisector's hit
+OUTER_SNAP = 0.35                # an outside corner within this share of the width of the bisector's hit (a flat
+                                 # top or foot is wider: its corners are no snap target, its middle is)
 CLIP_MARGIN_MM = 0.15            # pairs this close to the corner stitch's line are dropped (re-made round it)
 CORNER_FAN_WIDTHS = 1.0          # the stitches turn over this many widths each side of the inside corner,
 WRAP_PASSES = 2                  # times the corners are gone over

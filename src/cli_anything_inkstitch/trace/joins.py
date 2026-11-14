@@ -316,8 +316,11 @@ def _acute_v(a, b) -> bool:
     return ang < V_ACUTE_DEG
 
 
-def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPTH_MM):
-    """See the module docstring. Lists the trims in check["joins_trimmed"]."""
+def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPTH_MM,
+                  fill_acute_v: bool = True):
+    """See the module docstring. Lists the trims in check["joins_trimmed"]. fill_acute_v=False trims
+    an acute inner V too (lettering: the stroke underneath cut to the one on top, keep_mm under it, as
+    EmbroideryStudio removes overlaps) instead of filling it to the point (see _acute_v)."""
     outline = _outline(planned.contours)
     cols = planned.columns
     if outline is None or len(cols) < 2:
@@ -335,7 +338,7 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
                 x = pa.intersection(pb)
                 if x.area < MIN_OVERLAP_MM2 or _depth(x) <= max_depth_mm:
                     continue
-                if _acute_v(a, b):
+                if fill_acute_v and _acute_v(a, b):
                     # a sharp inner V (an M's middle, a diagonal into a stem at a pinch): fill the
                     # point, don't trim it back to a notch or a seam. See _acute_v.
                     _dbg(planned.char, "acute-V fill", i, j, round(x.area, 2))
