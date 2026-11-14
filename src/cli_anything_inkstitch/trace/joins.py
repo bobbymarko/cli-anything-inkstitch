@@ -317,10 +317,11 @@ def _acute_v(a, b) -> bool:
 
 
 def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPTH_MM,
-                  fill_acute_v: bool = True):
+                  fill_acute_v: bool = True, bare_tol_mm2: float = BARE_TOL_MM2):
     """See the module docstring. Lists the trims in check["joins_trimmed"]. fill_acute_v=False trims
     an acute inner V too (lettering: the stroke underneath cut to the one on top, keep_mm under it, as
-    EmbroideryStudio removes overlaps) instead of filling it to the point (see _acute_v)."""
+    EmbroideryStudio removes overlaps) instead of filling it to the point (see _acute_v). bare_tol_mm2:
+    how much more bare fabric a trim may leave (a V's very tip, covered by one leg only)."""
     outline = _outline(planned.contours)
     cols = planned.columns
     if outline is None or len(cols) < 2:
@@ -366,7 +367,7 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
                         bare = _bare(outline, trial)
                         ov = _poly(trial[i]).intersection(_poly(trial[j])).area
                         _dbg("  ", k, end, "bare", round(bare, 2), "ov", round(ov, 2))
-                        if bare > base_bare + BARE_TOL_MM2:
+                        if bare > base_bare + bare_tol_mm2:
                             continue
                         if ov >= x.area * 0.8:
                             continue
@@ -381,7 +382,7 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
                     bare = _bare(outline, trial)
                     ov = _poly(ta).intersection(_poly(tb)).area
                     _dbg("   mitre bare", round(bare, 2), "ov", round(ov, 2))
-                    if bare <= base_bare + BARE_TOL_MM2 and ov < x.area * 0.8:
+                    if bare <= base_bare + bare_tol_mm2 and ov < x.area * 0.8:
                         score = bare + 0.2 * ov
                         if best is None or score < best[0]:
                             best = (score, (i, j), (ta, tb), round(x.area, 2), round(ov, 2))

@@ -1742,6 +1742,10 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
                    "column oriented to finish nearest the next, a trim where a handoff inside a letter "
                    "would jump (> 3 mm) or cross bare fabric, columns after a trim starting exactly at "
                    "their start. Letters routed through auto_satin keep its order and direction.")
+@click.option("--corner-wrap/--no-corner-wrap", default=True, show_default=True,
+              help="Sew a narrow stroke round its corners and points as one column "
+                   "(trace/corners.py); --no-corner-wrap keeps every corner a butt join, "
+                   "its overlap trimmed to the tuck.")
 @click.option("--route/--no-route", default=True, show_default=True,
               help="Route letters whose planned order would leave travel "
                    "on bare fabric (an E's arms) with the engine's "
@@ -1750,7 +1754,7 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
 @click.pass_context
 def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                   letter_spacing_pct, width_mm, cx_mm, cy_mm, rotate_deg, merge_joins,
-                  fallback, color, pull_comp_mm, auto_params, one_pass, route):
+                  fallback, color, pull_comp_mm, auto_params, one_pass, corner_wrap, route):
     """Set TEXT from a TTF as per-stroke satin columns: no rung review.
 
     Each letter is cut at its junctions into strokes, and each stroke gets
@@ -1776,7 +1780,7 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
     font = gc.static_font(font_path, wght)
     letters = gc.plan_text(font, text, height_mm,
                            letter_spacing_pct=letter_spacing_pct,
-                           width_mm=width_mm, merge_joins=merge_joins)
+                           width_mm=width_mm, merge_joins=merge_joins, corner_wrap=corner_wrap)
     schema = load_schema(prefer_version=installed_version(
         ctx.obj.get("binary_override") if ctx.obj else None))
 

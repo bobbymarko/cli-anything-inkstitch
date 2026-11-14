@@ -166,7 +166,7 @@ def _from_letter(lt, ok: bool, check: dict, char: str | None = None) -> PlannedL
 def plan_text(font_path: str | Path, text: str, height_mm: float, *,
               letter_spacing_pct: float | None = None,
               width_mm: float | None = None,
-              merge_joins: bool = False) -> list[PlannedLetter]:
+              merge_joins: bool = False, corner_wrap: bool = True) -> list[PlannedLetter]:
     """Plan `text` (one line) as satin columns, centred on (0, 0), mm, y up.
 
     height_mm is the font's capital height (the sCapHeight in its OS/2
@@ -230,7 +230,8 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
     if merge_joins:
         return _plan_merged(shells, ac)
     # each glyph planned from the font's own outline, then moved into place (plan_glyph)
-    return [plan_glyph(sh.char, glyph, height_mm, spacing, at=(gx + dx, dy), placed=sh.outline)
+    return [plan_glyph(sh.char, glyph, height_mm, spacing, at=(gx + dx, dy), placed=sh.outline,
+                       corner_wrap=corner_wrap)
             for sh, (_, _, _, glyph, gx) in zip(shells, raw)]
 
 
@@ -242,7 +243,8 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
 # was 4.96 or 5.35 % bare (its limit 5) by offset alone. Fixed values: the same readings every time.
 READING_OFFSETS_MM = ((0.0, 0.0), (0.0101, 0.0), (-0.0107, 0.0059), (-7.7, -4.1), (13.37, -3.3))
 TIDY_READINGS = 2
-LETTER_TRIM_DEPTH_MM = 0.5   # lettering: overlaps deeper than this (just past the 0.4 mm tuck) are trimmed
+LETTER_TRIM_DEPTH_MM = 0.5   # lettering: overlaps deeper than this (just past the 0.4 mm tuck) are trimmed,
+LETTER_TRIM_BARE_TOL_MM2 = 0.5  # ...even where that leaves a V's very tip to one leg (Avenir 13 mm V: +0.18)
 
 
 def plan_score(planned: PlannedLetter, height_mm: float) -> float:
@@ -257,7 +259,7 @@ def plan_score(planned: PlannedLetter, height_mm: float) -> float:
 
 
 def plan_glyph(char: str, outline, height_mm: float, spacing: float, at=(0.0, 0.0),
-               placed=None) -> PlannedLetter:
+               placed=None, corner_wrap: bool = True) -> PlannedLetter:
     """One letter's satin columns (the steps of art_columns.text_columns: letter_strokes →
     tuck_order → letter_columns (flat, tucked) → trim_tips → flat_check, then wrap_corners),
     planned on the glyph's outline as the font gives it (mm, y up, at the glyph's own origin) and
@@ -281,14 +283,14 @@ def plan_glyph(char: str, outline, height_mm: float, spacing: float, at=(0.0, 0.
     as_given = [[tuple(map(float, p)) for p in c] for c in (placed if placed is not None
                                                              else [c + [ox, oy] for c in local])]
     readings = [_plan_reading(char, [c + [dx, dy] for c in local], height_mm, spacing,
-                              (ox - dx, oy - dy), as_given) for dx, dy in READING_OFFSETS_MM]
+                              (ox - dx, oy - dy), as_given, corner_wrap) for dx, dy in READING_OFFSETS_MM]
     # the junction tools are the slow part: tried on the TIDY_READINGS best readings only
     readings.sort(key=lambda p: plan_score(p, height_mm))
     tidied = [_tidied(p, height_mm) for p in readings[:TIDY_READINGS]]
     return min(tidied + readings, key=lambda p: plan_score(p, height_mm))
 
 
-def _plan_reading(char, local, height_mm, spacing, at, as_given) -> PlannedLetter:
+def _plan_reading(char, local, height_mm, spacing, at, as_given, corner_wrap: bool = True) -> PlannedLetter:
     """plan_glyph for one reading: plan on `local`, move the result by `at`."""
     import numpy as np
 
@@ -333,7 +335,7 @@ def _plan_reading(char, local, height_mm, spacing, at, as_given) -> PlannedLette
     planned.contours = as_given
     # narrow strokes run on round their corners as one column (trace/corners.py)
     from cli_anything_inkstitch.trace.corners import wrap_corners
-    return wrap_corners(planned)
+    return wrap_corners(planned) if corner_wrap else wrap_corners(planned, butt_points=True)
 
 
 def _rechecked(planned: PlannedLetter) -> PlannedLetter:
@@ -373,7 +375,8 @@ def _tidied(planned: PlannedLetter, height_mm: float) -> PlannedLetter:
         # underneath cut to the one on top, joins.KEEP_MM under it, and sewn first (Bobby on the
         # letter-ends sheet, 11/13: "I'd expect the shape to be trimmed to match the shape of the
         # overlap"; EmbroideryStudio's remove-overlaps)
-        p = joins.trim_overlaps(p, max_depth_mm=LETTER_TRIM_DEPTH_MM, fill_acute_v=False)
+        p = joins.trim_overlaps(p, max_depth_mm=LETTER_TRIM_DEPTH_MM, fill_acute_v=False,
+                                bare_tol_mm2=LETTER_TRIM_BARE_TOL_MM2)
         return joins.tucked_first(p) if p.check.get("joins_trimmed") else p
 
     best, best_score = planned, plan_score(planned, height_mm)

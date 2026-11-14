@@ -36,7 +36,7 @@ class TestCornerRule:
             corners.CORNER_STITCH_RATIO * corners.WRAP_MAX_WIDTH_MM)
         assert corners.CORNER_WRAP_MAX_STITCH_MM < gc.SPLIT_SATIN_MM
 
-    @pytest.mark.parametrize("w", [1.7, 2.6, 3.5])
+    @pytest.mark.parametrize("w", [1.7, 2.0])
     def test_narrow_l_wraps_as_one_column(self, w):
         p = gc.plan_glyph("L", _l_shape(w), 20.0, 1.5)
         assert p.ok and len(p.columns) == 1
@@ -48,33 +48,53 @@ class TestCornerRule:
         pairs = list(zip(c.left, c.right))
         assert any(math.dist(a, (w, w)) < 1e-6 and math.dist(b, (0, 0)) < 1e-6 for a, b in pairs)
 
-    @pytest.mark.parametrize("w", [4.5, 5.0])
-    def test_wide_l_keeps_the_butt_join(self, w):
+    @pytest.mark.parametrize("w", [2.6, 3.5, 5.0])
+    def test_wider_square_corner_keeps_the_butt_join(self, w):
+        """Square corners stop at SQUARE_CORNER_WRAP_MAX_STITCH_MM (Bobby's blind picks: the wrapped
+        D first at 7.6 mm caps, last at 13 mm)."""
         p = gc.plan_glyph("L", _l_shape(w), 20.0, 1.5)
         assert p.ok and len(p.columns) == 2
         (butt,) = p.check["corners_butted"]
-        assert butt["stitch_mm"] > corners.CORNER_WRAP_MAX_STITCH_MM
+        assert butt["stitch_mm"] > corners.SQUARE_CORNER_WRAP_MAX_STITCH_MM
         assert "corners_wrapped" not in p.check
 
     def test_the_threshold_decides(self, monkeypatch):
-        """The same 2.6 mm L butts when the threshold is set under its 3.7 mm corner stitch."""
+        """The same 2.0 mm L butts when the square-corner threshold is set under its 2.8 mm stitch,
+        and a 2.6 mm L wraps when it is raised over its 3.7 mm one."""
         real = corners.wrap_corners
-        monkeypatch.setattr(corners, "wrap_corners", lambda p: real(p, max_stitch_mm=3.0))
-        p = gc.plan_glyph("L", _l_shape(2.6), 20.0, 1.5)
+        monkeypatch.setattr(corners, "wrap_corners", lambda p: real(p, square_max_stitch_mm=2.5))
+        p = gc.plan_glyph("L", _l_shape(2.0), 20.0, 1.5)
         assert len(p.columns) == 2 and p.check["corners_butted"]
+        monkeypatch.setattr(corners, "wrap_corners", lambda p: real(p, square_max_stitch_mm=4.0))
+        p = gc.plan_glyph("L", _l_shape(2.6), 20.0, 1.5)
+        assert len(p.columns) == 1
 
 
 @pytest.mark.skipif(not LATO.exists(), reason="vendored Lato Black missing")
 class TestLettering:
-    def test_square_corners_and_points_wrap_at_13mm(self):
-        got = {lt.char: lt for lt in gc.plan_text(LATO, "LDWV", 13.0)}
-        assert all(lt.ok for lt in got.values())
-        assert len(got["L"].columns) == 1
-        d = got["D"].columns
-        assert len(d) == 1 and d[0].closed               # stem and bowl one ring, as EmbroideryStudio's D
-        assert len(got["W"].columns) == 1                # legs wrapped through both feet and the middle
-        assert len(got["V"].columns) == 1
-        assert all(lt.check["overlap_mm2"] == 0 for k, lt in got.items() if k in "LDWV")
+    def test_square_corners_wrap_at_7p6mm_points_at_13mm(self):
+        small = {lt.char: lt for lt in gc.plan_text(LATO, "LD", 7.6)}
+        assert len(small["L"].columns) == 1
+        d = small["D"].columns
+        assert len(d) == 1 and d[0].closed               # stem and bowl one ring
+        big = {lt.char: lt for lt in gc.plan_text(LATO, "LDWV", 13.0)}
+        assert len(big["L"].columns) == 2 and len(big["D"].columns) == 2   # square corners butt at 13 mm
+        assert len(big["W"].columns) == 1                # legs wrapped through both feet and the middle
+        assert len(big["V"].columns) == 1
+        assert all(big[k].check["overlap_mm2"] == 0 for k in "WV")
+
+    def test_es_points_option(self):
+        """ES's own A and N (option, off by default): the A's apex stays butted, and an N's stems keep
+        their own columns below the corner fans."""
+        default = {lt.char: lt for lt in gc.plan_text(LATO, "AN", 13.0)}
+        real = corners.ES_POINTS
+        try:
+            corners.ES_POINTS = True
+            es = {lt.char: lt for lt in gc.plan_text(LATO, "AN", 13.0)}
+        finally:
+            corners.ES_POINTS = real
+        assert default["A"].check.get("corners_wrapped") and not es["A"].check.get("corners_wrapped")
+        assert len(default["N"].columns) == 1 and len(es["N"].columns) == 3
 
     def test_wide_strokes_keep_butt_joins(self):
         # 30 mm caps: Lato Black strokes about 5.6 mm, corner stitches about 8 mm
