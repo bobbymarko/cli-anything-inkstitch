@@ -1431,9 +1431,10 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
     place; their rail pairing is kept):
 
       1. each column but the last finishes at the end nearest the next column;
-      2. trim after a column whose handoff to the next one, from its farther end rail point, is
-         longer than trim_mm less margin_mm (the engine would jump it: the needle overshoots the
-         planned rail by the pull compensation) or lies on bare fabric for more than exposed_mm (route_walk, as drawn);
+      2. trim after a column whose farther end rail point is more than trim_mm less margin_mm from
+         the next column's outline (the engine would jump it: within collapse_len of the outline it
+         stitches through; the margin is for the needle overshooting the planned rail by the pull
+         compensation) or lies on bare fabric for more than exposed_mm (route_walk, as drawn);
          the shape's last column always trims (shapes-to-satin trims between shapes);
       3. a column that trims afterwards instead starts at the end nearest where the needle
          arrives (a shorter hidden entry run, or a shorter jump), and a column the needle reaches
@@ -1473,17 +1474,19 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
     if trim_handoffs:                            # 2. trims where the handoff is a jump or bare
         recs = route_walk([column_ends(c.left, c.right) for c in cols], covered, as_drawn=True,
                           centre_lines=[centre_line(c.left, c.right) for c in cols])
-        lines = [LineString(centre_line(c.left, c.right)) for c in cols]
+        bands = [band(c) for c in cols]
 
-        def rail_travel(k):
-            # The top layer's last stitch lands on a RAIL at the column's end, up to half its width
-            # from the centre-line end the walk uses: a 1.5 mm centre handoff sewed as a 3.2 mm jump.
-            # Measure from whichever end rail point is farther from the next column's centre line.
+        def jump_mm(k):
+            # The engine jumps into column k only when its outline is at least collapse_len from the
+            # needle; nearer, it starts from the outline and stitches through
+            # (lib/elements/satin_column.py start_point). The needle is wherever the top layer's
+            # last stitch landed: on a RAIL at the column's end, up to half its width from the
+            # centre-line end the walk uses, so measure from the farther end rail point.
             prev = cols[k - 1]
-            return max(lines[k].distance(Point(prev.left[-1])), lines[k].distance(Point(prev.right[-1])))
+            return max(bands[k].distance(Point(prev.left[-1])), bands[k].distance(Point(prev.right[-1])))
 
         trims |= {k - 1 for k in range(1, n)
-                  if max(recs[k]["travel"], rail_travel(k)) > trim_mm - margin_mm or recs[k]["exposed"] > exposed_mm}
+                  if jump_mm(k) > trim_mm - margin_mm or recs[k]["exposed"] > exposed_mm}
     cur = arrival                                # 3. a trimmed column starts nearest its arrival
     for k in range(n):
         a, b = column_ends(cols[k].left, cols[k].right)
