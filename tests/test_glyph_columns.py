@@ -668,13 +668,13 @@ class TestRoutedHandoffs:
         assert self._fixes(g) == [("a", True), ("b", False)]       # b -> c is a bare jump: trimmed
 
     def test_handoff_just_under_collapse_len_counts_for_the_overshoot(self):
-        # a's end rail points are 2.7 mm from b's centre line (x = 12.7): under collapse_len (3 mm) but
-        # within the 0.5 mm overshoot margin
+        # b's outline (x >= 12.7) is 2.7 mm from a's end: under collapse_len (3 mm), where the engine
+        # would stitch through, but within the 0.5 mm margin for the needle's overshoot
         g = self._group(
             '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
-            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M11.7,2 L11.7,-10 M13.7,2 L13.7,-10"/>')
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M12.7,2 L12.7,-10 M14.7,2 L14.7,-10"/>')
         assert self._fixes(g) == [("a", False)]
         far = self._group(
             '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
-            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M11.0,2 L11.0,-10 M13.0,2 L13.0,-10"/>')
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M12.0,2 L12.0,-10 M14.0,2 L14.0,-10"/>')
         assert self._fixes(far) == []                      # 2.0 mm: stitched through

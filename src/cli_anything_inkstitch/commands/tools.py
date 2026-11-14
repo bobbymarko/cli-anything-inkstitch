@@ -167,9 +167,10 @@ def _routed_handoffs(group, uu_per_mm: float) -> list:
     the next element; with one-pass satins (that setting off) a satin finishes at its drawn end, and
     the gap to the next sewn element can exceed collapse_len. A handoff counts when, from either end
     rail point of the element (its last stitch lands on a rail; a running stitch's last point), the
-    next element's entry is farther than ONE_PASS_TRIM_MM less its margin (as plan_one_pass). Entry:
-    a satin's centre line (start_at_nearest_point, on by default) or its first rail point when that
-    is off (lib/elements/satin_column.py first_stitch); a running stitch's first point.
+    next element is farther than ONE_PASS_TRIM_MM less its margin (as plan_one_pass): a satin's
+    outline (start_at_nearest_point, on by default: within collapse_len of it the engine stitches
+    through), its first rail point when that is off (lib/elements/satin_column.py first_stitch), a
+    running stitch's first point.
 
     Returns [{"after": element, "hide": (start, end) | None}]: "hide" is a straight travel from the
     element's end-pair middle to the next element's entry, when that line lies wholly under elements
@@ -229,7 +230,12 @@ def _routed_handoffs(group, uu_per_mm: float) -> list:
             q = b["entry_line"].interpolate(b["entry_line"].project(Point(p)))
             return (q.x, q.y)
 
-        travel = max(math.dist(p, entry(p)) for p in a["exits"])
+        # the engine jumps into a satin only when its outline is collapse_len away; nearer, it starts
+        # from the outline and stitches through (lib/elements/satin_column.py start_point)
+        if b["entry_line"] is not None and b["poly"] is not None:
+            travel = max(b["poly"].distance(Point(p)) for p in a["exits"])
+        else:
+            travel = max(math.dist(p, entry(p)) for p in a["exits"])
         if travel <= limit:
             continue
         later = [x["poly"] for x in items[i + 1:] if x["poly"] is not None]
