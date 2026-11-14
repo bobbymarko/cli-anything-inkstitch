@@ -83,6 +83,16 @@ class TestLettering:
         assert len(big["V"].columns) == 1
         assert all(big[k].check["overlap_mm2"] == 0 for k in "WV")
 
+    def test_split_stem_corner_where_a_third_stroke_joins(self):
+        """Lato Black at 13 mm: the E's top and bottom corners (its stem carries the middle arm) are sewn
+        round with the arms while the stem keeps its own plain column (EmbroideryStudio's B and E);
+        the L, with nothing else on its stem, keeps the butt join."""
+        got = {lt.char: lt for lt in gc.plan_text(LATO, "EL", 13.0)}
+        e = got["E"]
+        assert len(e.check.get("corners_wrapped", [])) == 2
+        assert len(e.columns) == 4                       # stem, top arm + corner, middle arm, bottom
+        assert len(got["L"].columns) == 2 and got["L"].check.get("corners_butted")
+
     def test_es_points_option(self):
         """ES's own A and N (option, off by default): the A's apex stays butted, and an N's stems keep
         their own columns below the corner fans."""

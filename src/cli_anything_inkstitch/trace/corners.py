@@ -61,6 +61,7 @@ OUTER_SNAP = 0.35                # an outside corner within this share of the wi
 CLIP_MARGIN_MM = 0.15            # pairs this close to the corner stitch's line are dropped (re-made round it)
 CORNER_FAN_WIDTHS = 1.0          # the stitches turn over this many widths each side of the inside corner,
 WRAP_PASSES = 2                  # times the corners are gone over
+SPLIT_FAN_WIDTHS = 0.25         # a split-stem corner (ES's B) turns across little more than its corner square
 SHORT_FAN_SHARE = 0.45           # ...or this share of a short column's inside rail, if less
 ARC_STEP_MM = 0.5                # pairs along the outline round the corner, about this far apart
 BARE_TOL_PCT = 0.15              # a wrap may leave at most this much more of the letter bare (percent)
@@ -163,7 +164,7 @@ def _resample(pts, n):
     return [(float(np.interp(x, s, p[:, 0])), float(np.interp(x, s, p[:, 1]))) for x in t]
 
 
-def _cut_at_mitre(c: PlannedColumn, p_i, p_o, ring_i, ring_o):
+def _cut_at_mitre(c: PlannedColumn, p_i, p_o, ring_i, ring_o, fan_widths: float = None):
     """Column c (corner end last, left = inside rail) re-made round the corner: its pairs up to
     CORNER_FAN_WIDTHS of its width short of the inside corner (along the inside rail) are kept, and
     from there the stitches turn: pairs along the outline, the inside rail to p_i and the outside
@@ -173,7 +174,7 @@ def _cut_at_mitre(c: PlannedColumn, p_i, p_o, ring_i, ring_o):
     from shapely.geometry import LineString, Point
 
     w = max(_stroke_width(c), 0.5)
-    fan = CORNER_FAN_WIDTHS * w
+    fan = (CORNER_FAN_WIDTHS if fan_widths is None else fan_widths) * w
     c = _densified(c, p_i, fan + 2 * w + math.dist(p_i, p_o))
     cum = [0.0]
     for a, b in zip(c.left, c.left[1:]):
@@ -501,15 +502,24 @@ def wrap_corners(planned, max_stitch_mm: float = CORNER_WRAP_MAX_STITCH_MM,
             _dbg(planned.char, "corner", p_i, "ES: a point with a stroke between its legs stays butted")
             done.add(p_i)
             continue
-        if stitch > (max_stitch_mm if point else square_max_stitch_mm):
+        # A square corner past the small-corner limit, between an upright stem and a stroke, where a
+        # third stroke joins either of them (a B's waist, an R's leg on its bowl, an E's middle arm):
+        # EmbroideryStudio's construction, the stem kept as its own plain column and only the corner
+        # sewn round with the bowl or arm, the stitches turning across the corner square alone. A
+        # plain bowl on a stem (a D, a P) keeps the butt join (Bobby's blind picks, 13 mm D).
+        split_stem = (not point and not same and square_max_stitch_mm < stitch <= max_stitch_mm
+                      and any(abs(float(d[0])) < UPRIGHT_SIN for d in (da, db))
+                      and any(_carries(cols, k, (ka, kb), between=True) for k in (ka, kb)))
+        if stitch > (max_stitch_mm if point else square_max_stitch_mm) and not split_stem:
             done.add(p_i)
             butted.append({"at": [round(float(p_i[0]), 2), round(float(p_i[1]), 2)], "stitch_mm": round(stitch, 2)})
             continue
         ring_i = min(rings, key=lambda r: r.distance(Point(p_i)))
         ring_o = min(rings, key=lambda r: r.distance(Point(p_o)))
         a, b = _inside_left(a, p_i), _inside_left(b, p_i)
-        ca = _cut_at_mitre(a, p_i, p_o, ring_i, ring_o)
-        cb = _cut_at_mitre(b, p_i, p_o, ring_i, ring_o)
+        fan = SPLIT_FAN_WIDTHS if split_stem else CORNER_FAN_WIDTHS
+        ca = _cut_at_mitre(a, p_i, p_o, ring_i, ring_o, fan)
+        cb = _cut_at_mitre(b, p_i, p_o, ring_i, ring_o, fan)
         if ca is None or cb is None:
             _dbg(planned.char, "corner", p_i, "no mitre cut", ca is None, cb is None)
             continue
@@ -520,14 +530,19 @@ def wrap_corners(planned, max_stitch_mm: float = CORNER_WRAP_MAX_STITCH_MM,
                 continue
             new_cols = [ring if j == ka else c for j, c in enumerate(cols)]
         else:
-            rest = []
-            if es_points and point:
-                # ES's N: an upright stem keeps its own column up to where the stitches turn
+            rest, rest_after = [], []
+            if (es_points and point) or split_stem:
+                # ES's N (and its B, R, P at 13 mm): an upright stem keeps its own column up to
+                # where the stitches turn
                 for side, d in (("a", da), ("b", db)):
                     cc = ca if side == "a" else cb
                     if abs(float(d[0])) < UPRIGHT_SIN and getattr(cc, "k_turn", 0) >= 1:
                         k = cc.k_turn
-                        rest.append(PlannedColumn(cc.left[:k + 1], cc.right[:k + 1], False))
+                        # sewn so the needle runs on from one into the other at the split: the merged
+                        # column starts at a's far end and ends at b's, so a's stem sews before it and
+                        # b's after it
+                        (rest if side == "a" else rest_after).append(
+                            PlannedColumn(cc.left[:k + 1], cc.right[:k + 1], False))
                         cut = PlannedColumn(cc.left[k:], cc.right[k:], False)
                         if side == "a":
                             ca = cut
@@ -538,7 +553,7 @@ def wrap_corners(planned, max_stitch_mm: float = CORNER_WRAP_MAX_STITCH_MM,
             new_cols = []
             for j, c in enumerate(cols):
                 if j == min(ka, kb):
-                    new_cols.extend(rest + [merged])
+                    new_cols.extend(rest + [merged] + rest_after)
                 elif j != max(ka, kb):
                     new_cols.append(c)
         cand = [c for c in new_cols]
@@ -574,6 +589,7 @@ def wrap_corners(planned, max_stitch_mm: float = CORNER_WRAP_MAX_STITCH_MM,
 
 
 UPRIGHT_SIN = math.sin(math.radians(12.0))   # a leg within this of vertical is an upright stem
+CARRY_CLEAR_WIDTHS = 1.0         # a stroke joining mid-way: this many widths clear of the other's ends
 BUTT_TUCK_MM = 0.4               # butt_points: the cut leg reaches this far under the other (joins.KEEP_MM)
 BUTT_BARE_TOL_PCT = 0.5          # ...and may leave the very tip to the other leg alone
 
@@ -603,16 +619,24 @@ def _butt_point(cols, ka, ea, kb, eb, p_i, da, db):
     return out
 
 
-def _carries(cols, k, pair) -> bool:
+def _carries(cols, k, pair, between: bool = False) -> bool:
     """Whether another column (not in `pair`) has an end on column k: a stroke butting into it (an
-    A's crossbar into a leg)."""
+    A's crossbar into a leg). between: only an end clear of column k's own two ends (a B's waist
+    mid-stem, not a serif at the stem's far end)."""
     from shapely.geometry import Point
 
     body = _poly(cols[k])
+    w = max(_stroke_width(cols[k]), 0.5)
+    ends = [_mid(cols[k], 0), _mid(cols[k], -1)]
     for j, c in enumerate(cols):
         if j in pair or c.closed or len(c.left) < 2:
             continue
-        if any(body.distance(Point(_mid(c, e))) < 0.3 for e in (0, -1)):
+        for e in (0, -1):
+            m = _mid(c, e)
+            if body.distance(Point(m)) >= 0.3:
+                continue
+            if between and min(math.dist(m, q) for q in ends) < CARRY_CLEAR_WIDTHS * w:
+                continue
             return True
     return False
 
