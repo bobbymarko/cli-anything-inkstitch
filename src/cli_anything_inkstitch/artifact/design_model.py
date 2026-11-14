@@ -784,8 +784,12 @@ def _convert_via_engine(proj: ProjectFile, tree, elem, svg_id: str,
                           tolerance=tol)
     # node economy: simplify rails of satins this conversion produced
     # (same guard as commands/tools.py — untouched elements pass through)
-    from cli_anything_inkstitch.commands.tools import _simplify_new_satin_rails
+    from cli_anything_inkstitch.commands.tools import (
+        _fit_new_strokes,
+        _simplify_new_satin_rails,
+    )
     _simplify_new_satin_rails(ext, before_xml, new_tree)
+    _fit_new_strokes(ext, before_xml, new_tree)
     tree._setroot(new_root)
     ensure_inkstitch_namespace(tree)
     push(proj.history, make_entry(
@@ -835,19 +839,47 @@ def _satin_to_fill(proj: ProjectFile, tree, elem, svg_id: str) -> dict[str, Any]
     outline the editor draws for satins. The result is an ordinary filled
     path; the engine classifies any element with a fill color as FillStitch
     (lib/elements/fill_stitch.py) — no invented attrs involved.
+
+    The rails' own segments are reused — rail A forward, rail B reversed
+    (exact: a cubic reverses by swapping its controls) — so the user's
+    curves and node count survive instead of becoming a 12-points-per-curve
+    polyline. Two CLOSED rails (a ring satin) become outer ring + hole:
+    FillStitch.original_shape (lib/elements/fill_stitch.py) takes the
+    largest subpath as the shape and subtracts the rest.
     """
-    from cli_anything_inkstitch.artifact.gate import flatten_path
+    from cli_anything_inkstitch.svg.curvefit import (
+        parse_segments,
+        reverse_segments,
+        segments_to_d,
+    )
     subpaths = split_subpaths(elem.get("d") or "")
     if len(subpaths) < 2:
         raise UserError("satin → fill needs two rails on the element")
-    rail_a = flatten_path(subpaths[0])
-    rail_b = flatten_path(subpaths[1])
-    if len(rail_a) < 2 or len(rail_b) < 2:
+    try:
+        a0, a_segs, a_closed = parse_segments(subpaths[0])
+        b0, b_segs, b_closed = parse_segments(subpaths[1])
+    except (ValueError, IndexError):
+        raise UserError("satin → fill: could not read rail geometry")
+    if not a_segs or not b_segs:
         raise UserError("satin → fill: could not read rail geometry")
     before_xml = etree.tostring(elem).decode("utf-8")
     color = element_summary(elem)["stroke"] or "#000000"
-    ring = rail_a + rail_b[::-1]
-    elem.set("d", "M " + " L ".join(f"{x:.4g},{y:.4g}" for x, y in ring) + " Z")
+    if a_closed and b_closed:
+        d = (segments_to_d(a0, a_segs, closed=True) + " "
+             + segments_to_d(b0, b_segs, closed=True))
+    else:
+        # rails may be drawn in opposite directions (the engine reverses
+        # them as needed, satin_column.py _get_rails_to_reverse): walk B
+        # back from whichever of its ends is nearer A's end, or the band
+        # outline crosses itself into a bow-tie
+        import math as _m
+        a_end, b_end = a_segs[-1][-1], b_segs[-1][-1]
+        if _m.dist(a_end, b_end) <= _m.dist(a_end, b0):
+            b_from, b_walk = reverse_segments(b0, b_segs)
+        else:
+            b_from, b_walk = b0, b_segs
+        d = segments_to_d(a0, a_segs + [("L", b_from)] + b_walk, closed=True)
+    elem.set("d", d)
     _set_paint(elem, fill=color, stroke="none")
     for local in _satin_only_params():
         key = qname(local)

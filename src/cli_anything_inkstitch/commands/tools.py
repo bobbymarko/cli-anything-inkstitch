@@ -124,9 +124,67 @@ def _normalize_new_satins(extension_name: str, new_tree) -> int:
     return fixed
 
 
+# engine extensions whose output contains running-stitch strokes sampled as
+# dense polylines (lib/extensions/fill_to_stroke.py centerline_element,
+# lib/extensions/satin_to_stroke.py stroke_element: shapely coords → M/L)
+_STROKE_PRODUCERS = {"fill_to_stroke", "satin_to_stroke"}
+
+
+def _fit_tolerance(tree) -> float:
+    """svg/curvefit.py FIT_TOL_MM in this document's user units."""
+    from cli_anything_inkstitch.artifact.design_model import _uu_per_mm
+    from cli_anything_inkstitch.svg.curvefit import uu_tolerance
+    return uu_tolerance(_uu_per_mm(tree.getroot()))
+
+
+def _fit_new_strokes(extension_name: str, before_xml: str,
+                     new_tree) -> dict | None:
+    """Refit NEW/CHANGED running-stitch strokes as beziers.
+
+    Same guard as _simplify_new_satin_rails: elements whose d is unchanged
+    from the pre-tool document are user geometry and pass through. Only
+    pure M/L subpaths are refit, and only for strokes whose stitch method
+    follows the path rather than its nodes: the engine's
+    Stroke.stroke_method (lib/elements/stroke.py, default
+    "running_stitch"); "manual_stitch" turns every node into a needle
+    penetration, so its nodes are not ours to move.
+    """
+    if extension_name not in _STROKE_PRODUCERS:
+        return None
+    from cli_anything_inkstitch.svg.curvefit import fit_d_polylines
+    tol = _fit_tolerance(new_tree)
+    ink = "{http://inkstitch.org/namespace}"
+    before_root = etree.fromstring(before_xml.encode("utf-8"))
+    before_d = {e.get("id"): e.get("d") for e in before_root.iter()
+                if e.get("id") and e.get("d")}
+    total_before = total_after = changed = 0
+    for el in new_tree.getroot().iter():
+        if not isinstance(el.tag, str) or not el.get("d"):
+            continue
+        if etree.QName(el.tag).localname != "path":
+            continue
+        if (el.get(ink + "satin_column") or "").lower() == "true":
+            continue
+        if el.get(ink + "stroke_method", "running_stitch") != "running_stitch":
+            continue
+        eid = el.get("id")
+        if eid and before_d.get(eid) == el.get("d"):
+            continue
+        new_d, nb, na = fit_d_polylines(el.get("d"), tol)
+        if na < nb:
+            el.set("d", new_d)
+            changed += 1
+            total_before += nb
+            total_after += na
+    if not changed:
+        return None
+    return {"elements": changed, "nodes_before": total_before,
+            "nodes_after": total_after}
+
+
 def _simplify_new_satin_rails(extension_name: str, before_xml: str,
                               new_tree) -> dict | None:
-    """RDP-simplify rails of satins the tool created or rewrote.
+    """Curve-fit rails of satins the tool created or rewrote.
 
     Only elements whose d is new or changed vs the pre-tool document are
     touched — user-authored satins the tool ignored pass through untouched.
@@ -136,6 +194,7 @@ def _simplify_new_satin_rails(extension_name: str, before_xml: str,
     if extension_name not in _SATIN_PRODUCERS:
         return None
     from cli_anything_inkstitch.trace.satinize import simplify_satin_d
+    tol = _fit_tolerance(new_tree)
     ink_satin = "{http://inkstitch.org/namespace}satin_column"
     before_root = etree.fromstring(before_xml.encode("utf-8"))
     before_d = {e.get("id"): e.get("d") for e in before_root.iter()
@@ -149,7 +208,7 @@ def _simplify_new_satin_rails(extension_name: str, before_xml: str,
         eid = el.get("id")
         if eid and before_d.get(eid) == el.get("d"):
             continue                     # untouched by the tool — hands off
-        new_d, nb, na = simplify_satin_d(el.get("d"))
+        new_d, nb, na = simplify_satin_d(el.get("d"), tolerance=tol)
         if na < nb:
             el.set("d", new_d)
             changed += 1
@@ -273,6 +332,9 @@ def run_tool_core(ctx, project_path, extension_name, ids, args, *,
                                                new_tree)
         if simplified:
             extra_payload["simplified_rails"] = simplified
+        fitted = _fit_new_strokes(extension_name, before_xml, new_tree)
+        if fitted:
+            extra_payload["fitted_strokes"] = fitted
         # binary tools rewrite the whole document — record it so undo/redo
         # and the artifact History panel see it like any other edit
         push(proj.history, make_entry(
@@ -437,7 +499,7 @@ def fill_to_satin_cmd(ctx, project_path, ids_csv, pull_compensation_mm):
     keep=none the engine DELETES fill sections no rung bounds, and fills
     with zero rungs pop a GUI dialog (both measured; see SKILL.md §15).
     Converting one shape per run with only its own rungs is the reliable
-    pattern. Output rails are RDP-simplified (_simplify_new_satin_rails).
+    pattern. Output rails are curve-fit (_simplify_new_satin_rails).
     """
     ids = [s.strip() for s in ids_csv.split(",") if s.strip()]
 
