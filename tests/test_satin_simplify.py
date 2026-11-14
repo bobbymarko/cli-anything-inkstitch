@@ -26,7 +26,7 @@ from cli_anything_inkstitch.cli import root
 from cli_anything_inkstitch.commands import tools as tools_mod
 from cli_anything_inkstitch.project import ProjectFile
 from cli_anything_inkstitch.svg.document import sha256_of
-from cli_anything_inkstitch.trace.satinize import simplify_satin_d
+from cli_anything_inkstitch.trace.satinize import _crossings, simplify_satin_d
 
 
 def _arc_pts(cx, cy, r, a0, a1, n):
@@ -44,6 +44,21 @@ def _dense_satin_d(n=200):
     b = _arc_pts(0, 0, 24, 0, math.pi / 2, n)
     rungs = " M20,0 L24,0 M0,20 L0,24"
     return _poly_d(a) + " " + _poly_d(b) + rungs
+
+
+# A routed Lora "H" stem as auto_satin left it (mm): two rails that kink 0.1 mm near the foot, and the
+# rung auto_satin synthesized at the kink nodes, scaled 1.1 about its middle.
+KINKED_D = ("M26.083,24.980 26.178,24.477 26.198,19.380 M27.130,24.980 27.431,24.492 27.450,19.395 "
+            "M 26.1153 24.4762 L 27.4936 24.4927")
+
+
+def _subpaths(d):
+    out = []
+    for sub in d.replace("M", "|M").split("|"):
+        nums = [float(v) for v in sub.replace("M", " ").replace("L", " ").replace(",", " ").split()]
+        if nums:
+            out.append(list(zip(nums[0::2], nums[1::2])))
+    return out
 
 
 class TestSimplifySatinD:
@@ -78,6 +93,21 @@ class TestSimplifySatinD:
         d = ("M0,0 C5,0 10,5 10,10 M2,0 C7,0 12,5 12,10 M0,0 L2,0")
         new_d, before, after = simplify_satin_d(d)
         assert new_d == d
+
+    def test_rung_at_a_small_kink_still_crosses_both_rails(self):
+        """auto_satin turns an old-style satin's node pairs into rungs scaled 1.1 at those nodes
+        (lib/elements/satin_column.py _synthesize_rungs). A Lora "H" stem kinks 0.1 mm near its foot:
+        RDP dropped that node, the straightened rail moved past the rung's end, the engine kept no
+        rung (_get_filtered_rungs) and its preview of the whole letter came back empty."""
+        new_d, before, after = simplify_satin_d(KINKED_D)
+        rails, rungs = _subpaths(new_d)[:2], _subpaths(new_d)[2:]
+        for rung in rungs:
+            for rail in rails:
+                assert len(_crossings(rail, rung)) == 1, (rail, rung)
+
+    def test_rails_still_simplified_away_from_rungs(self):
+        new_d, before, after = simplify_satin_d(_dense_satin_d())
+        assert after < before * 0.2
 
     def test_short_rails_untouched(self):
         d = "M0,0 L10,0 M0,2 L10,2 M0,0 L0,2"
@@ -205,3 +235,22 @@ class TestStitchPlanEquivalence:
         assert totals["dense"] > 0
         ratio = totals["simple"] / totals["dense"]
         assert 0.95 < ratio < 1.05, totals
+
+    def test_simplified_kinked_satin_still_renders(self, tmp_path):
+        """The engine must still sew a satin whose rung sits on a small rail kink once its rails are
+        simplified (it crashed in _get_center_line_stitches and rendered nothing). The coordinates are
+        scaled into the px document so the kink stays under the 0.5 tolerance, as in the mm one."""
+        from cli_anything_inkstitch.artifact.design_model import stitch_sequence
+
+        k = 4.0
+        kinked = " ".join("M" + " ".join(f"{x * k:.4f},{y * k:.4f}" for x, y in sp)
+                          for sp in _subpaths(KINKED_D))
+        simplified, _nb, _na = simplify_satin_d(kinked)
+        totals = {}
+        for name, d in (("as_drawn", kinked), ("simple", simplified)):
+            body = (f'<path id="sat" inkstitch:satin_column="true" inkstitch:center_walk_underlay="true" '
+                    f'stroke="#000000" fill="none" d="{d}"/>')
+            proj_path, _svg = _project(tmp_path / name, body)
+            totals[name] = stitch_sequence(proj_path)["total_stitches"]
+        assert totals["as_drawn"] > 0
+        assert totals["simple"] > 0.9 * totals["as_drawn"], totals
