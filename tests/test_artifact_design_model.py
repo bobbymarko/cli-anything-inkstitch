@@ -274,6 +274,9 @@ class TestRoutePlan:
         assert by["b0"]["entry"] == [31.0, 12.0]
         assert by["b0"]["exit"] == [31.0, 2.0]
 
+    @pytest.mark.skipif(__import__("importlib.util").util.find_spec("shapely") is None,
+                        reason="route_plan measures bare fabric with shapely; "
+                               "without it, it deliberately flags no jumps")
     def test_jump_flagged_only_across_bare_fabric(self, route_project):
         cols = route_plan(route_project)["columns"]
         by = {c["element_id"]: c for c in cols}

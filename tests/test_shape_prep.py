@@ -87,6 +87,7 @@ class TestFills:
         assert sp.hidden(by_id["p5"]) and not sp.hidden(by_id["p1"])
 
 
+@needs_planner                 # shape_prep dedupes with shapely
 class TestDuplicates:
     def test_lower_copy_of_an_identical_shape_is_dropped_whatever_its_colour(self):
         ring = _bar(0, 0, 20, 3)
@@ -101,6 +102,7 @@ class TestDuplicates:
         assert keep == [0, 1] and dropped == []
 
 
+@needs_planner                 # thread order needs shapely overlap tests
 class TestThreadOrder:
     def _polys(self, *bars):
         return [sp.outline_polygon(b) for b in bars]
