@@ -503,7 +503,7 @@ The digitizing-artifact correction loop (full design doc: `docs/digitizing-artif
 artifact open   [--project <abs>]  [--no-browser]  [--reopen]
 artifact poll   [--project <abs>]  [--timeout-s <f>]  [--agent-reply <str>]
 artifact reply  [--project <abs>]  --text <str>
-artifact gate   [--project <abs>]
+artifact gate   [--project <abs>]  [--engine] [--no-cache] [--reference-dst <file>]
 artifact end    [--project <abs>]
 artifact stop
 ```
@@ -515,7 +515,7 @@ artifact stop
 | `open` | Open or resume the editor session (spawns the server if needed, opens the browser unless `--no-browser`). A session the user ended from the browser refuses a plain reopen; `--reopen` overrides. |
 | `poll` | Long-poll for the next feedback batch: `{objects, manipulation, text}` items. `--agent-reply` sends a chat reply before waiting. Queued feedback survives server restarts. |
 | `reply` | Send a chat message into the editor without polling |
-| `gate` | Stitchability audit (spec §8 of the design doc): error severity = desynced rung pairing, rail count/self-crossing, satin width outside 0.5–12 mm, twist risk; warning severity = narrow/wide-but-stitchable, satin >150 mm, fill handle >10 mm off its boundary. Errors should be fixed before handback. |
+| `gate` | Stitchability audit (spec §8 of the design doc): error severity = desynced rung pairing, rail count/self-crossing, satin width outside 0.5–12 mm, twist risk (a rung-less satin whose rails differ in node count; an editor `set_path` that produces one gets square pairing rungs added, rails untouched); warning severity = narrow/wide-but-stitchable, satin >150 mm, fill handle >10 mm off its boundary. Errors should be fixed before handback. `--engine` also runs the real Ink/Stitch binary (under the host-wide render lock `/tmp/inkstitch-render.lock`, result cached per SVG sha256) and judges the stitches it produces: top-layer passes per satin column (error if >1: a visible seam), untrimmed travel moves (warning >=3 mm, error >=15 mm), longest stitch (warning >8 mm), plus stitch/trim totals; `--reference-dst` adds a side-by-side with a machine file. Off by default (a cold run takes tens of seconds); `export file --require-gate` runs it and refuses to export on errors. |
 | `end` | End the session as the agent (plain `open` can revive it) |
 | `stop` | Shut down the background server |
 
@@ -780,6 +780,19 @@ Default WARNING to stderr. `--verbose` ⇒ INFO. `--debug` ⇒ DEBUG with subpro
 - **Integration tests**: full command runs against fixture SVGs, asserting attribute writes match expected.
 - **End-to-end tests** (gated on `INKSTITCH_BINARY` env var, skipped in CI by default): `params set` → `validate run` → `preview stats` → `export file --format dst`, asserting non-empty output and exit 0.
 - Schema cache versioning: tests must pass against at least the two latest released inkstitch versions.
+
+### 4.11a Planner regression suite
+
+`cli-anything-inkstitch regress run|compare` (package `cli_anything_inkstitch.regress`) is the
+acceptance check for planner changes. A case is a declared input (a font and text at a cap height,
+or synthetic strokes/polys, or an SVG with overrides) plus the CLI command that plans it
+(`tools text-to-satin`, `tools shapes-to-satin --fabric twill`). The measurement is the engine's own
+output through `artifact.engine_gate`: per-column top-layer pass counts, trims, untrimmed travel,
+longest stitch and stitch count. `run` writes a results JSON and one contact-sheet PNG per case;
+`compare` applies fixed thresholds (constants in `regress/compare.py`) and exits nonzero on a
+regression. Private cases (client art) load from a case file outside the repo with `--cases`.
+Workflow: run before and after a planner change, attach the compare to the PR. Usage: README,
+"Planner regression suite".
 
 ### 4.12 What is explicitly out of scope for v1.0
 
