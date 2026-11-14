@@ -1,0 +1,146 @@
+"""Lettering corners and junctions (trace/corners.py, glyph_columns.plan_glyph).
+
+* A narrow stroke turning a corner is one satin column round it, the corner stitch from the inside
+  corner to the outside one (about 1.4 x the width); a wide one keeps the butt join. The threshold is
+  a named constant compared with that corner stitch, kept under the split-satin length.
+* A glyph's plan doesn't depend on where it sits on the line.
+* Small lettering gets a centre walk under columns narrower than 2 mm.
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("shapely")
+pytest.importorskip("scipy")
+pytest.importorskip("fontTools")
+
+import numpy as np  # noqa: E402
+
+from cli_anything_inkstitch.trace import corners  # noqa: E402
+from cli_anything_inkstitch.trace import glyph_columns as gc  # noqa: E402
+
+LATO = Path(__file__).parent / "fixtures" / "fonts" / "Lato-Black.ttf"
+
+
+def _l_shape(w, h=20.0, foot=12.0):
+    return [np.array([(0, 0), (foot, 0), (foot, w), (w, w), (w, h), (0, h)], float)]
+
+
+class TestCornerRule:
+    def test_threshold_is_the_corner_stitch_and_under_split_length(self):
+        assert corners.CORNER_WRAP_MAX_STITCH_MM == pytest.approx(
+            corners.CORNER_STITCH_RATIO * corners.WRAP_MAX_WIDTH_MM)
+        assert corners.CORNER_WRAP_MAX_STITCH_MM < gc.SPLIT_SATIN_MM
+
+    @pytest.mark.parametrize("w", [1.7, 2.0])
+    def test_narrow_l_wraps_as_one_column(self, w):
+        p = gc.plan_glyph("L", _l_shape(w), 20.0, 1.5)
+        assert p.ok and len(p.columns) == 1
+        (wrap,) = p.check["corners_wrapped"]
+        assert wrap["stitch_mm"] == pytest.approx(w * math.sqrt(2), abs=0.05)
+        assert p.check["overlap_mm2"] == 0
+        # the corner stitch is one of the column's pairs: inside corner to outside corner
+        c = p.columns[0]
+        pairs = list(zip(c.left, c.right))
+        assert any(math.dist(a, (w, w)) < 1e-6 and math.dist(b, (0, 0)) < 1e-6 for a, b in pairs)
+
+    @pytest.mark.parametrize("w", [2.6, 3.5, 5.0])
+    def test_wider_square_corner_keeps_the_butt_join(self, w):
+        """Square corners stop at SQUARE_CORNER_WRAP_MAX_STITCH_MM (Bobby's blind picks: the wrapped
+        D first at 7.6 mm caps, last at 13 mm)."""
+        p = gc.plan_glyph("L", _l_shape(w), 20.0, 1.5)
+        assert p.ok and len(p.columns) == 2
+        (butt,) = p.check["corners_butted"]
+        assert butt["stitch_mm"] > corners.SQUARE_CORNER_WRAP_MAX_STITCH_MM
+        assert "corners_wrapped" not in p.check
+
+    def test_the_threshold_decides(self, monkeypatch):
+        """The same 2.0 mm L butts when the square-corner threshold is set under its 2.8 mm stitch,
+        and a 2.6 mm L wraps when it is raised over its 3.7 mm one."""
+        real = corners.wrap_corners
+        monkeypatch.setattr(corners, "wrap_corners", lambda p: real(p, square_max_stitch_mm=2.5))
+        p = gc.plan_glyph("L", _l_shape(2.0), 20.0, 1.5)
+        assert len(p.columns) == 2 and p.check["corners_butted"]
+        monkeypatch.setattr(corners, "wrap_corners", lambda p: real(p, square_max_stitch_mm=4.0))
+        p = gc.plan_glyph("L", _l_shape(2.6), 20.0, 1.5)
+        assert len(p.columns) == 1
+
+
+@pytest.mark.skipif(not LATO.exists(), reason="vendored Lato Black missing")
+class TestLettering:
+    def test_square_corners_wrap_at_7p6mm_points_at_13mm(self):
+        small = {lt.char: lt for lt in gc.plan_text(LATO, "LD", 7.6)}
+        assert len(small["L"].columns) == 1
+        d = small["D"].columns
+        assert len(d) == 1 and d[0].closed               # stem and bowl one ring
+        big = {lt.char: lt for lt in gc.plan_text(LATO, "LDWV", 13.0)}
+        assert len(big["L"].columns) == 2 and len(big["D"].columns) == 2   # square corners butt at 13 mm
+        assert len(big["W"].columns) == 1                # legs wrapped through both feet and the middle
+        assert len(big["V"].columns) == 1
+        assert all(big[k].check["overlap_mm2"] == 0 for k in "WV")
+
+    def test_split_stem_corner_where_a_third_stroke_joins(self):
+        """Lato Black at 13 mm: the E's top and bottom corners (its stem carries the middle arm) are sewn
+        round with the arms while the stem keeps its own plain column (EmbroideryStudio's B and E);
+        the L, with nothing else on its stem, keeps the butt join."""
+        got = {lt.char: lt for lt in gc.plan_text(LATO, "EL", 13.0)}
+        e = got["E"]
+        assert len(e.check.get("corners_wrapped", [])) == 2
+        assert len(e.columns) == 4                       # stem, top arm + corner, middle arm, bottom
+        assert len(got["L"].columns) == 2 and got["L"].check.get("corners_butted")
+
+    def test_es_points_option(self):
+        """ES's own A and N (option, off by default): the A's apex stays butted, and an N's stems keep
+        their own columns below the corner fans."""
+        default = {lt.char: lt for lt in gc.plan_text(LATO, "AN", 13.0)}
+        real = corners.ES_POINTS
+        try:
+            corners.ES_POINTS = True
+            es = {lt.char: lt for lt in gc.plan_text(LATO, "AN", 13.0)}
+        finally:
+            corners.ES_POINTS = real
+        assert default["A"].check.get("corners_wrapped") and not es["A"].check.get("corners_wrapped")
+        assert len(default["N"].columns) == 1 and len(es["N"].columns) == 3
+
+    def test_wide_strokes_keep_butt_joins(self):
+        # 30 mm caps: Lato Black strokes about 5.6 mm, corner stitches about 8 mm
+        got = {lt.char: lt for lt in gc.plan_text(LATO, "LD", 30.0)}
+        assert len(got["L"].columns) == 2 and got["L"].check["corners_butted"]
+        assert len(got["D"].columns) == 2
+
+    def test_wide_apex_overlap_is_trimmed_not_sewn_twice(self):
+        """Above the wrap threshold an A's legs still overlap at the apex: the leg underneath is cut to
+        the one on top, a tuck under it, and sews first (trim_under; was 'filled to the point')."""
+        (a,) = gc.plan_text(LATO, "A", 30.0)
+        assert a.ok and a.check.get("joins_trimmed")
+        assert a.check["overlap_mm2"] < 16.0          # integ-final: 20.3 mm2
+
+    def test_plan_does_not_depend_on_position(self):
+        a = gc.plan_text(LATO, "RKYG", 10.0, letter_spacing_pct=0)
+        b = gc.plan_text(LATO, "RKYG", 10.0, letter_spacing_pct=37)
+        for x, y in zip(a, b):
+            assert x.char == y.char and len(x.columns) == len(y.columns)
+            dx = min(p[0] for c in y.contours for p in c) - min(p[0] for c in x.contours for p in c)
+            for cx, cy in zip(x.columns, y.columns):
+                assert len(cx.left) == len(cy.left)
+                assert max(abs(p[0] + dx - q[0]) + abs(p[1] - q[1])
+                           for p, q in zip(cx.left + cx.right, cy.left + cy.right)) < 1e-6
+            for k in ("sewable_bare_pct", "overlap_mm2", "outside_pct"):
+                assert x.check[k] == y.check[k]
+
+
+class TestSmallLetteringUnderlay:
+    def test_centre_walk_under_2mm_for_lettering(self):
+        from cli_anything_inkstitch.commands.tools import (LETTERING_CENTER_WALK_BELOW_MM,
+                                                           _lettering_satin_params)
+        w = [1.8] * 5
+        plain = _lettering_satin_params(w, 0.2)
+        small = _lettering_satin_params(w, 0.2, center_below_mm=LETTERING_CENTER_WALK_BELOW_MM)
+        assert plain.get("contour_underlay") == "true" and "center_walk_underlay" not in plain
+        assert small.get("center_walk_underlay") == "true" and "contour_underlay" not in small
+        wide = _lettering_satin_params([2.6] * 5, 0.2, center_below_mm=LETTERING_CENTER_WALK_BELOW_MM)
+        assert wide.get("contour_underlay") == "true"

@@ -521,6 +521,7 @@ CUT_LINE_MM = 0.1            # a ray landing within this of an end's cut line hi
 CUT_REACH = 3.0              # ...checked only this many stroke widths from that end
 END_RAY_REACH = 1.6          # an end's ray along its cut longer than this many times the stroke's own reach
                              # across the cut ran into another stroke
+TAPER_REACH = 2.0            # ...that reach is at most this many times the stroke's half width at its middle
 BLEND_FRACTION = 0.18       # a slanted end's angle turns square over this share of the letter's height
 BLEND_SPREAD = 0.25          # ...or longer, so the outer edge's stitches open up by at most this share
 BUTT_MIN_INSIDE_MM = 0.5     # an end whose middle is this far inside the outline butts another stroke
@@ -1212,6 +1213,10 @@ def _stroke_column(stroke: Stroke, outline: list[np.ndarray], box, spacing: floa
         # A slanted end's ray runs along its cut. Where the cut lies along another stroke's edge (a
         # 7's diagonal cut along the top of its bar), the ray runs on through that stroke to the far
         # outline: it's cut back to the width the stroke itself has across the cut.
+        mids = range(n // 3, max(n // 3 + 1, 2 * n // 3))
+        sq = [min(a, b) for a, b in ((_ray(boundary, line[i], normal[i], far), _ray(boundary, line[i], -normal[i], far))
+                                     for i in mids) if a is not None and b is not None]
+        mid_half = float(np.median(sq)) if sq else None
         for end, cut in ((0, stroke.start_cut), (n - 1, stroke.end_cut)):
             if cut == "perpendicular":
                 continue
@@ -1221,6 +1226,14 @@ def _stroke_column(stroke: Stroke, outline: list[np.ndarray], box, spacing: floa
             near = [2 * min(rays[1][i], rays[-1][i]) for i in (range(1, min(n - 1, 4)) if end == 0 else range(max(1, n - 4), n - 1))
                     if rays[1][i] is not None and rays[-1][i] is not None]
             expect = (float(np.median(near)) if near else width) / 2 / cos
+            # ...but those next rays turn from the cut's angle too, and where the cut lies along
+            # another stroke they run on inside it as well, so "the width next to the end" came out
+            # as long as the runaway ray itself. Measured on a K's leg butting its arm (Avenir Black,
+            # 13 mm, straight leg): the end pair ran from the arm's top to the stem's far edge
+            # (11.6 mm), folding the leg over the arm and the stem. So it is also held to the
+            # stroke's width square across its middle (TAPER_REACH of it: a stroke may taper).
+            if mid_half is not None:
+                expect = min(expect, TAPER_REACH * mid_half / cos)
             for sign in (1, -1):
                 r = rays[sign][end]
                 if r is not None and r > END_RAY_REACH * expect + EDGE_FIT_TOL_MM:

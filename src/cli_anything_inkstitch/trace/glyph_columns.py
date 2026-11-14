@@ -166,7 +166,7 @@ def _from_letter(lt, ok: bool, check: dict, char: str | None = None) -> PlannedL
 def plan_text(font_path: str | Path, text: str, height_mm: float, *,
               letter_spacing_pct: float | None = None,
               width_mm: float | None = None,
-              merge_joins: bool = False) -> list[PlannedLetter]:
+              merge_joins: bool = False, corner_wrap: bool = True) -> list[PlannedLetter]:
     """Plan `text` (one line) as satin columns, centred on (0, 0), mm, y up.
 
     height_mm is the font's capital height (the sCapHeight in its OS/2
@@ -196,10 +196,7 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
     # ink box centred on 0, 0), but each letter planned on its own: a planner
     # exception in one glyph (measured: a GEOS "endpoints are equal" error on
     # one Lato Regular lowercase letter at 10 mm) fails that letter to the
-    # fallback instead of the whole line. Steps per letter mirror
-    # art_columns.text_columns: letter_strokes → tuck_order → letter_columns
-    # (flat, tucked) → trim_tips → flat_check.
-    from cli_anything_inkstitch.planner.autostrokes import letter_strokes
+    # fallback instead of the whole line (plan_glyph).
     import numpy as np
 
     spacing = min(col.DEFAULT_SPACING_MM, max(ac.MIN_SPACING_MM, 0.075 * height_mm))
@@ -216,38 +213,186 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
         moved = [c + [x, 0.0] for c in contours]
         allp = np.vstack(moved)
         box = (allp[:, 0].min(), allp[:, 1].min(), allp[:, 0].max(), allp[:, 1].max())
-        raw.append((ch, moved, box))
+        raw.append((ch, moved, box, contours, x))
         x += adv + gap
     if not raw:
         raise UserError("nothing to stitch")
-    x0 = min(b[0] for _, _, b in raw)
-    x1 = max(b[2] for _, _, b in raw)
-    y0 = min(b[1] for _, _, b in raw)
-    y1 = max(b[3] for _, _, b in raw)
+    x0 = min(r[2][0] for r in raw)
+    x1 = max(r[2][2] for r in raw)
+    y0 = min(r[2][1] for r in raw)
+    y1 = max(r[2][3] for r in raw)
     dx, dy = -(x0 + x1) / 2, -(y0 + y1) / 2
     shells = []
-    for ch, moved, box in raw:
+    for ch, moved, box, _, _ in raw:
         moved = [c + [dx, dy] for c in moved]
         box = (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy)
         shells.append(col.Letter(ch, [], moved, box))
     if merge_joins:
         return _plan_merged(shells, ac)
-    out = []
-    for sh in shells:
+    # each glyph planned from the font's own outline, then moved into place (plan_glyph)
+    return [plan_glyph(sh.char, glyph, height_mm, spacing, at=(gx + dx, dy), placed=sh.outline,
+                       corner_wrap=corner_wrap)
+            for sh, (_, _, _, glyph, gx) in zip(shells, raw)]
+
+
+# Offsets (mm) a glyph is also planned at. The planner's reading of a junction can turn on a tie (two
+# branches equally close to an inside corner, an angle or a coverage right at a threshold) that the
+# rounding of the coordinates decides; moving the whole outline changes only that rounding, so each
+# offset is the same glyph read again. Measured on Avenir Black at 7.6 and 13 mm: 17 of 52 letters
+# planned differently at some offset (an R's overlap 6.34, 0.79 or 2.98 mm2); a Pacifico "a" at 10 mm
+# was 4.96 or 5.35 % bare (its limit 5) by offset alone. Fixed values: the same readings every time.
+READING_OFFSETS_MM = ((0.0, 0.0), (0.0101, 0.0), (-0.0107, 0.0059), (-7.7, -4.1), (13.37, -3.3))
+TIDY_READINGS = 2
+LETTER_TRIM_DEPTH_MM = 0.5   # lettering: overlaps deeper than this (just past the 0.4 mm tuck) are trimmed,
+LETTER_TRIM_BARE_TOL_MM2 = 0.5  # ...even where that leaves a V's very tip to one leg (Avenir 13 mm V: +0.18)
+
+
+def plan_score(planned: PlannedLetter, height_mm: float) -> float:
+    """How well a letter's plan passes its own check: bare (of what satin can sew) + 2 x overhang
+    + overlap per cap height squared (x 100) + 5 per crossed pair; inf when the check fails. The same
+    weights a font builder used to pick between readings (lower is better)."""
+    c = planned.check or {}
+    if not planned.ok or not planned.columns:
+        return math.inf
+    return (c.get("sewable_bare_pct", 0.0) + 2 * c.get("outside_pct", 0.0)
+            + 100 * c.get("overlap_mm2", 0.0) / (height_mm * height_mm) + 5 * c.get("crossed_pairs", 0))
+
+
+def plan_glyph(char: str, outline, height_mm: float, spacing: float, at=(0.0, 0.0),
+               placed=None, corner_wrap: bool = True) -> PlannedLetter:
+    """One letter's satin columns (the steps of art_columns.text_columns: letter_strokes →
+    tuck_order → letter_columns (flat, tucked) → trim_tips → flat_check, then wrap_corners),
+    planned on the glyph's outline as the font gives it (mm, y up, at the glyph's own origin) and
+    then moved by `at`. `placed` is the outline already moved there (the letter's contours in the
+    result), so the layout's own arithmetic is kept exactly.
+
+    The plan must not depend on where the letter sits on the line. It did: the junction reading turns
+    on ties that rounding in the last bit of a coordinate decides, so a letter planned at another
+    offset (other letter spacing, another word) came out differently. Measured on Avenir Black at
+    13 mm: the R's overlap was 6.34, 0.79 or 2.98 mm2 depending only on letter spacing, so a word
+    and the same letters in a stitch font came out differently, and a font builder could only
+    "rescue" a letter by re-running it at another size. So every glyph is planned from the font's
+    own coordinates (the same bits every time) at each of READING_OFFSETS_MM, and the reading whose
+    plan passes its own check best (plan_score) is kept: the same plan for the glyph and size
+    wherever it is set, and the best of the readings, with no one choosing.
+    """
+    import numpy as np
+
+    local = [np.asarray(c, float) for c in outline]
+    ox, oy = at
+    as_given = [[tuple(map(float, p)) for p in c] for c in (placed if placed is not None
+                                                             else [c + [ox, oy] for c in local])]
+    readings = [_plan_reading(char, [c + [dx, dy] for c in local], height_mm, spacing,
+                              (ox - dx, oy - dy), as_given, corner_wrap) for dx, dy in READING_OFFSETS_MM]
+    # the junction tools are the slow part: tried on the TIDY_READINGS best readings only
+    readings.sort(key=lambda p: plan_score(p, height_mm))
+    tidied = [_tidied(p, height_mm) for p in readings[:TIDY_READINGS]]
+    return min(tidied + readings, key=lambda p: plan_score(p, height_mm))
+
+
+def _plan_reading(char, local, height_mm, spacing, at, as_given, corner_wrap: bool = True) -> PlannedLetter:
+    """plan_glyph for one reading: plan on `local`, move the result by `at`."""
+    import numpy as np
+
+    ac, col = require_planner()
+    from cli_anything_inkstitch.planner.autostrokes import letter_strokes
+
+    lp = np.vstack(local)
+    box = (float(lp[:, 0].min()), float(lp[:, 1].min()), float(lp[:, 0].max()), float(lp[:, 1].max()))
+    ox, oy = at
+    try:
+        junctions: list = []
+        strokes = letter_strokes(local, height_mm, overlap_feet=True, junctions_out=junctions)
+        strokes = col.tuck_order(strokes, local, box)
+        cols = col.letter_columns(strokes, local, box, spacing,
+                                  col.RING_OVERLAP_MM, col.BUTT_OVERLAP_MM, tuck=True)
+        lt = col.Letter(char, [ac.trim_tips(c) for c in cols], local, box,
+                        strokes, butt_overlap=col.BUTT_OVERLAP_MM)
+        check = ac.flat_check(lt)
+        # the medial-axis junction reading, carried forward (as art_columns.plan_shape does): which
+        # inside corners are junctions of three strokes and which are corners of two (trace/corners.py)
+        check["junctions"] = [{**j, "pos": (j["pos"][0] + ox, j["pos"][1] + oy)}
+                              for pc in junctions for j in pc["junctions"]]
+        check["concavities"] = [[p[0] + ox, p[1] + oy] for pc in junctions for p in pc["concavities"]]
+    except Exception as exc:  # noqa: BLE001 - one unplannable glyph falls back alone
+        return PlannedLetter(char, [], as_given, False, {},
+                             f"no column plan ({type(exc).__name__}: {str(exc)[:80]})")
+    planned = _from_letter(lt, bool(check["ok"]), check)
+    # one stroke cut in two where nothing turns (an S split at its spine: a hard seam, the two ends
+    # meeting with a bare wedge between them) is joined and re-planned as one column, as
+    # shapes-to-satin does (plan_shapes one_column); kept when its own check rates it better
+    from types import SimpleNamespace
+    try:
+        joined = _join_seamed_strokes(0, local, SimpleNamespace(letter=lt), planned)
+    except Exception:  # noqa: BLE001 - keep the plan as it was
+        joined = None
+    if joined is not None and plan_score(joined, height_mm) < plan_score(planned, height_mm):
+        joined.check.update({k: check[k] for k in ("junctions", "concavities")})
+        planned = joined
+    for c in planned.columns:
+        c.left = [(x + ox, y + oy) for x, y in c.left]
+        c.right = [(x + ox, y + oy) for x, y in c.right]
+    planned.contours = as_given
+    # narrow strokes run on round their corners as one column (trace/corners.py)
+    from cli_anything_inkstitch.trace.corners import wrap_corners
+    return wrap_corners(planned) if corner_wrap else wrap_corners(planned, butt_points=True)
+
+
+def _rechecked(planned: PlannedLetter) -> PlannedLetter:
+    """planned with its check's measures (bare, overhang, overlap, crossed, ok) taken again on its
+    columns as they now stand."""
+    from cli_anything_inkstitch.trace.corners import _check
+
+    if not planned.columns:
+        return planned
+    c = _check(planned)
+    planned.check.update({k: c[k] for k in ("sewable_bare_pct", "outside_pct", "overlap_mm2",
+                                            "crossed_pairs", "uncovered_pct") if k in c})
+    planned.ok = bool(planned.ok and c["ok"])
+    return planned
+
+
+def _tidied(planned: PlannedLetter, height_mm: float) -> PlannedLetter:
+    """The shapes planner's junction tools (trace/joins.py) tried on a letter: deep overlaps trimmed
+    (an A's legs past its apex, a K's arm into its leg; and, as trim_under, every overlap deeper than
+    the tuck, a V's point and a serif's foot included, the stroke underneath cut to the one on top
+    and sewn first), bare wedges at junctions closed (the notch a K's arm leaves against its leg,
+    an R's leg against its bowl, a B's waist). Each tool keeps only
+    changes that leave no more bare fabric, and of the letter as planned and each tidied version,
+    the one that passes its own check best (plan_score) is kept. Measured on Avenir Black: the K at
+    7.6 mm went from 3.8% bare to 1.1%, the R at 13 mm from 2.8% to 1.3%.
+
+    The joint ends are left where the planner tucked them (columns.BUTT_OVERLAP_MM under):
+    joins.flatten_joint_ends' deeper tuck is for fabric presets that ask for it (shapes-to-satin)."""
+    from copy import deepcopy
+
+    from cli_anything_inkstitch.trace import joins
+
+    if not planned.ok or len(planned.columns) < 2:
+        return planned
+    def trim_under(p):
+        # every overlap deeper than the tuck, a V's point and a serif's foot included: the stroke
+        # underneath cut to the one on top, joins.KEEP_MM under it, and sewn first (Bobby on the
+        # letter-ends sheet, 11/13: "I'd expect the shape to be trimmed to match the shape of the
+        # overlap"; EmbroideryStudio's remove-overlaps)
+        p = joins.trim_overlaps(p, max_depth_mm=LETTER_TRIM_DEPTH_MM, fill_acute_v=False,
+                                bare_tol_mm2=LETTER_TRIM_BARE_TOL_MM2)
+        return joins.tucked_first(p) if p.check.get("joins_trimmed") else p
+
+    best, best_score = planned, plan_score(planned, height_mm)
+    for tools in ((joins.trim_overlaps,), (joins.close_wedges,), (joins.trim_overlaps, joins.close_wedges),
+                  (trim_under,), (trim_under, joins.close_wedges)):
+        trial = deepcopy(planned)
         try:
-            strokes = letter_strokes(sh.outline, height_mm, overlap_feet=True)
-            strokes = col.tuck_order(strokes, sh.outline, sh.box)
-            cols = col.letter_columns(strokes, sh.outline, sh.box, spacing,
-                                      col.RING_OVERLAP_MM, col.BUTT_OVERLAP_MM, tuck=True)
-            lt = col.Letter(sh.char, [ac.trim_tips(c) for c in cols], sh.outline, sh.box,
-                            strokes, butt_overlap=col.BUTT_OVERLAP_MM)
-            check = ac.flat_check(lt)
-        except Exception as exc:  # noqa: BLE001 - one unplannable glyph falls back alone
-            out.append(PlannedLetter(sh.char, [], [[tuple(map(float, p)) for p in c] for c in sh.outline],
-                                     False, {}, f"no column plan ({type(exc).__name__}: {str(exc)[:80]})"))
+            for tool in tools:
+                trial = tool(trial)
+        except Exception:  # noqa: BLE001 - a tool that can't handle this letter leaves it be
             continue
-        out.append(_from_letter(lt, bool(check["ok"]), check))
-    return out
+        trial = _rechecked(trial)
+        score = plan_score(trial, height_mm)
+        if score < best_score - 1e-6:
+            best, best_score = trial, score
+    return best
 
 
 def _plan_merged(letters, ac) -> list[PlannedLetter]:
@@ -277,7 +422,7 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
 
 def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
                 overrides: dict | None = None, spread_turns_on: bool = True,
-                tidy_joins_on: bool = True) -> list[PlannedLetter]:
+                tidy_joins_on: bool = True, joint_overlap_mm: float | None = None) -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
     outlines) as satin columns, one shape at a time: the planner's
     `art_columns.plan_shape`, the same planner that drove an all-satin client
@@ -300,8 +445,10 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
     along the inner curve instead of pinching at one point (spread_turns).
     A shape with hand-placed rungs is left as placed.
 
-    tidy_joins_on: where columns meet, trim overlaps deeper than about 1 mm back to a 0.4 mm
-    overlap, and close bare wedges at junctions (trace/joins.py).
+    tidy_joins_on: where columns meet, trim deep overlaps, close bare wedges at junctions, and lay
+    every butting end flat along the edge it meets, joint_overlap_mm under it (default
+    joins.KEEP_MM, 0.4), sewn before the column it tucks under (trace/joins.py). A shape's
+    override "joint_overlap_mm" sets its own.
     """
     import numpy as np
 
@@ -342,12 +489,14 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
             # Run even on a rungs-override shape: tidy_joins works on where the shape's own
             # columns MEET (overlaps/wedges), which is orthogonal to interior rung placement,
             # and place_rungs has already run above. Skipping it left override shapes un-tidied.
-            from cli_anything_inkstitch.trace.joins import tidy_joins
-            planned = tidy_joins(planned)
+            from cli_anything_inkstitch.trace.joins import KEEP_MM, tidy_joins
+            keep = ov.get("joint_overlap_mm", joint_overlap_mm)
+            planned = tidy_joins(planned, keep_mm=KEEP_MM if keep is None else float(keep))
         if do_ease:
             # After tidy_joins, so the ease works on the final end cuts (a junction end may have been
             # trimmed/snapped) and nothing undoes it. A hand-placed-rungs shape is left as placed.
-            planned = ease_letter_ends(planned)
+            planned = ease_letter_ends(planned, keep_mm=None if not tidy_joins_on else
+                                       (KEEP_MM if keep is None else float(keep)))
         out.append(planned)
     return out
 
@@ -893,6 +1042,113 @@ def ease_end(pairs, ease_mm: float = END_EASE_MM, point_mm: float = END_EASE_POI
     return [((float(a[0]), float(a[1])), (float(b[0]), float(b[1]))) for a, b in new]
 
 
+TUCK_RECAST_MM = 3.0      # a tucked end's rungs are re-cast over at least this far before its cut...
+TUCK_STEP_MM = 0.5        # ...every this far, all at one angle
+
+
+def straight_tucked_end(pairs, host, outline, others=None, keep_mm: float = 0.4,
+                        step_mm: float = TUCK_STEP_MM):
+    """Re-pair the near end (index 0) of a column whose end tucks under another column (`host`, a
+    polygon), so its stitches keep the band's own angle right to the end.
+
+    Stitch direction follows the stroke's path: perpendicular to its centre line, turning only where
+    the centre line turns. A slanted end cut does not rotate the stitches; they keep their angle and
+    simply end on the slanted edge, getting shorter (a hand-digitized band ending on a slanted strand;
+    EmbroideryStudio keeps such a band square too). So from just before the cut on, rungs are cast at
+    one angle, perpendicular to the band's centre line there, every step_mm, across the band's end
+    region, which is:
+      the column's own area, plus the shape's outline inside a strip that carries the band's two
+      sides straight on (so the band's outer edge runs all the way to the other piece: no notch where
+      the planned end cut stopped short of it), up to the host's edge moved keep_mm in (the tuck),
+      never into any other column (`others`).
+    Each rung is that region's extent along the rung line, so the band's end follows the host's edge
+    even where it bends, and ends with the last rung that still has width. Returns new pairs (end
+    first), or None when the end is already square or the column is too short."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+
+    if len(pairs) < 2:
+        return None
+    P = [(tuple(map(float, a)), tuple(map(float, b))) for a, b in pairs][::-1]   # body first, end last
+    width = math.dist(*P[-1]) or 1.0
+    mids = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in P]
+    cl = LineString(mids)
+    if cl.length < 3 * step_mm:
+        return None
+    body_w = sorted(math.dist(a, b) for a, b in P)[len(P) // 2]
+    # the band's direction just behind its end region (body -> end)
+    back = min(cl.length * 0.6, max(2.0 * body_w, 2.0))
+    q0, q1 = cl.interpolate(cl.length - back), cl.interpolate(cl.length - back / 2)
+    tx, ty = q1.x - q0.x, q1.y - q0.y
+    tn = math.hypot(tx, ty)
+    if tn == 0:
+        return None
+    tx, ty = tx / tn, ty / tn
+    nx, ny = -ty, tx                                   # rung direction: square to the band
+    (la, ra) = P[-1]
+    cut = (ra[0] - la[0], ra[1] - la[1])
+    if abs(cut[0] * tx + cut[1] * ty) / (math.hypot(*cut) or 1.0) < math.sin(math.radians(END_EASE_MIN_TILT_DEG)):
+        return None                                    # already square: nothing to do
+    proj = lambda p: (p[0] - q0.x) * tx + (p[1] - q0.y) * ty
+    inner = min(proj(la), proj(ra))                    # where the slanted cut begins
+    s0 = inner - max(TUCK_RECAST_MM, 1.5 * body_w)
+    if s0 < proj(mids[0]) + step_mm:
+        return None
+    # planned pairs wholly before the re-cast (a slanted one reaching past it would cross the first
+    # re-cast rung)
+    keep = [pr for pr in P if max(proj(pr[0]), proj(pr[1])) < s0 - 0.5 * step_mm]
+    if len(keep) < 1:
+        return None
+    # the band's two sides where the re-cast starts, carried straight on
+    side = lambda pt: (pt[0] - q0.x) * nx + (pt[1] - q0.y) * ny
+    base = keep[-1]
+    lo, hi = sorted((side(base[0]), side(base[1])))
+    left_is_hi = side(base[0]) > side(base[1])
+    far = proj(la) + proj(ra) + 4 * body_w + 10
+    pt = lambda s_, o_: (q0.x + tx * s_ + nx * o_, q0.y + ty * s_ + ny * o_)
+    strip = Polygon([pt(s0 - step_mm, lo - 0.05), pt(far, lo - 0.05), pt(far, hi + 0.05), pt(s0 - step_mm, hi + 0.05)])
+    own = Polygon([p[0] for p in P] + [p[1] for p in P][::-1]).buffer(0)
+    ink = strip.intersection(outline.buffer(0.02))
+    if others is not None and not others.is_empty:
+        ink = ink.difference(others)
+    # up to the host's edge: the piece of the outline joined to the band (not a sliver of the shape
+    # the host doesn't cover farther along), then on under the host by keep_mm
+    # (opened by 0.25 mm: a sliver of outline the host leaves along its own edge is not band)
+    fill = ink.difference(host).buffer(-0.25).buffer(0.25)
+    reach_ = own.union(fill).buffer(0)
+    pieces = [g for g in getattr(reach_, "geoms", [reach_]) if g.intersects(own.buffer(-0.01))]
+    if not pieces:
+        return None
+    region = unary_union(pieces)
+    if keep_mm > 0:
+        # the tuck: only the host's edge band keep_mm deep, next to the band
+        edge_band = host.difference(host.buffer(-keep_mm))
+        region = region.union(region.buffer(keep_mm).intersection(edge_band).intersection(ink))
+    region = region.union(own.difference(host.buffer(-keep_mm) if keep_mm > 0 else host)).buffer(0)
+    new = []
+    s = s0
+    reach = abs(hi - lo) + 4 * body_w + 5
+    while s < far:
+        o_mid = (lo + hi) / 2
+        line = LineString([pt(s, o_mid - reach), pt(s, o_mid + reach)])
+        x = line.intersection(region)
+        segs = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "LineString" and g.length > 0]
+        if not segs:
+            break
+        g = min(segs, key=lambda g: g.distance(Point(pt(s, o_mid))))
+        a_, b_ = g.coords[0], g.coords[-1]
+        if g.length < 0.2:
+            break
+        a_hi = side(a_) > side(b_)
+        pair = (a_, b_) if a_hi == left_is_hi else (b_, a_)
+        new.append(((float(pair[0][0]), float(pair[0][1])), (float(pair[1][0]), float(pair[1][1]))))
+        s += step_mm
+    if len(new) < 2:
+        return None
+    out = keep + new
+    return out[::-1]                                   # end first again
+
+
 def _head_turn_tilt(pairs, within_mm: float = 3.0) -> float:
     """Worst rung-to-rung angle step (deg) within `within_mm` of the head (index 0): how sharply the
     rungs turn as they approach that cut. The defect ease_end spreads out. Measured on the head alone
@@ -912,20 +1168,57 @@ def _head_turn_tilt(pairs, within_mm: float = 3.0) -> float:
     return worst
 
 
-def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM) -> PlannedLetter:
-    """Ease the rung angle into every open column's slanted or pointed ends (ease_end), one end at a
-    time. An end's new pairs are kept only if they leave no more crossings and no more fans than
-    before and actually reduce how sharply the rungs turn into that end. Rails (the outline) are never
-    moved. Lists the changed columns in check["eased_ends"]."""
-    from cli_anything_inkstitch.trace import column_checks as cc
+def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM,
+                     keep_mm: float | None = None) -> PlannedLetter:
+    """Ease the rung angle into every open column's free slanted or pointed ends (ease_end), one end
+    at a time. An end that tucks under another column (joins._host) is not eased: its rungs stay at
+    the band's own angle right to the end, and its end region runs to the other column's edge,
+    keep_mm under it (straight_tucked_end, check["squared_tucked_ends"]). An
+    end's new pairs are kept only if they leave no more crossings and no more fans than before and,
+    for an ease, actually reduce how sharply the rungs turn into that end. Rails (the outline) are
+    never moved. Lists the eased columns in check["eased_ends"]."""
+    from shapely.ops import unary_union
 
-    done = []
+    from cli_anything_inkstitch.trace import column_checks as cc
+    from cli_anything_inkstitch.trace.joins import KEEP_MM, _bare, _host, _outline, _poly
+
+    keep_mm = KEEP_MM if keep_mm is None else keep_mm
+    outline = _outline(planned.contours)
+    done, squared, kept_ease = [], [], []
+    # which ends tuck under which column, decided on the columns as they are now: a re-cast end
+    # grows to its host's edge, and must not make a neighbour's free end look tucked into it
+    hosts = {(k, end): _host(planned.columns, k, end, skip_acute_v=False)
+             for k, c in enumerate(planned.columns) if not c.closed and len(c.left) >= 2
+             for end in (0, -1)} if len(planned.columns) > 1 else {}
     for k, c in enumerate(planned.columns):
         if c.closed:
             continue
         for end in (0, -1):
             pairs = list(zip(c.left, c.right))
             work = pairs if end == 0 else pairs[::-1]       # the end being eased is now index 0
+            j = hosts.get((k, end))
+            if j is not None:
+                if outline is None:
+                    continue
+                others = unary_union([_poly(o) for n, o in enumerate(planned.columns) if n not in (k, j)]) \
+                    if len(planned.columns) > 2 else None
+                st = straight_tucked_end(work, _poly(planned.columns[j]), outline, others, keep_mm)
+                ok = st is not None and _crossed(st) <= _crossed(work)
+                if ok:
+                    trial = list(planned.columns)
+                    trial[k] = PlannedColumn(left=[p[0] for p in st], right=[p[1] for p in st], closed=c.closed)
+                    ok = (_bare(outline, trial) <= _bare(outline, planned.columns) + 0.05
+                          and _poly(trial[k]).difference(outline.buffer(0.1)).area < 0.05)
+                if ok:
+                    st = st if end == 0 else st[::-1]
+                    c.left, c.right = [p[0] for p in st], [p[1] for p in st]
+                    squared.append([k, end])
+                    continue
+                if st is not None:
+                    # the straight re-cast would cross pairs, leave the ink or bare fabric: ease that
+                    # end as before (ease_end), so its cut stays covered
+                    kept_ease.append([k, end])
+                # (st None: already square or too short; ease_end below leaves a square end alone)
             eased_head = ease_end(work, ease_mm)
             if eased_head is None:
                 continue
@@ -939,6 +1232,10 @@ def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM) -> Pl
                 done.append(k)
     if done:
         planned.check["eased_ends"] = done
+    if squared:
+        planned.check["squared_tucked_ends"] = squared
+    if kept_ease:
+        planned.check["tucked_ends_eased"] = kept_ease
     return planned
 
 
@@ -1188,41 +1485,189 @@ def glyph_polygon(contours):
     return glyph
 
 
-def route_walk(ends, covered=None):
-    """Simulate the engine's start_at_nearest_point sew-walk over a sequence of
-    columns, given each column's two ends (column_ends) in SEWING ORDER.
+def centre_line(left, right, samples: int = 40):
+    """A column's centre line from its two rails: the midpoints of its rail pairs when the rails
+    pair node for node (the planner's columns, the engine's rung-less pairing), else both rails
+    resampled at `samples` even steps. The engine walks a satin's offset_center_line
+    (lib/elements/satin_column.py) for start_at_nearest_point's hidden entry run."""
+    if len(left) == len(right):
+        return [((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0) for a, b in zip(left, right)]
+    from shapely.geometry import LineString
+
+    ls, rs = LineString(left), LineString(right)
+    out = []
+    for i in range(samples + 1):
+        a, b = ls.interpolate(i / samples, normalized=True), rs.interpolate(i / samples, normalized=True)
+        out.append(((a.x + b.x) / 2.0, (a.y + b.y) / 2.0))
+    return out
+
+
+def _flags(v, n):
+    if v is None or isinstance(v, bool):
+        return [bool(v)] * n
+    if isinstance(v, (set, frozenset)):
+        return [k in v for k in range(n)]
+    return [bool(x) for x in v]
+
+
+def route_walk(ends, covered=None, *, as_drawn=None, centre_lines=None, exact=None, start=None):
+    """Simulate the engine's sew-walk over a sequence of columns, given each column's two ends
+    (column_ends) in SEWING ORDER.
 
     Returns one record per column, in order:
       {"order": k, "entry": (x, y), "exit": (x, y), "exposed": float,
-       "is_jump_before": bool}
-    The first column is taken to sew end_a -> end_b (entry=end_a, exit=end_b);
-    each later column starts at whichever of its ends is nearer where the
-    previous column left the needle and leaves it at the far end -- exactly as
+       "is_jump_before": bool, "arrive": (x, y), "travel": float, "hidden_run": float}
+
+    Default model (end_at_nearest_point on, the engine default): the first column is taken to sew
+    end_a -> end_b (entry=end_a, exit=end_b); each later column starts at whichever of its ends is
+    nearer where the previous column left the needle and leaves it at the far end -- exactly as
     exposed_hops measures travel, so the entry/exit decision lives in one place.
-    `exposed` is the length of the travel INTO this column that lies outside
-    `covered` (a shapely geometry, same units as the ends): 0 for the first
-    column and whenever `covered` is None. is_jump_before is True when that
-    travel crosses bare fabric at all; callers that only care about visible
-    jumps apply their own length threshold to `exposed`."""
+
+    as_drawn (one bool for all, or per column: a list of bools or a set of indexes): the column has
+    end_at_nearest_point off, so it sews end_a -> end_b as drawn: the engine neither picks the end
+    nor splits the top layer to finish near the next element (lib/elements/satin_column.py
+    end_point / _split_top_layer). Its exit is end_b. With start_at_nearest_point on
+    (start_point) the needle lands on the point of its centre line (centre_lines[k], when given)
+    nearest the previous exit and runs back along it, under the column, to end_a: that hidden
+    run's length is `hidden_run`. exact (same forms): start_at_nearest_point off, so the needle
+    lands on end_a itself.
+
+    `arrive` is where the travel into the column lands, `travel` its straight length. `exposed` is
+    the part of that travel outside `covered` (a shapely geometry, same units as the ends): 0 for
+    the first column (unless `start`, the needle's position before column 0, is given) and
+    whenever `covered` is None. is_jump_before is True when that travel crosses bare fabric at
+    all; callers that only care about visible jumps apply their own length threshold to
+    `exposed`."""
     out = []
     if not ends:
         return out
-    e0, e1 = ends[0]
-    out.append({"order": 0, "entry": e0, "exit": e1, "exposed": 0.0,
-                "is_jump_before": False})
-    cur = e1
-    if covered is not None:
-        from shapely.geometry import LineString
-    for k in range(1, len(ends)):
+    n = len(ends)
+    drawn, ex = _flags(as_drawn, n), _flags(exact, n)
+    if covered is not None or centre_lines is not None:
+        from shapely.geometry import LineString, Point
+    cur = start
+    for k in range(n):
         a, b = ends[k]
-        start, far = (a, b) if math.dist(cur, a) <= math.dist(cur, b) else (b, a)
+        hidden = 0.0
+        if drawn[k] or cur is None:
+            entry, far = a, b
+            arrive = a
+            if drawn[k] and not ex[k] and cur is not None and centre_lines is not None \
+                    and len(centre_lines[k]) >= 2:
+                cl = LineString(centre_lines[k])
+                t = cl.project(Point(cur))
+                q = cl.interpolate(t)
+                arrive, hidden = (q.x, q.y), t
+        else:
+            entry, far = (a, b) if math.dist(cur, a) <= math.dist(cur, b) else (b, a)
+            arrive = entry
+        travel = math.dist(cur, arrive) if cur is not None else 0.0
         exposed = 0.0
-        if covered is not None and math.dist(cur, start) > 1e-6:
-            exposed = LineString([cur, start]).difference(covered).length
-        out.append({"order": k, "entry": start, "exit": far,
-                    "exposed": exposed, "is_jump_before": exposed > 0.0})
+        if covered is not None and travel > 1e-6:
+            exposed = LineString([cur, arrive]).difference(covered).length
+        out.append({"order": k, "entry": entry, "exit": far, "exposed": exposed,
+                    "is_jump_before": exposed > 0.0, "arrive": arrive, "travel": travel,
+                    "hidden_run": hidden})
         cur = far
     return out
+
+
+# The engine's collapse_len default (metadata collapse_len_mm, 3 mm: read in lib/elements/satin_column.py
+# min_jump_stitch_len and stitch_groups_to_stitch_plan): travel longer than
+# this becomes a jump the machine sews as a long loose stitch unless it is trimmed.
+ONE_PASS_TRIM_MM = 3.0
+# ...measured from the planned rails, which the needle overshoots: pull compensation widens a satin
+# (0.2-0.3 mm a side) and the last stitch lands past the rail, so a 2.99 mm planned handoff sewed as
+# a 3.2 mm jump. Handoffs within this margin of trim_mm are trimmed too.
+ONE_PASS_TRIM_MARGIN_MM = 0.5
+
+
+def _reverse_column(c: PlannedColumn) -> None:
+    c.left, c.right = list(c.left)[::-1], list(c.right)[::-1]
+
+
+def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = True,
+                  trim_mm: float = ONE_PASS_TRIM_MM, exposed_mm: float = EXPOSED_TRAVEL_MM,
+                  margin_mm: float = ONE_PASS_TRIM_MARGIN_MM) -> dict:
+    """Orient a shape's columns so each sews in ONE pass, and say where to trim.
+
+    The engine's satin default end_at_nearest_point splits a column's top layer into two passes
+    that meet mid-column, so it can finish near the next element (lib/elements/satin_column.py
+    end_point / _split_top_layer): a visible seam. With it off a column sews end_a -> end_b as
+    drawn, so the planner picks the direction instead, in sewing order (columns are reversed in
+    place; their rail pairing is kept):
+
+      1. each column but the last finishes at the end nearest the next column;
+      2. trim after a column whose farther end rail point is more than trim_mm less margin_mm from
+         the next column's outline (the engine would jump it: within collapse_len of the outline it
+         stitches through; the margin is for the needle overshooting the planned rail by the pull
+         compensation) or lies on bare fabric for more than exposed_mm (route_walk, as drawn);
+         the shape's last column always trims (shapes-to-satin trims between shapes);
+      3. a column that trims afterwards instead starts at the end nearest where the needle
+         arrives (a shorter hidden entry run, or a shorter jump), and a column the needle reaches
+         after a trim starts exactly at its start (start_at_nearest_point off: `start_exact`).
+
+    arrival: where the needle is before this shape (the previous shape's exit), or None.
+    trim_handoffs False: no trims inside the shape (only the orientation).
+
+    Returns {"trim_after": [k...] (inside the shape, not the last column), "start_exact": [k...],
+    "reversed": [k...], "exit": (x, y), "hidden_runs": [mm per column]}."""
+    cols = letter.columns
+    n = len(cols)
+    if n == 0:
+        return {"trim_after": [], "start_exact": [], "reversed": [], "exit": arrival, "hidden_runs": []}
+    from shapely.geometry import LineString, Point, Polygon
+
+    def band(c):
+        p = Polygon(list(c.left) + list(c.right)[::-1])
+        return p if p.is_valid else p.buffer(0)
+
+    flipped: set[int] = set()
+
+    def flip(k):
+        _reverse_column(cols[k])
+        flipped.symmetric_difference_update({k})
+
+    for k in range(n - 1):                       # 1. finish nearest the next column
+        if cols[k].closed:
+            continue
+        a, b = column_ends(cols[k].left, cols[k].right)
+        nxt = band(cols[k + 1])
+        if nxt.distance(Point(a)) < nxt.distance(Point(b)):
+            flip(k)
+    covered = glyph_polygon(letter.contours)
+    covered = covered.buffer(0.05) if covered is not None else None
+    trims = {n - 1}
+    if trim_handoffs:                            # 2. trims where the handoff is a jump or bare
+        recs = route_walk([column_ends(c.left, c.right) for c in cols], covered, as_drawn=True,
+                          centre_lines=[centre_line(c.left, c.right) for c in cols])
+        bands = [band(c) for c in cols]
+
+        def jump_mm(k):
+            # The engine jumps into column k only when its outline is at least collapse_len from the
+            # needle; nearer, it starts from the outline and stitches through
+            # (lib/elements/satin_column.py start_point). The needle is wherever the top layer's
+            # last stitch landed: on a RAIL at the column's end, up to half its width from the
+            # centre-line end the walk uses, so measure from the farther end rail point.
+            prev = cols[k - 1]
+            return max(bands[k].distance(Point(prev.left[-1])), bands[k].distance(Point(prev.right[-1])))
+
+        trims |= {k - 1 for k in range(1, n)
+                  if jump_mm(k) > trim_mm - margin_mm or recs[k]["exposed"] > exposed_mm}
+    cur = arrival                                # 3. a trimmed column starts nearest its arrival
+    for k in range(n):
+        a, b = column_ends(cols[k].left, cols[k].right)
+        if k in trims and cur is not None and not cols[k].closed and math.dist(cur, b) < math.dist(cur, a):
+            flip(k)
+            a, b = b, a
+        cur = b
+    exact = {0} | {k + 1 for k in trims if k + 1 < n}
+    recs = route_walk([column_ends(c.left, c.right) for c in cols], None, as_drawn=True,
+                      centre_lines=[centre_line(c.left, c.right) for c in cols], exact=exact,
+                      start=arrival)
+    return {"trim_after": sorted(trims - {n - 1}), "start_exact": sorted(exact),
+            "reversed": sorted(flipped), "exit": recs[-1]["exit"],
+            "hidden_runs": [r["hidden_run"] for r in recs]}
 
 
 def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:

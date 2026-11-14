@@ -124,6 +124,160 @@ def _normalize_new_satins(extension_name: str, new_tree) -> int:
     return fixed
 
 
+def _color_satin_underpaths(extension_name: str, new_tree) -> int:
+    """Give auto_satin's travel strokes the stroke colour of the satins they run under.
+
+    auto_satin builds each travel stroke's style from its source satin's `style` attribute only
+    (lib/stitches/auto_satin.py RunningStitch.to_element). Once _normalize_new_satins has lifted a
+    satin's colour out of `style` into a `stroke` attribute (any earlier engine tool run on the same
+    document: text-to-satin routes one letter at a time), the next run's travel strokes come out with
+    no stroke colour at all, and the engine never sews a path without one
+    (lib/elements/utils/nodes.py node_to_elements: Stroke only when stroke_color is set). Their travel
+    then sews as a jump instead of a running stitch under the satins (measured: a 9.4 mm untrimmed
+    jump across a routed 'a'). The colour is taken from a satin in the same parent group (one
+    auto_satin run routes one group of one colour). Returns how many strokes were coloured."""
+    if extension_name != "auto_satin":
+        return 0
+    import re as _re
+    ptype = "{http://inkstitch.org/namespace}path_type"
+    ink_sat = "{http://inkstitch.org/namespace}satin_column"
+
+    def colour(el):
+        m = _re.search(r"(?:^|;)\s*stroke\s*:\s*([^;]+)", el.get("style") or "")
+        c = (m.group(1).strip() if m else None) or el.get("stroke")
+        return None if c in (None, "", "none") else c
+
+    n = 0
+    for el in new_tree.getroot().iter():
+        if not isinstance(el.tag, str) or el.get(ptype) != "satin-underpath" or colour(el):
+            continue
+        parent = el.getparent()
+        sib = next((colour(s) for s in (parent if parent is not None else [])
+                    if isinstance(s.tag, str) and (s.get(ink_sat) or "").lower() == "true" and colour(s)), None)
+        if sib:
+            el.set("stroke", sib)
+            n += 1
+    return n
+
+
+def _engine_rail_indices(paths) -> tuple[int, int]:
+    """Which two of a satin's flattened subpaths the engine takes as its rails, in index order (rail
+    0 sets the sewing direction). Mirrors lib/elements/satin_column.py rail_indices: with no rungs,
+    both; with exactly one rung (three paths), the two that cross exactly one other; with more, those
+    crossing more than two others; when that is ambiguous, the two longest. A rung can be longer than
+    the rails (a short crossbar), and auto_satin's output can list a rung first, so neither "the
+    first two" nor "the two longest" is safe on its own."""
+    from shapely.geometry import LineString
+
+    if len(paths) <= 2:
+        return 0, 1
+    ls = [LineString(p) for p in paths]
+    hits = [sum(ls[i].intersects(ls[j]) for j in range(len(ls)) if j != i) for i in range(len(ls))]
+    if len(ls) == 3:
+        rails = [i for i in range(3) if hits[i] == 1 and ls[i].length > 0.1]
+    else:
+        rails = [i for i in range(len(ls)) if hits[i] > 2 and ls[i].length > 0.1]
+    if len(rails) != 2:
+        rails = sorted(sorted(range(len(ls)), key=lambda i: -ls[i].length)[:2])
+    return rails[0], rails[1]
+
+
+def _routed_handoffs(group, uu_per_mm: float) -> list:
+    """Handoffs in an auto_satin-routed group that would sew as a jump, each with how to fix it.
+
+    auto_satin's route assumes the engine's end_at_nearest_point, which pulls a satin's end toward
+    the next element; with one-pass satins (that setting off) a satin finishes at its drawn end, and
+    the gap to the next sewn element can exceed collapse_len. A handoff counts when, from either end
+    rail point of the element (its last stitch lands on a rail; a running stitch's last point), the
+    next element is farther than ONE_PASS_TRIM_MM less its margin (as plan_one_pass): a satin's
+    outline (start_at_nearest_point, on by default: within collapse_len of it the engine stitches
+    through), its first rail point when that is off (lib/elements/satin_column.py first_stitch), a
+    running stitch's first point.
+
+    Returns [{"after": element, "hide": (start, end) | None}]: "hide" is a straight travel from the
+    element's end-pair middle to the next element's entry, when that line lies wholly under elements
+    still to be sewn (the travel auto_satin itself sews under satins); otherwise None: trim after.
+    Elements the engine won't sew (no stroke colour) are skipped."""
+    import math
+    import re as _re
+
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+
+    from cli_anything_inkstitch.artifact.design_model import split_subpaths
+    from cli_anything_inkstitch.artifact.gate import flatten_path
+    from cli_anything_inkstitch.svg.attrs import qname
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+
+    sat, start_near, trim = qname("satin_column"), qname("start_at_nearest_point"), qname("trim_after")
+
+    def stroked(e):
+        m = _re.search(r"(?:^|;)\s*stroke\s*:\s*([^;]+)", e.get("style") or "")
+        c = (m.group(1).strip() if m else None) or e.get("stroke")
+        return c not in (None, "", "none")
+
+    items = []
+    for e in group.iter(f"{{{SVG_NS}}}path"):
+        d = e.get("d")
+        if not d or not stroked(e):
+            continue
+        subs = split_subpaths(d)
+        if (e.get(sat) or "").lower() == "true":
+            if len(subs) < 2:
+                continue
+            flat = [f for f in (flatten_path(x) for x in subs) if len(f) > 1]
+            if len(flat) < 2:
+                continue
+            i0, i1 = _engine_rail_indices(flat)
+            L, R = flat[i0], flat[i1]
+            if len(L) < 2 or len(R) < 2:
+                continue
+            # rail 1 runs the same way as rail 0 or is reversed to (satin_column.py
+            # _get_rails_to_reverse): align it so its end is the one nearer rail 0's end
+            if math.dist(R[0], L[-1]) < math.dist(R[-1], L[-1]):
+                R = list(R)[::-1]
+            r_end = R[-1]
+            exact = (e.get(start_near) or "").lower() in ("false", "0")
+            poly = Polygon(list(L) + list(R)[::-1]).buffer(0)
+            items.append({"e": e, "exits": [L[-1], r_end],
+                          "mid": ((L[-1][0] + r_end[0]) / 2, (L[-1][1] + r_end[1]) / 2),
+                          "entry_pt": L[0], "poly": poly,
+                          "entry_line": None if exact else LineString(gc.centre_line(L, R))})
+        else:
+            P = flatten_path(subs[0])
+            if len(P) >= 2:
+                items.append({"e": e, "exits": [P[-1]], "mid": P[-1], "entry_pt": P[0],
+                              "entry_line": None, "poly": None})
+    limit = (gc.ONE_PASS_TRIM_MM - gc.ONE_PASS_TRIM_MARGIN_MM) * uu_per_mm
+    out = []
+    for i, (a, b) in enumerate(zip(items, items[1:])):
+        if (a["e"].get(trim) or "").lower() == "true":
+            continue
+
+        def entry(p):
+            if b["entry_line"] is None:
+                return b["entry_pt"]
+            q = b["entry_line"].interpolate(b["entry_line"].project(Point(p)))
+            return (q.x, q.y)
+
+        # the engine jumps into a satin only when its outline is collapse_len away; nearer, it starts
+        # from the outline and stitches through (lib/elements/satin_column.py start_point)
+        if b["entry_line"] is not None and b["poly"] is not None:
+            travel = max(b["poly"].distance(Point(p)) for p in a["exits"])
+        else:
+            travel = max(math.dist(p, entry(p)) for p in a["exits"])
+        if travel <= limit:
+            continue
+        later = [x["poly"] for x in items[i + 1:] if x["poly"] is not None]
+        start, end = a["mid"], entry(a["mid"])
+        hide = None
+        if later and math.dist(start, end) > 0:
+            if unary_union(later).buffer(0.05 * uu_per_mm).contains(LineString([start, end])):
+                hide = (start, end)
+        out.append({"after": a["e"], "hide": hide})
+    return out
+
+
 def _simplify_new_satin_rails(extension_name: str, before_xml: str,
                               new_tree) -> dict | None:
     """RDP-simplify rails of satins the tool created or rewrote.
@@ -265,6 +419,9 @@ def run_tool_core(ctx, project_path, extension_name, ids, args, *,
         normalized = _normalize_new_satins(extension_name, new_tree)
         if normalized:
             extra_payload["normalized_satins"] = normalized
+        colored = _color_satin_underpaths(extension_name, new_tree)
+        if colored:
+            extra_payload["colored_underpaths"] = colored
         # node economy: engine satin output samples its rails from the input
         # density — simplify NEW/CHANGED satin rails before they enter the
         # document (helper contract + reader citation: trace/satinize.py
@@ -794,16 +951,19 @@ def _style_autorun_tops(ctx, project_path, stitch_length_mm, bean_repeats):
 # in a run), so thread doesn't pile up there. short_dist_mm must stay below the rail's normal spacing
 # (about the satin spacing): above it every stitch is shortened and the whole column thins. None keeps
 # the engine's default (15 %, 0.25 mm).
+# joint_overlap_mm: how far a butting column's end runs under the column it meets (trace/joins.py
+# KEEP_MM). 0.4 matches a commercial digitizer's 0.3-0.4 mm on twill; knit and fleece stretch and
+# pull joints apart, so they tuck further (0.6: a starting point, not yet measured on a sew-out).
 FABRICS = {
     #            spacing  pull  centre walk below  zigzag from (mm)
     "standard": dict(spacing_mm=None, pull_comp_mm=0.2, center_below_mm=1.5, zigzag_from_mm=4.0,
-                     short_inset=None, short_dist_mm=None),
+                     short_inset=None, short_dist_mm=None, joint_overlap_mm=0.4),
     "twill":    dict(spacing_mm=0.4, pull_comp_mm=0.2, center_below_mm=2.0, zigzag_from_mm=5.0,
-                     short_inset="30 50", short_dist_mm=0.25),
+                     short_inset="30 50", short_dist_mm=0.25, joint_overlap_mm=0.4),
     "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=4.0,
-                     short_inset="30 50", short_dist_mm=0.25),
+                     short_inset="30 50", short_dist_mm=0.25, joint_overlap_mm=0.6),
     "fleece":   dict(spacing_mm=0.38, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=3.0,
-                     short_inset="30 50", short_dist_mm=0.25),
+                     short_inset="30 50", short_dist_mm=0.25, joint_overlap_mm=0.6),
 }
 
 
@@ -839,13 +999,24 @@ def shape_band_width_mm(columns) -> float | None:
     return statistics.median(meds) if meds else None
 
 
+# Small lettering: a column narrower than this gets a centre walk under it, not an edge walk, whatever
+# the fabric preset says. Measured on EmbroideryStudio's own Avenir Black lettering at 7.6 mm caps
+# (strokes about 1.7 mm, sewn about 2.0 mm wide): one centre run under every stroke. Two edge runs
+# 0.4 mm in from the edges of a 1.7 mm column lie under the satin's needle holes and can show
+# through; at 13 mm caps (2.6 mm strokes) EmbroideryStudio edge-runs, as the preset does.
+LETTERING_CENTER_WALK_BELOW_MM = 2.0
+
+
 def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None = None,
                             fabric: str = "standard", band_width_mm: float | None = None,
-                            suppress_short_stitch: bool = False) -> dict:
+                            suppress_short_stitch: bool = False,
+                            center_below_mm: float | None = None) -> dict:
     """Satin params for one planned column, from its median width and the fabric preset.
 
-    Underlay by width (FABRICS): a centre walk below center_below_mm, an edge
-    walk (contour) above it, edge walk plus zigzag from zigzag_from_mm. The
+    Underlay by width (FABRICS): a centre walk below center_below_mm (or the
+    caller's center_below_mm, if larger: text-to-satin's small-lettering rule,
+    LETTERING_CENTER_WALK_BELOW_MM), an edge walk (contour) above it, edge walk
+    plus zigzag from zigzag_from_mm. The
     centre-walk-vs-contour band is chosen from band_width_mm when given (a
     shape-level representative width, so every column of one shape agrees on
     that band; see shape_band_width_mm), else from this column's own median
@@ -874,7 +1045,7 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
         # wedges; the column reads better with it off, at the same density (see short_stitch_kink).
         p["short_stitch_inset"] = "0" if suppress_short_stitch else f["short_inset"]
         p["short_stitch_distance_mm"] = f"{f['short_dist_mm']:g}"
-    if bw < f["center_below_mm"]:
+    if bw < max(f["center_below_mm"], center_below_mm or 0.0):
         p["center_walk_underlay"] = "true"
     else:
         p["contour_underlay"] = "true"
@@ -983,6 +1154,17 @@ def _filled_shapes(root, want):
     return out
 
 
+def _sews_as_fill(lt, spec: dict, fallback: str) -> bool:
+    """Whether a planned shape is written as its fill: a failed plan under --fallback fill, no
+    columns at all, or an override's stitch: fill / satin."""
+    as_fill = (not lt.ok and fallback == "fill") or not lt.columns
+    if spec.get("stitch") == "fill":
+        as_fill = True
+    elif spec.get("stitch") == "satin" and lt.columns:
+        as_fill = False
+    return as_fill
+
+
 _UNDERLAY_KEYS = {"center": "center_walk_underlay", "contour": "contour_underlay",
                   "edge": "contour_underlay", "zigzag": "zigzag_underlay"}
 
@@ -1014,7 +1196,7 @@ def _override_params(spec: dict, satin: bool) -> dict:
     return p
 
 
-OVERRIDE_KEYS = {"split", "seam", "rungs", "underlay", "density_mm", "pull_comp_mm", "short_stitch_inset",
+OVERRIDE_KEYS = {"split", "seam", "rungs", "joint_overlap_mm", "underlay", "density_mm", "pull_comp_mm", "short_stitch_inset",
                  "short_stitch_distance_mm", "angle", "stitch", "reason"}
 
 
@@ -1107,9 +1289,21 @@ def _doc_mm_frame(root, uu_per_mm):
               help="Tilt the rungs into tight turns so the inner ends spread along the inner curve "
                    "instead of pinching at one point (the inside of an S's bowl).")
 @click.option("--tidy-joins/--no-tidy-joins", default=True, show_default=True,
-              help="Where columns meet: trim overlaps deeper than ~1 mm back to a 0.4 mm overlap (an arm's "
-                   "end sewn across its bar, a strand behind a crossing jutting out), and close bare "
-                   "wedges at junctions by running the nearest end on into its neighbour.")
+              help="Where columns meet: every butting end is laid flat along the edge it meets and runs "
+                   "--joint-overlap-mm under it (deep overlaps cut back, short ends run on), the column "
+                   "on top sews after the one tucked under it, and bare wedges at junctions are closed "
+                   "by running the nearest end on into its neighbour.")
+@click.option("--joint-overlap-mm", type=float, default=None,
+              help="How far a column's end runs under the column it butts into (laid flat along its "
+                   "edge; that one sews on top). Default: the fabric preset's (0.4 mm; more on knit and "
+                   "fleece, which pull apart). 0 butts the ends exactly on the edge. Per shape: the "
+                   "override key joint_overlap_mm.")
+@click.option("--one-pass/--no-one-pass", default=True, show_default=True,
+              help="Sew every satin in one pass: end_at_nearest_point off (the engine default splits a "
+                   "column's top layer to finish near the next element, a seam mid-column), each column "
+                   "oriented to finish nearest the next one, a trim where a handoff would jump (> 3 mm) "
+                   "or cross bare fabric, and columns after a trim starting exactly at their end. "
+                   "Not with --travel route (auto_satin re-orders the columns).")
 @click.option("--merge-colors-de", type=float, default=None,
               help="Fills closer than this CIEDE2000 distance sew as one thread (default "
                    f"{8.0:g}; 0 keeps every fill its own thread).")
@@ -1130,7 +1324,7 @@ def _doc_mm_frame(root, uu_per_mm):
                    "this JSON-lines file, a fixture for planner tests (default: next to the project).")
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
-                    spread_turns, tidy_joins, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
+                    spread_turns, tidy_joins, joint_overlap_mm, one_pass, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
                     cases_path):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
@@ -1216,14 +1410,31 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 ov["seam"] = from_doc(tuple(map(float, spec["seam"])))
             if spec.get("rungs"):
                 ov["rungs"] = [tuple(from_doc(tuple(map(float, q))) for q in seg) for seg in spec["rungs"]]
+            if spec.get("joint_overlap_mm") is not None:
+                ov["joint_overlap_mm"] = float(spec["joint_overlap_mm"])
             if ov:
                 plan_ov[el.get("id")] = ov
         planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)],
                                  one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns,
-                                 tidy_joins_on=tidy_joins)
+                                 tidy_joins_on=tidy_joins,
+                                 joint_overlap_mm=FABRICS[fabric]["joint_overlap_mm"]
+                                 if joint_overlap_mm is None else joint_overlap_mm)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
+        fill_of = [_sews_as_fill(lt, spec, fallback) for lt, spec in zip(planned, spec_of)]
+        # One pass per satin, decided in SEWING order (thread order), so each shape's first column
+        # knows where the needle arrives from. A shape kept as fill ends somewhere we don't model.
+        one_pass_plan: dict[int, dict] = {}
+        if one_pass and travel != "route":
+            arrival = None
+            for i in order:
+                if fill_of[i]:
+                    arrival = None
+                    continue
+                one_pass_plan[i] = gc.plan_one_pass(planned[i], arrival=arrival,
+                                                    trim_handoffs=travel == "trim")
+                arrival = one_pass_plan[i]["exit"]
         made_groups, cases = [], []
-        for (el, _fill), color, lt, spec, gh in zip(targets, thread_of, planned, spec_of, hashes):
+        for i, ((el, _fill), color, lt, spec, gh) in enumerate(zip(targets, thread_of, planned, spec_of, hashes)):
             parent = el.getparent()
             g = etree.Element(f"{{{SVG_NS}}}g")
             g.set("id", f"{el.get('id')}_sat")
@@ -1231,11 +1442,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
             # the shape's outline (document mm), for tools review's seam check: the shape itself is
             # replaced by its columns. A plain data- attribute: the engine reads only inkstitch:*.
             g.set("data-outline-mm", _outline_attr(lt.contours, to_doc))
-            as_fill = (not lt.ok and fallback == "fill") or not lt.columns
-            if spec.get("stitch") == "fill":
-                as_fill = True
-            elif spec.get("stitch") == "satin" and lt.columns:
-                as_fill = False
+            as_fill = fill_of[i]
+            op = one_pass_plan.get(i)
             made = []
             if as_fill:
                 cp = el.__copy__()
@@ -1245,8 +1453,11 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 made.append((g[-1], "auto_fill" if _override_params(spec, False) else None,
                              _override_params(spec, False)))
             else:
-                hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
-                    if travel == "trim" else set()
+                if op is not None:
+                    hops = set(op["trim_after"])
+                else:
+                    hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
+                        if travel == "trim" else set()
                 band_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole shape
                 from cli_anything_inkstitch.trace import column_checks as _cc
                 from cli_anything_inkstitch.trace import joins as _joins
@@ -1267,6 +1478,15 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                     extra = _schema_known(schema, "satin_column",
                                           _lettering_satin_params(c.widths(), pull_comp_mm, fabric, band_w,
                                                                   suppress_short_stitch=kink), skipped)
+                    if op is not None:
+                        # readers: lib/elements/satin_column.py end_at_nearest_point (end_point,
+                        # _split_top_layer: on, the top layer is split in two passes meeting
+                        # mid-column) and start_at_nearest_point (start_point / first_stitch: off,
+                        # the column starts at its first rail point instead of a hidden entry run)
+                        one = {"end_at_nearest_point": "false"}
+                        if k in op["start_exact"]:
+                            one["start_at_nearest_point"] = "false"
+                        extra.update(_schema_known(schema, "satin_column", one, skipped))
                     extra.update(_override_params(spec, True))
                     if k in hops:            # reader: lib/elements/element.py trim_after
                         extra["trim_after"] = "true"
@@ -1299,7 +1519,15 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                            **({"spread_turns": chk["spread_turns"]} if chk.get("spread_turns") else {}),
                            **({"joins_trimmed": len(chk["joins_trimmed"])} if chk.get("joins_trimmed") else {}),
                            **({"wedges_closed": len(chk["wedges_closed"])} if chk.get("wedges_closed") else {}),
+                           **({"joint_ends_flattened": len(chk["joint_ends_flattened"])}
+                              if chk.get("joint_ends_flattened") else {}),
+                           **({"sew_order_changed": True} if chk.get("sew_order_changed") else {}),
+                           **({"squared_tucked_ends": len(chk["squared_tucked_ends"])}
+                              if chk.get("squared_tucked_ends") else {}),
                            **({"rungs_placed": chk["rungs_placed"]} if "rungs_placed" in chk else {}),
+                           **({"one_pass": {"reversed": len(op["reversed"]), "trims_inside": len(op["trim_after"]),
+                                            "longest_entry_run_mm": round(max(op["hidden_runs"] or [0.0]), 1)}}
+                              if op is not None and not as_fill else {}),
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
@@ -1509,6 +1737,15 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
 @click.option("--auto-params/--no-auto-params", default=True, show_default=True,
               help="Underlay, pull compensation and split satin chosen per "
                    "column (see _lettering_satin_params).")
+@click.option("--one-pass/--no-one-pass", default=True, show_default=True,
+              help="Sew every satin in one pass (as shapes-to-satin): end_at_nearest_point off, each "
+                   "column oriented to finish nearest the next, a trim where a handoff inside a letter "
+                   "would jump (> 3 mm) or cross bare fabric, columns after a trim starting exactly at "
+                   "their start. Letters routed through auto_satin keep its order and direction.")
+@click.option("--corner-wrap/--no-corner-wrap", default=True, show_default=True,
+              help="Sew a narrow stroke round its corners and points as one column "
+                   "(trace/corners.py); --no-corner-wrap keeps every corner a butt join, "
+                   "its overlap trimmed to the tuck.")
 @click.option("--route/--no-route", default=True, show_default=True,
               help="Route letters whose planned order would leave travel "
                    "on bare fabric (an E's arms) with the engine's "
@@ -1517,7 +1754,7 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
 @click.pass_context
 def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                   letter_spacing_pct, width_mm, cx_mm, cy_mm, rotate_deg, merge_joins,
-                  fallback, color, pull_comp_mm, auto_params, route):
+                  fallback, color, pull_comp_mm, auto_params, one_pass, corner_wrap, route):
     """Set TEXT from a TTF as per-stroke satin columns: no rung review.
 
     Each letter is cut at its junctions into strokes, and each stroke gets
@@ -1543,7 +1780,7 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
     font = gc.static_font(font_path, wght)
     letters = gc.plan_text(font, text, height_mm,
                            letter_spacing_pct=letter_spacing_pct,
-                           width_mm=width_mm, merge_joins=merge_joins)
+                           width_mm=width_mm, merge_joins=merge_joins, corner_wrap=corner_wrap)
     schema = load_schema(prefer_version=installed_version(
         ctx.obj.get("binary_override") if ctx.obj else None))
 
@@ -1571,12 +1808,16 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
         top.set(f"{{{INKSCAPE_NS}}}label", text)
         report, last_elems, param_errors = [], [], []
         to_route, groups = [], []
+        skipped: set = set()
+        routed_groups: list[str] = []
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
+        arrival = None                      # where the needle is before this letter (one-pass plan)
         for li, lt in enumerate(letters):
             g = etree.SubElement(top, f"{{{SVG_NS}}}g")
             g.set("id", f"text{n}_l{li}")
             g.set(f"{{{INKSCAPE_NS}}}label", lt.char)
             as_fill = (not lt.ok and fallback == "fill") or not lt.columns
+            routes = False
             made = []
             if as_fill:
                 for k, d in enumerate(gc.fill_ds(lt.contours, tx)):
@@ -1587,24 +1828,47 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                     made.append((p, "auto_fill", {}))
             else:
                 band_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole glyph
+                # A letter auto_satin will route keeps auto_satin's order and direction (it reverses
+                # each satin to follow its route); the rest get the one-pass plan, in sewing order.
+                routes = route and len(lt.columns) >= 2 and gc.exposed_travel_mm(lt) > gc.EXPOSED_TRAVEL_MM
+                op = None
+                if one_pass and not routes:
+                    op = gc.plan_one_pass(lt, arrival=arrival, trim_handoffs=True)
+                    arrival = op["exit"]
+                else:
+                    arrival = None
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"text{n}_l{li}_c{k}")
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
-                    extra = (_lettering_satin_params(c.widths(), pull_comp_mm, band_width_mm=band_w)
+                    extra = (_lettering_satin_params(c.widths(), pull_comp_mm, band_width_mm=band_w,
+                                                     center_below_mm=LETTERING_CENTER_WALK_BELOW_MM)
                              if auto_params else {})
+                    if op is not None:
+                        # readers: lib/elements/satin_column.py end_at_nearest_point (end_point /
+                        # _split_top_layer), start_at_nearest_point (start_point / first_stitch),
+                        # lib/elements/element.py trim_after
+                        one = {"end_at_nearest_point": "false"}
+                        if k in op["start_exact"]:
+                            one["start_at_nearest_point"] = "false"
+                        if k in op["trim_after"]:
+                            one["trim_after"] = "true"
+                        extra.update(_schema_known(schema, "satin_column", one, skipped))
                     made.append((p, "satin_column", extra))
+                if one_pass and routes:
+                    routed_groups.append(g.get("id"))
             for p, st, extra in made:
                 try:
                     _apply_params_to_element(p, st, extra, schema, force=True)
                 except UserError as exc:
                     param_errors.append({"id": p.get("id"), "error": str(exc)})
+            if as_fill:
+                arrival = None
             if made:
                 last_elems.append(made[-1][0])
             ids_here = [p.get("id") for p, st, _ in made if st == "satin_column"]
-            travel = 0.0 if as_fill else gc.exposed_travel_mm(lt)
-            if route and len(ids_here) >= 2 and travel > gc.EXPOSED_TRAVEL_MM:
+            if routes:
                 to_route.append(ids_here)
             groups.append(g.get("id"))
             chk = lt.check or {}
@@ -1644,6 +1908,43 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
         root = tree.getroot()
         before_xml = etree.tostring(root).decode("utf-8")
         sat, ptype = qname("satin_column"), qname("path_type")
+        routed_trims = routed_travel = 0
+        from cli_anything_inkstitch.svg.units import document_scale as _ds
+        uu_routed = gc.PX_PER_MM / ((_ds(root) or (1.0, 1.0))[0])
+        for gid in routed_groups:
+            g = next((e for e in root.iter() if e.get("id") == gid), None)
+            for e in (g.iter(f"{{{SVG_NS}}}path") if g is not None else []):
+                if (e.get(sat) or "").lower() != "true":
+                    continue
+                one = _schema_known(schema, "satin_column", {"end_at_nearest_point": "false"}, skipped)
+                if one:
+                    try:
+                        _apply_params_to_element(e, None, one, schema, force=True)
+                    except UserError as exc:
+                        param_errors.append({"id": e.get("id"), "error": str(exc)})
+            # the route's handoffs, now that its satins end where they are drawn: a travel run under
+            # stitching still to come where the straight line is covered (as auto_satin's own travel),
+            # else a trim
+            for h in (_routed_handoffs(g, uu_routed) if g is not None else []):
+                e = h["after"]
+                if h["hide"] is not None:
+                    (x0, y0), (x1, y1) = h["hide"]
+                    t = etree.Element(f"{{{SVG_NS}}}path")
+                    t.set("id", f"{e.get('id')}_travel")
+                    t.set("d", f"M {x0:.3f},{y0:.3f} L {x1:.3f},{y1:.3f}")
+                    # a stroked, un-dashed path sews as running stitch (lib/elements/stroke.py
+                    # stroke_method, default running_stitch); marked as auto_satin marks its travel
+                    t.set("style", f"fill:none;stroke-width:{0.1 * uu_routed:.3f}")
+                    t.set("stroke", color)
+                    t.set(qname("path_type"), "satin-underpath")
+                    e.addnext(t)
+                    routed_travel += 1
+                    continue
+                try:
+                    _apply_params_to_element(e, None, {"trim_after": "true"}, schema, force=True)
+                    routed_trims += 1
+                except UserError as exc:
+                    param_errors.append({"id": e.get("id"), "error": str(exc)})
         for gid in groups[:-1]:
             g = next((e for e in root.iter() if e.get("id") == gid), None)
             if g is None:
@@ -1663,6 +1964,13 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
             command="tools text-to-satin (trims between letters)",
             patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
     payload["routed_letters"] = len(to_route)
+    if routed_trims:
+        payload["routed_trims"] = routed_trims
+    if routed_travel:
+        payload["routed_travel"] = routed_travel
+    if skipped:
+        payload["params_skipped"] = {"names": sorted(skipped),
+                                     "why": "the loaded schema doesn't know them (run with the engine source mined)"}
     if param_errors:
         payload["param_errors"] = param_errors
     emit(ctx, payload)

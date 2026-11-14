@@ -1177,6 +1177,7 @@ def letter_strokes(contours: list[np.ndarray], cap_mm: float, overlap_feet: bool
             for jd in jout:                            # un-scale positions back to the input mm frame
                 for jr in jd["junctions"]:
                     jr["pos"] = (jr["pos"][0] / k, jr["pos"][1] / k)
+                    jr["radius"] = jr["radius"] / k        # a length too: same frame as pos
                 junctions_out.append({"concavities": [(p[0] / k, p[1] / k) for p in jd["concavities"]],
                                       "junctions": jd["junctions"]})
     return order_strokes(strokes)

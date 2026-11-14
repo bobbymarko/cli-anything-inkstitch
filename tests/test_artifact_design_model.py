@@ -282,6 +282,23 @@ class TestRoutePlan:
         assert by["b0"]["is_jump_before"] is True       # across the bare gap
         assert by["b0"]["exposed_mm"] > 0.5
 
+    def test_one_pass_column_is_shown_as_drawn(self, tmp_path):
+        """end_at_nearest_point off: the engine sews b0 as drawn (bottom -> top here), so the
+        overlay must not flip it to its nearer end; start_at_nearest_point off lands on its start."""
+        svg = tmp_path / "route.svg"
+        svg.write_text(ROUTE_SVG.replace(
+            'id="b0" fill="none" stroke="#000" inkstitch:satin_column="True"',
+            'id="b0" fill="none" stroke="#000" inkstitch:satin_column="True" '
+            'inkstitch:end_at_nearest_point="False" inkstitch:start_at_nearest_point="False"'))
+        proj_path = tmp_path / "route.inkstitch-cli.json"
+        proj, _ = ProjectFile.load_or_create(str(proj_path))
+        proj.svg_path = str(svg)
+        proj.svg_sha256 = sha256_of(svg)
+        proj.save()
+        by = {c["element_id"]: c for c in route_plan(str(proj_path))["columns"]}
+        assert by["b0"]["entry"] == [31.0, 2.0] and by["b0"]["exit"] == [31.0, 12.0]
+        assert by["a1"]["entry"] == [3.0, 12.0]          # untouched columns: nearest-end walk
+
     def test_coordinates_land_in_the_viewbox_userspace(self, route_project):
         plan = route_plan(route_project)
         assert plan["viewBox"] == "0 0 40 30"

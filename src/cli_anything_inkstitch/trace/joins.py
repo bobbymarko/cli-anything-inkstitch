@@ -16,12 +16,19 @@ Here, per shape, after planning:
 * close_wedges: a bare patch at a junction is closed by pushing the nearest column end on along its
   rails, into the neighbour by keep_mm, without leaving the outline.
 
+* flatten_joint_ends: every end that butts into another column then lies flat along that column's
+  edge, keep_mm under it (the joint overlap; pull compensation widens a satin across its stitches but
+  never lengthens its end, so the tuck is what keeps a joint closed).
+* tucked_first: the column whose end tucks under sews before the column it tucks under, so the one
+  on top covers it (a strand running into a point sews last).
+
 Each change is kept only if it leaves no more bare fabric than before (within a small tolerance),
 nothing outside the outline, and no crossed pairs. All geometry is mm, y up, like PlannedLetter.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -33,7 +40,8 @@ def _dbg(*a):
         print("[joins]", *a, file=sys.stderr)
 
 
-KEEP_MM = 0.4            # how far a trimmed or extended end reaches into the column it meets
+KEEP_MM = 0.4            # how far a trimmed or extended end reaches into (under) the column it meets:
+                         # the default joint overlap (shapes-to-satin --joint-overlap-mm, per fabric)
 MAX_DEPTH_MM = 1.0       # overlaps deeper than this are trimmed
 MIN_OVERLAP_MM2 = 0.5
 BARE_TOL_MM2 = 0.15      # a change may leave at most this much more bare fabric
@@ -308,8 +316,12 @@ def _acute_v(a, b) -> bool:
     return ang < V_ACUTE_DEG
 
 
-def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPTH_MM):
-    """See the module docstring. Lists the trims in check["joins_trimmed"]."""
+def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPTH_MM,
+                  fill_acute_v: bool = True, bare_tol_mm2: float = BARE_TOL_MM2):
+    """See the module docstring. Lists the trims in check["joins_trimmed"]. fill_acute_v=False trims
+    an acute inner V too (lettering: the stroke underneath cut to the one on top, keep_mm under it, as
+    EmbroideryStudio removes overlaps) instead of filling it to the point (see _acute_v). bare_tol_mm2:
+    how much more bare fabric a trim may leave (a V's very tip, covered by one leg only)."""
     outline = _outline(planned.contours)
     cols = planned.columns
     if outline is None or len(cols) < 2:
@@ -327,7 +339,7 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
                 x = pa.intersection(pb)
                 if x.area < MIN_OVERLAP_MM2 or _depth(x) <= max_depth_mm:
                     continue
-                if _acute_v(a, b):
+                if fill_acute_v and _acute_v(a, b):
                     # a sharp inner V (an M's middle, a diagonal into a stem at a pinch): fill the
                     # point, don't trim it back to a notch or a seam. See _acute_v.
                     _dbg(planned.char, "acute-V fill", i, j, round(x.area, 2))
@@ -355,7 +367,7 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
                         bare = _bare(outline, trial)
                         ov = _poly(trial[i]).intersection(_poly(trial[j])).area
                         _dbg("  ", k, end, "bare", round(bare, 2), "ov", round(ov, 2))
-                        if bare > base_bare + BARE_TOL_MM2:
+                        if bare > base_bare + bare_tol_mm2:
                             continue
                         if ov >= x.area * 0.8:
                             continue
@@ -370,7 +382,7 @@ def trim_overlaps(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_D
                     bare = _bare(outline, trial)
                     ov = _poly(ta).intersection(_poly(tb)).area
                     _dbg("   mitre bare", round(bare, 2), "ov", round(ov, 2))
-                    if bare <= base_bare + BARE_TOL_MM2 and ov < x.area * 0.8:
+                    if bare <= base_bare + bare_tol_mm2 and ov < x.area * 0.8:
                         score = bare + 0.2 * ov
                         if best is None or score < best[0]:
                             best = (score, (i, j), (ta, tb), round(x.area, 2), round(ov, 2))
@@ -703,7 +715,9 @@ def snap_rails(planned):
 
 
 def tidy_joins(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPTH_MM):
-    """trim_overlaps then close_wedges, on one planned shape."""
+    """On one planned shape: trim_overlaps, close_wedges, then every butting end flat along the edge it
+    meets, keep_mm under it (flatten_joint_ends), sewn before the column it tucks under (tucked_first).
+    keep_mm is the joint overlap: 0 butts the ends exactly on the edge."""
     if not planned.ok or not planned.columns:
         return planned
     # Square near-axis rails first, so the overlap/wedge geometry below works on the exact edges
@@ -718,4 +732,201 @@ def tidy_joins(planned, keep_mm: float = KEEP_MM, max_depth_mm: float = MAX_DEPT
     planned = trim_overlaps(planned, keep_mm, max_depth_mm)       # a widened side may now run deep
     if trimmed and planned.check.get("joins_trimmed") is not trimmed:
         planned.check["joins_trimmed"] = trimmed + planned.check.get("joins_trimmed", [])
+    planned = flatten_joint_ends(planned, keep_mm)                # every butt end flat, keep_mm under
+    planned = tucked_first(planned)                               # ...and sewn before what covers it
+    return planned
+
+
+# ---------------------------------------------------------------- flat joint ends, tucked-first order
+
+FLAT_TOL_MM = 0.1        # an end corner within this of keep_mm deep already lies on the edge
+FLAT_MAX_EXTEND_MM = 2.0 # a rail short of keep_mm runs on along its own line at most this far
+FLAT_DEEPER_MM = (0.0, 0.1, 0.2, 0.3, 0.4)  # tried in turn when keep_mm alone leaves a sliver bare
+
+
+def _host(cols, k, end, skip_acute_v: bool = True):
+    """The one column that column k's `end` butts into (its end middle lies in or on it), or None:
+    no host, several (a crossing), a mitre (the host's own end lies in column k: two ends meeting,
+    neither butts the other's side) or, with skip_acute_v, an acute V (its geometry is filled to
+    the point, see _acute_v: flatten_joint_ends leaves it alone, but it still tucks for sew order)."""
+    from shapely.geometry import Point
+
+    c = cols[k]
+    m = ((c.left[end][0] + c.right[end][0]) / 2, (c.left[end][1] + c.right[end][1]) / 2)
+    hosts = [j for j, o in enumerate(cols) if j != k and _poly(o).buffer(0.05).contains(Point(m))]
+    if len(hosts) != 1:
+        return None
+    j = hosts[0]
+    o = cols[j]
+    if skip_acute_v and _acute_v(c, o):
+        return None
+    if not o.closed:
+        pc = _poly(c)
+        if any(_mid_inside(o, e, pc, 0.0) for e in (0, -1)):
+            return None
+    return j
+
+
+def _flat_end(c, end: int, host_poly, keep_mm: float, ink):
+    """Column c with its `end` lying flat along host_poly's edge, keep_mm under it: each rail is cut
+    where it crosses the edge moved keep_mm in (walking back from the end), or, short of it, run on
+    along its own line to it (never off the ink). The new end pair joins those two points; pairs past
+    the cut are dropped. None when there is nothing to change or no clean cut."""
+    from copy import copy
+
+    import numpy as np
+    from shapely.geometry import LineString, Point
+
+    region = host_poly.buffer(-keep_mm) if keep_mm > 0 else host_poly
+    if region.is_empty:
+        return None
+    L, R = list(c.left), list(c.right)
+    if end == 0:
+        L, R = L[::-1], R[::-1]
+    L, R, orig = _densify(L, R, 0.25)
+    edge = region.boundary
+
+    def depth(p):
+        d = host_poly.exterior.distance(Point(p)) if host_poly.geom_type == "Polygon" \
+            else host_poly.boundary.distance(Point(p))
+        return d if host_poly.contains(Point(p)) else -d
+
+    cuts = []
+    for rail in (L, R):
+        if abs(depth(rail[-1]) - keep_mm) <= FLAT_TOL_MM:
+            cuts.append((len(rail) - 1, tuple(rail[-1])))
+            continue
+        if region.contains(Point(rail[-1])):          # too deep: back along the rail to the edge
+            hit = None
+            for i in range(len(rail) - 1, 0, -1):
+                if not region.contains(Point(rail[i - 1])):
+                    x = LineString([rail[i - 1], rail[i]]).intersection(edge)
+                    pts = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "Point" and not g.is_empty]
+                    if pts:
+                        q = min(pts, key=lambda g: g.distance(Point(rail[i - 1])))
+                        hit = (i - 1, (float(q.x), float(q.y)))
+                    break
+            if hit is None:
+                return None
+            cuts.append(hit)
+        else:                                         # short of it: on along the rail's own line
+            t = _tangent(rail, -1)
+            if t is None:
+                return None
+            p0 = np.asarray(rail[-1], float)
+            ray = LineString([tuple(p0), tuple(p0 + t * FLAT_MAX_EXTEND_MM)])
+            x = ray.intersection(edge)
+            pts = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "Point" and not g.is_empty]
+            q = min(pts, key=lambda g: g.distance(Point(p0))) if pts else None
+            if q is None or not ink.contains(q):
+                cuts.append((len(rail) - 1, tuple(rail[-1])))   # can't reach it on the ink: keep
+            else:
+                cuts.append((len(rail) - 1, (float(q.x), float(q.y))))
+    (kl, pl), (kr, pr) = cuts
+    if math.dist(pl, L[-1]) < 1e-6 and math.dist(pr, R[-1]) < 1e-6:
+        return None
+    kk = min(kl, kr)
+    keep = [i for i in range(min(kk + 1, len(L) - 1)) if orig[i]]
+    if len(keep) < 1:
+        return None
+    L2, R2 = [L[i] for i in keep] + [pl], [R[i] for i in keep] + [pr]
+    if end == 0:
+        L2, R2 = L2[::-1], R2[::-1]
+    out = copy(c)
+    out.left, out.right = L2, R2
+    return out
+
+
+def flatten_joint_ends(planned, keep_mm: float = KEEP_MM):
+    """Every column end that butts into another column of the shape lies flat along that column's
+    edge and runs keep_mm under it: a clean shared boundary, the overlap pull can't open (a sew-out
+    on stretch fabric showed shapes drifting apart), no notch or stepped corner. Acute V's (filled
+    to the point) and mitres (two ends meeting) are left alone. Each change is kept only if it adds
+    no crossed pair, no fan, nothing off the ink and no more than BARE_TOL_MM2 bare.
+    check["joint_ends_flattened"]."""
+    outline = _outline(planned.contours)
+    cols = planned.columns
+    if outline is None or len(cols) < 2:
+        return planned
+    ink = outline.buffer(0.1)
+    done = []
+    for k in range(len(cols)):
+        for end in (0, -1):
+            c = cols[k]
+            if c.closed or len(c.left) < 2:
+                continue
+            j = _host(cols, k, end)
+            if j is None:
+                continue
+            base = _bare(outline, cols)
+            # A straight end can't follow an edge that bends across its span: where keep_mm leaves
+            # a sliver bare, run the end a little further under (never pull it back short).
+            for extra in FLAT_DEEPER_MM:
+                t = _flat_end(c, end, _poly(cols[j]), keep_mm + extra, ink)
+                if t is None or len(t.left) < 2:
+                    break
+                if _crossed(t.left, t.right) > _crossed(c.left, c.right) or _fans(t) > _fans(c):
+                    _dbg(planned.char, "flat", k, end, "crossed/fan")
+                    break
+                if _poly(t).difference(ink).area - _poly(c).difference(ink).area > 0.05:
+                    _dbg(planned.char, "flat", k, end, "off the ink")
+                    break
+                trial = list(cols)
+                trial[k] = t
+                if _bare(outline, trial) > base + BARE_TOL_MM2:
+                    _dbg(planned.char, "flat", k, end, "more bare at", keep_mm + extra)
+                    continue
+                cols[k] = t
+                done.append({"column": k, "end": end, "under": j,
+                             **({"deeper_mm": extra} if extra else {})})
+                break
+    if done:
+        planned.check["joint_ends_flattened"] = done
+    return planned
+
+
+def tucked_first(planned):
+    """Reorder a shape's columns so each one whose end butts into another (runs under it) sews before
+    it: the column sewn on top covers the tucked end, and a strand running into a point always sews
+    last. Otherwise the planned order is kept (a stable sort; a cycle keeps its planned order).
+    Column indices in check["joins_trimmed"/"wedges_closed"/"joint_ends_flattened"/"acute_v_fills"]
+    are remapped. check["sew_order_changed"] = the new order as old indices, when it changed."""
+    cols = planned.columns
+    n = len(cols)
+    if n < 2:
+        return planned
+    before: dict[int, set[int]] = {j: set() for j in range(n)}
+    for k in range(n):
+        if cols[k].closed or len(cols[k].left) < 2:
+            continue
+        for end in (0, -1):
+            j = _host(cols, k, end, skip_acute_v=False)
+            if j is not None:
+                before[j].add(k)
+    order, placed, busy = [], set(), set()
+
+    def place(j):
+        if j in placed or j in busy:
+            return
+        busy.add(j)
+        for i in sorted(before[j]):
+            place(i)
+        busy.discard(j)
+        placed.add(j)
+        order.append(j)
+
+    for j in range(n):
+        place(j)
+    if order == list(range(n)):
+        return planned
+    new_of = {old: new for new, old in enumerate(order)}
+    planned.columns = [cols[i] for i in order]
+    for key in ("joins_trimmed", "wedges_closed", "joint_ends_flattened"):
+        for rec in planned.check.get(key, []):
+            for f in ("column", "with", "under"):
+                if f in rec and rec[f] in new_of:
+                    rec[f] = new_of[rec[f]]
+    if planned.check.get("acute_v_fills"):
+        planned.check["acute_v_fills"] = [[new_of[a], new_of[b]] for a, b in planned.check["acute_v_fills"]]
+    planned.check["sew_order_changed"] = order
     return planned
