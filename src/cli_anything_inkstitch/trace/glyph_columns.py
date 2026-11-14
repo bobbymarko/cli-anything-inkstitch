@@ -163,10 +163,13 @@ def _from_letter(lt, ok: bool, check: dict, char: str | None = None) -> PlannedL
                          ok, check)
 
 
+END_STYLES = ("ease", "path", "engine")
+
+
 def plan_text(font_path: str | Path, text: str, height_mm: float, *,
               letter_spacing_pct: float | None = None,
               width_mm: float | None = None,
-              merge_joins: bool = False) -> list[PlannedLetter]:
+              merge_joins: bool = False, end_style: str | None = None) -> list[PlannedLetter]:
     """Plan `text` (one line) as satin columns, centred on (0, 0), mm, y up.
 
     height_mm is the font's capital height (the sCapHeight in its OS/2
@@ -231,7 +234,7 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
         box = (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy)
         shells.append(col.Letter(ch, [], moved, box))
     if merge_joins:
-        return _plan_merged(shells, ac)
+        return _style_text_ends(_plan_merged(shells, ac), end_style)
     out = []
     for sh in shells:
         try:
@@ -247,7 +250,17 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
                                      False, {}, f"no column plan ({type(exc).__name__}: {str(exc)[:80]})"))
             continue
         out.append(_from_letter(lt, bool(check["ok"]), check))
-    return out
+    return _style_text_ends(out, end_style)
+
+
+def _style_text_ends(letters: list[PlannedLetter], end_style: str | None) -> list[PlannedLetter]:
+    """Lettering's free slanted ends treated as `end_style` (ease_letter_ends); None (the default)
+    leaves them as planned, today's lettering. Ends that tuck into another stroke keep lettering's own
+    tuck (planner/columns.py _tuck_butting_ends), so only free ends are touched."""
+    if end_style in (None, "engine"):
+        return letters
+    return [ease_letter_ends(lt, end_style=end_style, tucked=False) if lt.ok and lt.columns else lt
+            for lt in letters]
 
 
 def _plan_merged(letters, ac) -> list[PlannedLetter]:
@@ -277,7 +290,8 @@ def _plan_merged(letters, ac) -> list[PlannedLetter]:
 
 def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
                 overrides: dict | None = None, spread_turns_on: bool = True,
-                tidy_joins_on: bool = True, joint_overlap_mm: float | None = None) -> list[PlannedLetter]:
+                tidy_joins_on: bool = True, joint_overlap_mm: float | None = None,
+                end_style: str = "ease") -> list[PlannedLetter]:
     """Plan filled artwork shapes (a logo's knots, crown, heart, letters drawn as
     outlines) as satin columns, one shape at a time: the planner's
     `art_columns.plan_shape`, the same planner that drove an all-satin client
@@ -351,7 +365,7 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
             # After tidy_joins, so the ease works on the final end cuts (a junction end may have been
             # trimmed/snapped) and nothing undoes it. A hand-placed-rungs shape is left as placed.
             planned = ease_letter_ends(planned, keep_mm=None if not tidy_joins_on else
-                                       (KEEP_MM if keep is None else float(keep)))
+                                       (KEEP_MM if keep is None else float(keep)), end_style=end_style)
         out.append(planned)
     return out
 
@@ -901,7 +915,7 @@ TUCK_RECAST_MM = 3.0      # a tucked end's rungs are re-cast over at least this 
 TUCK_STEP_MM = 0.5        # ...every this far, all at one angle
 
 
-def straight_tucked_end(pairs, host, outline, others=None, keep_mm: float = 0.4,
+def straight_tucked_end(pairs, host=None, outline=None, others=None, keep_mm: float = 0.4,
                         step_mm: float = TUCK_STEP_MM):
     """Re-pair the near end (index 0) of a column whose end tucks under another column (`host`, a
     polygon), so its stitches keep the band's own angle right to the end.
@@ -917,8 +931,10 @@ def straight_tucked_end(pairs, host, outline, others=None, keep_mm: float = 0.4,
       the planned end cut stopped short of it), up to the host's edge moved keep_mm in (the tuck),
       never into any other column (`others`).
     Each rung is that region's extent along the rung line, so the band's end follows the host's edge
-    even where it bends, and ends with the last rung that still has width. Returns new pairs (end
-    first), or None when the end is already square or the column is too short."""
+    even where it bends, and ends with the last rung that still has width. With no host (a free end,
+    --end-style path) the region is the column's own area: the stitches keep the path's angle and
+    shorten into the slanted cut (a real point still converges). Returns new pairs (end first), or
+    None when the end is already square or the column is too short."""
     from shapely.geometry import LineString, Point, Polygon
     from shapely.ops import unary_union
 
@@ -963,6 +979,8 @@ def straight_tucked_end(pairs, host, outline, others=None, keep_mm: float = 0.4,
     pt = lambda s_, o_: (q0.x + tx * s_ + nx * o_, q0.y + ty * s_ + ny * o_)
     strip = Polygon([pt(s0 - step_mm, lo - 0.05), pt(far, lo - 0.05), pt(far, hi + 0.05), pt(s0 - step_mm, hi + 0.05)])
     own = Polygon([p[0] for p in P] + [p[1] for p in P][::-1]).buffer(0)
+    if host is None:
+        return _cast_rungs(own, keep, s0, step_mm, far, lo, hi, pt, side, left_is_hi, body_w)
     ink = strip.intersection(outline.buffer(0.02))
     if others is not None and not others.is_empty:
         ink = ink.difference(others)
@@ -980,6 +998,14 @@ def straight_tucked_end(pairs, host, outline, others=None, keep_mm: float = 0.4,
         edge_band = host.difference(host.buffer(-keep_mm))
         region = region.union(region.buffer(keep_mm).intersection(edge_band).intersection(ink))
     region = region.union(own.difference(host.buffer(-keep_mm) if keep_mm > 0 else host)).buffer(0)
+    return _cast_rungs(region, keep, s0, step_mm, far, lo, hi, pt, side, left_is_hi, body_w)
+
+
+def _cast_rungs(region, keep, s0, step_mm, far, lo, hi, pt, side, left_is_hi, body_w):
+    """straight_tucked_end's rungs: one every step_mm from s0, at one angle, each the region's extent
+    along its line (kept planned pairs first). Returns pairs end first, or None."""
+    from shapely.geometry import LineString, Point
+
     new = []
     s = s0
     reach = abs(hi - lo) + 4 * body_w + 5
@@ -1000,6 +1026,22 @@ def straight_tucked_end(pairs, host, outline, others=None, keep_mm: float = 0.4,
         s += step_mm
     if len(new) < 2:
         return None
+    # on to the very end in 0.1 mm steps, so the last bit of a slanted cut (a free end shows it) is
+    # covered too, not cut off at the last full step
+    s_tail = s - step_mm + 0.1
+    while s_tail < s + step_mm:
+        line = LineString([pt(s_tail, (lo + hi) / 2 - reach), pt(s_tail, (lo + hi) / 2 + reach)])
+        x = line.intersection(region)
+        segs = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "LineString" and g.length > 0.05]
+        if not segs:
+            break
+        g = min(segs, key=lambda g: g.distance(Point(pt(s_tail, (lo + hi) / 2))))
+        a_, b_ = g.coords[0], g.coords[-1]
+        pair = (a_, b_) if (side(a_) > side(b_)) == left_is_hi else (b_, a_)
+        last = ((float(pair[0][0]), float(pair[0][1])), (float(pair[1][0]), float(pair[1][1])))
+        if s_tail > s - step_mm + 0.05:
+            new.append(last)
+        s_tail += 0.1
     out = keep + new
     return out[::-1]                                   # end first again
 
@@ -1024,7 +1066,8 @@ def _head_turn_tilt(pairs, within_mm: float = 3.0) -> float:
 
 
 def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM,
-                     keep_mm: float | None = None) -> PlannedLetter:
+                     keep_mm: float | None = None, end_style: str = "ease",
+                     tucked: bool = True) -> PlannedLetter:
     """Ease the rung angle into every open column's free slanted or pointed ends (ease_end), one end
     at a time. An end that tucks under another column (joins._host) is not eased: its rungs stay at
     the band's own angle right to the end, and its end region runs to the other column's edge,
@@ -1037,9 +1080,11 @@ def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM,
     from cli_anything_inkstitch.trace import column_checks as cc
     from cli_anything_inkstitch.trace.joins import KEEP_MM, _bare, _host, _outline, _poly
 
+    if end_style not in END_STYLES:
+        raise ValueError(f"end_style {end_style!r}: one of {', '.join(END_STYLES)}")
     keep_mm = KEEP_MM if keep_mm is None else keep_mm
     outline = _outline(planned.contours)
-    done, squared, kept_ease = [], [], []
+    done, squared, kept_ease, pathed = [], [], [], []
     # which ends tuck under which column, decided on the columns as they are now: a re-cast end
     # grows to its host's edge, and must not make a neighbour's free end look tucked into it
     hosts = {(k, end): _host(planned.columns, k, end, skip_acute_v=False)
@@ -1052,6 +1097,8 @@ def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM,
             pairs = list(zip(c.left, c.right))
             work = pairs if end == 0 else pairs[::-1]       # the end being eased is now index 0
             j = hosts.get((k, end))
+            if j is not None and not tucked:
+                continue                                # lettering: its own tuck stays
             if j is not None:
                 if outline is None:
                     continue
@@ -1074,6 +1121,17 @@ def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM,
                     # end as before (ease_end), so its cut stays covered
                     kept_ease.append([k, end])
                 # (st None: already square or too short; ease_end below leaves a square end alone)
+            # a free end: as end_style says -- "ease" (#11: turn the rungs into the slanted cut),
+            # "path" (keep the path's angle, shorten into the cut), "engine" (leave the planned pairs)
+            if end_style == "engine" and j is None:
+                continue
+            if end_style == "path" and j is None:
+                st = straight_tucked_end(work)
+                if st is not None and _crossed(st) <= _crossed(work):
+                    st = st if end == 0 else st[::-1]
+                    c.left, c.right = [p[0] for p in st], [p[1] for p in st]
+                    pathed.append([k, end])
+                continue
             eased_head = ease_end(work, ease_mm)
             if eased_head is None:
                 continue
@@ -1091,6 +1149,8 @@ def ease_letter_ends(planned: PlannedLetter, ease_mm: float = END_EASE_MM,
         planned.check["squared_tucked_ends"] = squared
     if kept_ease:
         planned.check["tucked_ends_eased"] = kept_ease
+    if pathed:
+        planned.check["path_ends"] = pathed
     return planned
 
 

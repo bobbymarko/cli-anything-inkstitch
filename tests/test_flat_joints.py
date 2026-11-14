@@ -264,3 +264,29 @@ class TestTuckedEndsAreSquareNotEased:
         free = _slanted_band()
         lt2 = ease_letter_ends(PlannedLetter("f", [free], [free.left + free.right[::-1]], True, {}))
         assert lt2.check.get("eased_ends") == [0]
+
+
+class TestEndStyle:
+    """--end-style for free slanted ends: ease (#11), path (keep the stroke's angle and shorten into
+    the cut), engine (leave the planned pairs)."""
+
+    def test_path_keeps_the_angle_ease_turns_it_engine_leaves_it(self):
+        from cli_anything_inkstitch.trace.glyph_columns import ease_letter_ends
+        res = {}
+        for style in ("ease", "path", "engine"):
+            band = _slanted_band()
+            # square the planned pairs first, so only the end treatment differs
+            band.right = [(x, 4.0) for x, _ in band.left[:-4]] + list(band.right[-4:])
+            lt = ease_letter_ends(PlannedLetter("t", [band], [band.left + band.right[::-1]], True, {}),
+                                  end_style=style)
+            near = [p for p in zip(lt.columns[0].left, lt.columns[0].right) if min(p[0][0], p[1][0]) > 21.0]
+            res[style] = max(abs(_angle(p) - 90) for p in near)
+        assert res["path"] < 1.0                 # square to the stroke right into the cut
+        assert res["ease"] > 10.0                # turned toward the 45 degree cut
+        assert res["engine"] > res["path"]       # the planned end pairs, as they were
+
+    def test_unknown_style_is_refused(self):
+        from cli_anything_inkstitch.trace.glyph_columns import ease_letter_ends
+        band = _slanted_band()
+        with pytest.raises(ValueError):
+            ease_letter_ends(PlannedLetter("t", [band], [band.left + band.right[::-1]], True, {}), end_style="x")
