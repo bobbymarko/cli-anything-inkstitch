@@ -203,10 +203,24 @@ def _routed_handoffs(group, uu_per_mm: float) -> list:
         if (e.get(sat) or "").lower() == "true":
             if len(subs) < 2:
                 continue
-            L, R = flatten_path(subs[0]), flatten_path(subs[1])
+            flat = [flatten_path(x) for x in subs]
+            if len(flat) > 2:
+                # with rungs, the rails are not necessarily the first two subpaths (auto_satin's
+                # output can list a rung first): the engine takes the subpaths crossing more than two
+                # others, falling back to the two longest (lib/elements/satin_column.py
+                # rail_indices); rail 0, the lower index, sets the sewing direction
+                length = lambda f: sum(math.dist(p, q) for p, q in zip(f, f[1:]))
+                i0, i1 = sorted(sorted(range(len(flat)), key=lambda i: -length(flat[i]))[:2])
+                L, R = flat[i0], flat[i1]
+            else:
+                L, R = flat[0], flat[1]
             if len(L) < 2 or len(R) < 2:
                 continue
-            r_end = R[-1] if math.dist(R[-1], L[-1]) <= math.dist(R[0], L[-1]) else R[0]
+            # rail 1 runs the same way as rail 0 or is reversed to (satin_column.py
+            # _get_rails_to_reverse): align it so its end is the one nearer rail 0's end
+            if math.dist(R[0], L[-1]) < math.dist(R[-1], L[-1]):
+                R = list(R)[::-1]
+            r_end = R[-1]
             exact = (e.get(start_near) or "").lower() in ("false", "0")
             poly = Polygon(list(L) + list(R)[::-1]).buffer(0)
             items.append({"e": e, "exits": [L[-1], r_end],

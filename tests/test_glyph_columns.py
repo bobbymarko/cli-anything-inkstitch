@@ -678,3 +678,18 @@ class TestRoutedHandoffs:
             '<path id="a" stroke="#000" inkstitch:satin_column="True" d="M0,0 L10,0 M0,2 L10,2"/>'
             '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M12.0,2 L12.0,-10 M14.0,2 L14.0,-10"/>')
         assert self._fixes(far) == []                      # 2.0 mm: stitched through
+
+
+class TestRoutedHandoffRails:
+    def test_rails_are_found_like_the_engine_when_a_rung_comes_first(self):
+        """auto_satin output can list a rung before the rails; the engine takes the longest subpaths
+        as rails (satin_column.py rail_indices). Here a's rails run x 0 -> 10, so it ends at x = 10,
+        right beside b: no handoff, although its first subpath (a rung) ends at x = 1."""
+        from cli_anything_inkstitch.commands.tools import _routed_handoffs
+        g = etree.fromstring(
+            '<g xmlns="http://www.w3.org/2000/svg" xmlns:inkstitch="http://inkstitch.org/namespace">'
+            '<path id="a" stroke="#000" inkstitch:satin_column="True" '
+            'd="M1,-0.5 L1,2.5 M0,0 L10,0 M0,2 L10,2 M5,-0.5 L5,2.5 M9,-0.5 L9,2.5"/>'
+            '<path id="b" stroke="#000" inkstitch:satin_column="True" d="M10.5,0 L10.5,10 M12.5,0 L12.5,10"/>'
+            '</g>')
+        assert _routed_handoffs(g, 1.0) == []
