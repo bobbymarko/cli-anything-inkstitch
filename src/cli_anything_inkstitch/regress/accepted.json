@@ -1,0 +1,8 @@
+{
+ "accepted": [
+  {"case": "serif-name-25", "metric": "trims", "max": 11,
+   "reason": "one-pass exposes real gaps; trims intended (2.8-3.8 mm gaps to the next letter part that split satins used to hide; #18/#23)"},
+  {"case": "pacifico-name-25", "metric": "trims", "max": 9,
+   "reason": "one-pass exposes real gaps; trims intended (2.8-3.8 mm gaps to the next letter part that split satins used to hide; #18/#23)"}
+ ]
+}
