@@ -407,7 +407,14 @@ _POLYLINE_RE_TOKEN = None    # lazy-compiled in simplify_satin_d
 
 
 def simplify_satin_d(d: str, tolerance: float = 0.5):
-    """RDP-simplify a satin element's RAILS in place; rungs pass untouched.
+    """Curve-fit a satin element's RAILS in place; rungs pass untouched.
+
+    Rails are refit as cubic beziers within ``tolerance`` (document units;
+    callers pass svg/curvefit.py FIT_TOL_MM converted) — not RDP polylines,
+    which kept dozens of handle-less nodes on every curve. The engine reads
+    bezier rails by flattening them (lib/elements/element.py flatten,
+    cspsubdiv 0.1) and pairs them through the rung subpaths, so the stitch
+    plan moves by at most the fit tolerance.
 
     Engine-emitted satins (fill_to_satin, auto_satin) sample their rails
     from whatever density the input had — a pre-flattened source yields
@@ -420,7 +427,11 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
       polylines (M/L) — bezier rails are user-authored geometry and pass
       through byte-identical;
     * rung subpaths are never modified;
-    * endpoints are preserved exactly (RDP keeps them by construction), so
+    * every rung must still cross each rail exactly as often as before
+      (the engine's rail_indices / rung pairing are intersection-based,
+      lib/elements/satin_column.py rail_indices) — otherwise the original
+      d is kept;
+    * endpoints are preserved exactly (the fit keeps them by construction), so
       closed rings stay exactly closed and rung↔rail intersections at the
       ends survive;
     * consecutive duplicate points are dropped first (the engine repeats a
@@ -436,6 +447,7 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
     nothing was simplifiable.
     """
     import re
+    from cli_anything_inkstitch.svg.curvefit import fit_polyline_d
     global _POLYLINE_RE_TOKEN
     if _POLYLINE_RE_TOKEN is None:
         _POLYLINE_RE_TOKEN = re.compile(
@@ -478,6 +490,19 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
             pts.append((sx, sy))
         return pts, closed
 
+    # a rung only overhangs its rails by a hair on a narrow column; when the
+    # fit slips off a rung end, refit tighter before giving up
+    for tol in (tolerance, tolerance / 2, tolerance / 4, tolerance / 8):
+        new_d, before, after, ok = _fit_rails(subs, tol, parse_polyline,
+                                              fit_polyline_d)
+        if after >= before:
+            return d, before, before
+        if ok:
+            return new_d, before, after
+    return d, before, before
+
+
+def _fit_rails(subs, tolerance, parse_polyline, fit_polyline_d):
     before = after = 0
     out = []
     for idx, sub in enumerate(subs):
@@ -495,13 +520,42 @@ def simplify_satin_d(d: str, tolerance: float = 0.5):
         for p in pts[1:]:
             if math.dist(p, deduped[-1]) > 1e-6:
                 deduped.append(p)
-        simplified = simplify_polyline(deduped, tolerance=tolerance)
+        closed = len(deduped) > 3 and math.dist(deduped[0], deduped[-1]) <= 1e-6
+        fitted, nodes = fit_polyline_d(deduped, tolerance, closed=closed)
         before += len(pts)
-        after += len(simplified)
-        out.append("M" + " ".join(f"{x:.3f},{y:.3f}" for x, y in simplified))
+        after += nodes
+        out.append(fitted)
     if after >= before:
-        return d, before, before
-    return " ".join(out), before, after
+        return None, before, before, False
+    return " ".join(out), before, after, _rung_crossings_kept(subs, out)
+
+
+def _rung_crossings_kept(old_subs, new_subs) -> bool:
+    """Each rung crosses each rail the same number of times before and after.
+
+    The engine tells rails from rungs and pairs them purely by
+    intersections (inkstitch lib/elements/satin_column.py rail_indices,
+    which counts LineString.intersects over the flattened subpaths); a fit
+    that nudged a rail off a rung end would silently re-role the subpaths.
+    """
+    from cli_anything_inkstitch.artifact.gate import flatten_path, segments_intersect
+
+    def crossings(rail, rung) -> int:
+        n = 0
+        for i in range(len(rung) - 1):
+            for j in range(len(rail) - 1):
+                if segments_intersect(rung[i], rung[i + 1], rail[j], rail[j + 1]):
+                    n += 1
+        return n
+
+    rungs = [flatten_path(r) for r in old_subs[2:]]
+    for k in (0, 1):
+        old_rail = flatten_path(old_subs[k], 24)
+        new_rail = flatten_path(new_subs[k], 24)
+        for rung in rungs:
+            if crossings(old_rail, rung) != crossings(new_rail, rung):
+                return False
+    return True
 
 
 def remove_folds(pts, max_span: int = 60, max_rounds: int = 20):

@@ -528,7 +528,8 @@ attempt before it failed review; this sequence did not.
    multiplies every downstream node count — the engine samples its rails
    from whatever you feed it, and editing dense rails is miserable. Keep
    source curves intact through coordinate transforms (`transform_d`), and
-   RDP-simplify engine-emitted rails before storing them.
+   curve-fit engine-emitted rails back to beziers before storing them
+   (`svg/curvefit.py`; `transform_d` now keeps s/q/t/a curves too).
 6. **Verify with the DST, not the render.** Two shipped-then-caught bugs
    were invisible in every preview but obvious in the decoded machine
    file: a duplicated element block (4 color changes instead of 2) and
