@@ -68,18 +68,27 @@ def run(ctx, results_path, extra, quick, only, no_public, no_sheets, keep_work, 
 @click.option("--out", "out_dir", type=click.Path(file_okay=False), default="regress-compare",
               show_default=True, help="Directory for the side-by-side image of each changed case.")
 @click.option("--no-images", is_flag=True)
+@click.option("--accepted", "accepted_files", type=click.Path(exists=True, dir_okay=False), multiple=True,
+              help="More accepted changes (private cases keep theirs beside their case files); the repo's "
+                   "regress/accepted.json is always read.")
 @click.option("--json", "as_json", is_flag=True, help="Print the comparison as JSON.")
 @click.pass_context
-def compare_cmd(ctx, base, new, out_dir, no_images, as_json):
+def compare_cmd(ctx, base, new, out_dir, no_images, accepted_files, as_json):
     """Compare two results files; exit 1 on a regression.
 
     Regressions: any multi-pass column increase; a new untrimmed move over 3 mm; longest
     stitch over 8 mm (when worse than the baseline); trims up by more than max(2, 10%); a
     case that now fails. A stitch count moving more than 5% is a warning. Thresholds are
-    constants at the top of regress/compare.py.
+    constants at the top of regress/compare.py. A regression listed as an accepted change
+    (regress/accepted.json, plus any --accepted file: {case, metric, reason, max?}) is reported
+    as accepted and does not fail the compare.
     """
     from cli_anything_inkstitch.regress import compare as K
-    res = K.compare(K.load(base), K.load(new), out_dir, images=not no_images)
+    try:
+        accepted = K.load_accepted(accepted_files)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    res = K.compare(K.load(base), K.load(new), out_dir, images=not no_images, accepted=accepted)
     if as_json or (ctx.obj or {}).get("json"):
         click.echo(json.dumps(res, indent=1))
     else:

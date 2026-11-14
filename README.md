@@ -103,6 +103,11 @@ cli-anything-inkstitch regress compare /path/to/base.json /path/to/new.json --ou
   max(2, 10%), or a case that now fails. A stitch count moving more than 5% is a warning. The
   thresholds are named constants at the top of
   [`regress/compare.py`](src/cli_anything_inkstitch/regress/compare.py).
+- A regression the owner has agreed to is listed as an accepted change: `{case, metric, reason, max?}`
+  in [`regress/accepted.json`](src/cli_anything_inkstitch/regress/accepted.json) for public cases,
+  and in a file beside the private case files, passed with `regress compare --accepted FILE`. The
+  compare reports it as `accepted` with its reason and does not fail on it while the value stays at or
+  under `max`. An entry that no longer matches anything is listed as stale.
 - To measure a PR branch without checking it out, point the suite at its source:
   `python tools/regress_with_src.py /path/to/branch/src --label branch@rev -- regress run --results new.json`
   (that checkout's planner sews the cases; this one supplies the suite and the engine gate; the

@@ -218,3 +218,53 @@ class TestRealRun:
         assert r["satin_columns"] >= 2 and r["stitches"] > 100
         assert (tmp_path / r["sheet"]).exists()
         assert doc["meta"]["package_path"].endswith("cli_anything_inkstitch")
+
+
+class TestAccepted:
+    """Accepted changes: a regression the owner agreed to (case + metric + reason, optional max) is
+    reported as accepted and does not fail the compare; anything past max, or on another metric,
+    still does."""
+
+    def _files(self, tmp_path, entries):
+        p = tmp_path / "accepted.json"
+        p.write_text(json.dumps({"accepted": entries}))
+        return p
+
+    def test_accepted_trim_rise_passes_and_is_reported(self, tmp_path):
+        base = _write_results(tmp_path, "base", {"name": _ok(trims=6)})
+        new = _write_results(tmp_path, "new", {"name": _ok(trims=11)})
+        acc = self._files(tmp_path, [{"case": "name", "metric": "trims", "max": 11, "reason": "trims intended"}])
+        res = CliRunner().invoke(root, ["regress", "compare", str(base), str(new), "--no-images",
+                                        "--accepted", str(acc)])
+        assert res.exit_code == 0, res.output
+        assert "accepted    name: trims 6 -> 11" in res.output and "trims intended" in res.output
+        assert "1 accepted" in res.output and "PASS" in res.output
+
+    def test_past_max_or_another_metric_still_fails(self, tmp_path):
+        acc = [{"case": "name", "metric": "trims", "max": 11, "reason": "r", "_file": "x"}]
+        base = K.load(_write_results(tmp_path, "base", {"name": _ok(trims=6)}))
+        over = K.load(_write_results(tmp_path, "over", {"name": _ok(trims=12)}))
+        assert not K.compare(base, over, None, images=False, accepted=[dict(a) for a in acc])["ok"]
+        other = K.load(_write_results(tmp_path, "other", {"name": _ok(trims=11, untrimmed_moves=1,
+                                                                     untrimmed_mm=[4.0])}))
+        res = K.compare(base, other, None, images=False, accepted=[dict(a) for a in acc])
+        assert not res["ok"] and res["rows"][0]["regressions"][0].startswith("untrimmed moves")
+
+    def test_unused_entries_are_flagged(self, tmp_path):
+        base = K.load(_write_results(tmp_path, "base", {"name": _ok()}))
+        res = K.compare(base, base, None, images=False,
+                        accepted=[{"case": "name", "metric": "trims", "reason": "r", "_file": "f"}])
+        assert res["ok"] and res["unused_accepted"] == ["name trims (f)"]
+        assert "matched nothing" in K.format_table(res)
+
+    def test_bad_entries_are_refused(self, tmp_path):
+        with pytest.raises(ValueError):
+            K.load_accepted([self._files(tmp_path, [{"case": "x", "metric": "stitches", "reason": "r"}])])
+        with pytest.raises(ValueError):
+            K.load_accepted([self._files(tmp_path, [{"case": "x", "metric": "trims"}])])
+
+    def test_repo_file_names_real_public_cases(self):
+        ids = {c.id for c in C.load_cases([])}
+        entries = K.load_accepted()
+        assert entries and all(e["reason"] for e in entries)
+        assert {e["case"] for e in entries} <= ids
