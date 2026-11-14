@@ -4,6 +4,7 @@
   corner to the outside one (about 1.4 x the width); a wide one keeps the butt join. The threshold is
   a named constant compared with that corner stitch, kept under the split-satin length.
 * A glyph's plan doesn't depend on where it sits on the line.
+* Small lettering gets a centre walk under columns narrower than 2 mm.
 """
 
 from __future__ import annotations
@@ -93,3 +94,16 @@ class TestLettering:
                            for p, q in zip(cx.left + cx.right, cy.left + cy.right)) < 1e-6
             for k in ("sewable_bare_pct", "overlap_mm2", "outside_pct"):
                 assert x.check[k] == y.check[k]
+
+
+class TestSmallLetteringUnderlay:
+    def test_centre_walk_under_2mm_for_lettering(self):
+        from cli_anything_inkstitch.commands.tools import (LETTERING_CENTER_WALK_BELOW_MM,
+                                                           _lettering_satin_params)
+        w = [1.8] * 5
+        plain = _lettering_satin_params(w, 0.2)
+        small = _lettering_satin_params(w, 0.2, center_below_mm=LETTERING_CENTER_WALK_BELOW_MM)
+        assert plain.get("contour_underlay") == "true" and "center_walk_underlay" not in plain
+        assert small.get("center_walk_underlay") == "true" and "contour_underlay" not in small
+        wide = _lettering_satin_params([2.6] * 5, 0.2, center_below_mm=LETTERING_CENTER_WALK_BELOW_MM)
+        assert wide.get("contour_underlay") == "true"

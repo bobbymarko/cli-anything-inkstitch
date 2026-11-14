@@ -999,13 +999,24 @@ def shape_band_width_mm(columns) -> float | None:
     return statistics.median(meds) if meds else None
 
 
+# Small lettering: a column narrower than this gets a centre walk under it, not an edge walk, whatever
+# the fabric preset says. Measured on EmbroideryStudio's own Avenir Black lettering at 7.6 mm caps
+# (strokes about 1.7 mm, sewn about 2.0 mm wide): one centre run under every stroke. Two edge runs
+# 0.4 mm in from the edges of a 1.7 mm column lie under the satin's needle holes and can show
+# through; at 13 mm caps (2.6 mm strokes) EmbroideryStudio edge-runs, as the preset does.
+LETTERING_CENTER_WALK_BELOW_MM = 2.0
+
+
 def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None = None,
                             fabric: str = "standard", band_width_mm: float | None = None,
-                            suppress_short_stitch: bool = False) -> dict:
+                            suppress_short_stitch: bool = False,
+                            center_below_mm: float | None = None) -> dict:
     """Satin params for one planned column, from its median width and the fabric preset.
 
-    Underlay by width (FABRICS): a centre walk below center_below_mm, an edge
-    walk (contour) above it, edge walk plus zigzag from zigzag_from_mm. The
+    Underlay by width (FABRICS): a centre walk below center_below_mm (or the
+    caller's center_below_mm, if larger: text-to-satin's small-lettering rule,
+    LETTERING_CENTER_WALK_BELOW_MM), an edge walk (contour) above it, edge walk
+    plus zigzag from zigzag_from_mm. The
     centre-walk-vs-contour band is chosen from band_width_mm when given (a
     shape-level representative width, so every column of one shape agrees on
     that band; see shape_band_width_mm), else from this column's own median
@@ -1034,7 +1045,7 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
         # wedges; the column reads better with it off, at the same density (see short_stitch_kink).
         p["short_stitch_inset"] = "0" if suppress_short_stitch else f["short_inset"]
         p["short_stitch_distance_mm"] = f"{f['short_dist_mm']:g}"
-    if bw < f["center_below_mm"]:
+    if bw < max(f["center_below_mm"], center_below_mm or 0.0):
         p["center_walk_underlay"] = "true"
     else:
         p["contour_underlay"] = "true"
@@ -1827,7 +1838,8 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                     p.set("id", f"text{n}_l{li}_c{k}")
                     p.set("d", gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
-                    extra = (_lettering_satin_params(c.widths(), pull_comp_mm, band_width_mm=band_w)
+                    extra = (_lettering_satin_params(c.widths(), pull_comp_mm, band_width_mm=band_w,
+                                                     center_below_mm=LETTERING_CENTER_WALK_BELOW_MM)
                              if auto_params else {})
                     if op is not None:
                         # readers: lib/elements/satin_column.py end_at_nearest_point (end_point /
