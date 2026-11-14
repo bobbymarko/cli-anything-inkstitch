@@ -983,6 +983,17 @@ def _filled_shapes(root, want):
     return out
 
 
+def _sews_as_fill(lt, spec: dict, fallback: str) -> bool:
+    """Whether a planned shape is written as its fill: a failed plan under --fallback fill, no
+    columns at all, or an override's stitch: fill / satin."""
+    as_fill = (not lt.ok and fallback == "fill") or not lt.columns
+    if spec.get("stitch") == "fill":
+        as_fill = True
+    elif spec.get("stitch") == "satin" and lt.columns:
+        as_fill = False
+    return as_fill
+
+
 _UNDERLAY_KEYS = {"center": "center_walk_underlay", "contour": "contour_underlay",
                   "edge": "contour_underlay", "zigzag": "zigzag_underlay"}
 
@@ -1110,6 +1121,12 @@ def _doc_mm_frame(root, uu_per_mm):
               help="Where columns meet: trim overlaps deeper than ~1 mm back to a 0.4 mm overlap (an arm's "
                    "end sewn across its bar, a strand behind a crossing jutting out), and close bare "
                    "wedges at junctions by running the nearest end on into its neighbour.")
+@click.option("--one-pass/--no-one-pass", default=True, show_default=True,
+              help="Sew every satin in one pass: end_at_nearest_point off (the engine default splits a "
+                   "column's top layer to finish near the next element, a seam mid-column), each column "
+                   "oriented to finish nearest the next one, a trim where a handoff would jump (> 3 mm) "
+                   "or cross bare fabric, and columns after a trim starting exactly at their end. "
+                   "Not with --travel route (auto_satin re-orders the columns).")
 @click.option("--merge-colors-de", type=float, default=None,
               help="Fills closer than this CIEDE2000 distance sew as one thread (default "
                    f"{8.0:g}; 0 keeps every fill its own thread).")
@@ -1130,7 +1147,7 @@ def _doc_mm_frame(root, uu_per_mm):
                    "this JSON-lines file, a fixture for planner tests (default: next to the project).")
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
-                    spread_turns, tidy_joins, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
+                    spread_turns, tidy_joins, one_pass, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
                     cases_path):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
@@ -1222,8 +1239,21 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                                  one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns,
                                  tidy_joins_on=tidy_joins)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
+        fill_of = [_sews_as_fill(lt, spec, fallback) for lt, spec in zip(planned, spec_of)]
+        # One pass per satin, decided in SEWING order (thread order), so each shape's first column
+        # knows where the needle arrives from. A shape kept as fill ends somewhere we don't model.
+        one_pass_plan: dict[int, dict] = {}
+        if one_pass and travel != "route":
+            arrival = None
+            for i in order:
+                if fill_of[i]:
+                    arrival = None
+                    continue
+                one_pass_plan[i] = gc.plan_one_pass(planned[i], arrival=arrival,
+                                                    trim_handoffs=travel == "trim")
+                arrival = one_pass_plan[i]["exit"]
         made_groups, cases = [], []
-        for (el, _fill), color, lt, spec, gh in zip(targets, thread_of, planned, spec_of, hashes):
+        for i, ((el, _fill), color, lt, spec, gh) in enumerate(zip(targets, thread_of, planned, spec_of, hashes)):
             parent = el.getparent()
             g = etree.Element(f"{{{SVG_NS}}}g")
             g.set("id", f"{el.get('id')}_sat")
@@ -1231,11 +1261,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
             # the shape's outline (document mm), for tools review's seam check: the shape itself is
             # replaced by its columns. A plain data- attribute: the engine reads only inkstitch:*.
             g.set("data-outline-mm", _outline_attr(lt.contours, to_doc))
-            as_fill = (not lt.ok and fallback == "fill") or not lt.columns
-            if spec.get("stitch") == "fill":
-                as_fill = True
-            elif spec.get("stitch") == "satin" and lt.columns:
-                as_fill = False
+            as_fill = fill_of[i]
+            op = one_pass_plan.get(i)
             made = []
             if as_fill:
                 cp = el.__copy__()
@@ -1245,8 +1272,11 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 made.append((g[-1], "auto_fill" if _override_params(spec, False) else None,
                              _override_params(spec, False)))
             else:
-                hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
-                    if travel == "trim" else set()
+                if op is not None:
+                    hops = set(op["trim_after"])
+                else:
+                    hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
+                        if travel == "trim" else set()
                 band_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole shape
                 from cli_anything_inkstitch.trace import column_checks as _cc
                 from cli_anything_inkstitch.trace import joins as _joins
@@ -1267,6 +1297,15 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                     extra = _schema_known(schema, "satin_column",
                                           _lettering_satin_params(c.widths(), pull_comp_mm, fabric, band_w,
                                                                   suppress_short_stitch=kink), skipped)
+                    if op is not None:
+                        # readers: lib/elements/satin_column.py end_at_nearest_point (end_point,
+                        # _split_top_layer: on, the top layer is split in two passes meeting
+                        # mid-column) and start_at_nearest_point (start_point / first_stitch: off,
+                        # the column starts at its first rail point instead of a hidden entry run)
+                        one = {"end_at_nearest_point": "false"}
+                        if k in op["start_exact"]:
+                            one["start_at_nearest_point"] = "false"
+                        extra.update(_schema_known(schema, "satin_column", one, skipped))
                     extra.update(_override_params(spec, True))
                     if k in hops:            # reader: lib/elements/element.py trim_after
                         extra["trim_after"] = "true"
@@ -1300,6 +1339,9 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                            **({"joins_trimmed": len(chk["joins_trimmed"])} if chk.get("joins_trimmed") else {}),
                            **({"wedges_closed": len(chk["wedges_closed"])} if chk.get("wedges_closed") else {}),
                            **({"rungs_placed": chk["rungs_placed"]} if "rungs_placed" in chk else {}),
+                           **({"one_pass": {"reversed": len(op["reversed"]), "trims_inside": len(op["trim_after"]),
+                                            "longest_entry_run_mm": round(max(op["hidden_runs"] or [0.0]), 1)}}
+                              if op is not None and not as_fill else {}),
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
