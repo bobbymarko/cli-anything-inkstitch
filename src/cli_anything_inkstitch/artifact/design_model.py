@@ -495,11 +495,23 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
         if elem is None:
             raise UserError(f"no element with id={op['id']!r}")
         before = {"d": elem.get("d")}
-        elem.set("d", str(op["d"]))
+        new_d, rungs_added = str(op["d"]), 0
+        if (elem.get(qname("satin_column")) or "").lower() == "true":
+            # A hand edit that leaves a rung-less satin's rails at different node counts pairs
+            # unrelated nodes (the gate's twist_risk): pair them with square rungs, leaving the
+            # rails exactly as drawn (resampling them would move the outline).
+            import math
+
+            from cli_anything_inkstitch.svg.geometry import ctm_for
+            from cli_anything_inkstitch.trace.rungs import pair_unpaired_rails
+            m = ctm_for(elem)
+            scale = math.sqrt(abs(m[0] * m[3] - m[1] * m[2])) or 1.0
+            new_d, rungs_added = pair_unpaired_rails(new_d, _uu_per_mm(tree.getroot()) / scale)
+        elem.set("d", new_d)
         push(proj.history, make_entry(
             command=f"artifact edit set_path --id {op['id']}",
             patch=attr_diff(_xpath(op["id"]), before, {"d": elem.get("d")})))
-        return {"op": name, "id": op["id"]}
+        return {"op": name, "id": op["id"], **({"rungs_added": rungs_added} if rungs_added else {})}
 
     if name == "move_command":
         from cli_anything_inkstitch.svg import commands as vc
