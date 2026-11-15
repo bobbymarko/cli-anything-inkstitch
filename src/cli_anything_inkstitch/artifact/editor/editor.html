@@ -188,6 +188,9 @@
   .layerRow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis;
                   white-space: nowrap; }
   .layerRow .kd { color: var(--muted); font-size: 10px; }
+  .layerRow .nmEdit { min-width: 0; font: inherit; color: inherit;
+                      background: var(--bg, #14161a); border: 1px solid var(--accent);
+                      border-radius: 3px; padding: 0 4px; margin: -1px 0; outline: none; }
   .cpCard { display: flex; gap: 8px; align-items: center; padding: 5px;
             border: 1px solid var(--line); border-radius: 7px; margin-bottom: 5px;
             cursor: pointer; }
@@ -3964,13 +3967,96 @@ function renderOverview() {
     row(sentenceCase(k.replaceAll("_", " ")), String(v));
 }
 
+/* Inline rename (double-click a layer name). While a name is being edited
+   the panel holds off re-rendering — a reload arriving mid-typing would
+   otherwise rebuild the rows and throw the text away — and catches up once
+   the edit commits or cancels. */
+let layerRenaming = null;        // id being renamed, or null
+/* Double-click on a layer name is detected by hand. The first click selects
+   the layer, which re-renders the panel AND fills the Inspect panel above
+   it, pushing the Layers list down — the second click then lands on
+   whatever slid under the pointer (measured: an Inspect row), so the
+   browser's dblclick never reaches the name. A second press at the same
+   screen spot within 450 ms is therefore the double-click on the layer
+   recorded by the first; that press is swallowed so it can't click the
+   element that moved under it. (Before this, the rename field never
+   opened and a Delete meant for the text deleted the shape.) */
+let lastNameClick = { id: null, t: 0, x: 0, y: 0 };
+let swallowClickUntil = 0;
+document.addEventListener("pointerdown", (ev) => {
+  const c = lastNameClick;
+  if (!c.id || layerRenaming) return;
+  const quick = performance.now() - c.t < 450;
+  const still = Math.abs(ev.clientX - c.x) < 5 && Math.abs(ev.clientY - c.y) < 5;
+  const id = c.id;
+  lastNameClick = { id: null, t: 0, x: 0, y: 0 };
+  if (!quick || !still) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  swallowClickUntil = performance.now() + 600;
+  const o = byId(id);
+  const row = [...document.querySelectorAll("#layersBody .layerRow")]
+    .find(r => r.dataset.id === id);
+  const nm = row && row.querySelector(".nm");
+  if (o && nm) {
+    row.scrollIntoView({ block: "nearest" });
+    startLayerRename(o, nm, row);
+  }
+}, true);
+for (const t of ["mousedown", "mouseup", "click", "dblclick"])
+  document.addEventListener(t, (ev) => {
+    if (performance.now() < swallowClickUntil) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (t === "dblclick") swallowClickUntil = 0;
+    }
+  }, true);
+let layersDirty = false;
+function startLayerRename(o, nm, row) {
+  if (layerRenaming) return;
+  layerRenaming = o.id;
+  row.draggable = false;          // text selection, not a row drag
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "nm nmEdit";
+  const original = o.label || o.id;
+  input.value = original;
+  nm.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const v = input.value.trim();
+    layerRenaming = null;
+    if (commit && v && v !== original) {
+      o.label = v;                // show it now; the reload confirms it
+      postEdit([{ op: "set_svg_attr", id: o.id, name: "label", value: v }])
+        .catch(() => refresh());
+    }
+    layersDirty = false;
+    renderLayers();
+  };
+  // keep typing out of the editor's shortcuts (Delete would delete the shape)
+  input.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+    else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  for (const t of ["click", "dblclick", "pointerdown", "contextmenu"])
+    input.addEventListener(t, (ev) => ev.stopPropagation());
+}
 function renderLayers() {
+  if (layerRenaming) { layersDirty = true; return; }
   const body = $("layersBody");
   body.textContent = "";
   if (!design) return;
   design.objects.forEach((o, i) => {
     const r = document.createElement("div");
     r.className = "layerRow" + (selection.includes(o.id) ? " sel" : "");
+    r.dataset.id = o.id;
     r.draggable = true;
     const num = document.createElement("span");
     num.className = "num";
@@ -3991,7 +4077,12 @@ function renderLayers() {
     const nm = document.createElement("span");
     nm.className = "nm";
     nm.textContent = o.label || o.id;
-    nm.title = o.id;
+    nm.title = `${o.id} — double-click to rename`;
+    // first half of a double-click; the second half is caught by the
+    // document-level pointerdown below (see lastNameClick)
+    nm.addEventListener("click", (ev) => {
+      lastNameClick = { id: o.id, t: performance.now(), x: ev.clientX, y: ev.clientY };
+    });
     const kd = document.createElement("span");
     kd.className = "kd";
     kd.textContent = o.kind;
