@@ -61,7 +61,6 @@
                         text-overflow: ellipsis; }
   #fileMenuBtn .fileChev { color: var(--muted); display: flex; }
   #fileMenuBtn .fileChev .ic { width: 14px; height: 14px; }
-  #helpBtn { padding: 1px 8px; }
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
           border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
           background: transparent; font: inherit; cursor: pointer; }
@@ -682,8 +681,6 @@ try { applyTheme(localStorage.getItem("artifact-theme") || "default"); } catch (
       <span class="fileChev"></span>
     </button>
     <div class="spacer"></div>
-    <button class="chip" id="helpBtn" type="button" title="How to use"
-            aria-label="How to use">?</button>
     <button class="collapseBtn centerToggle settingsBtn" id="settingsBtnCenter" type="button"
             title="Settings" aria-haspopup="menu"></button>
     <button class="collapseBtn centerToggle" id="inspectToggleCenter" type="button"
@@ -5144,7 +5141,6 @@ const HELP = [
 }
 const helpOpen = () => $("helpOverlay").classList.add("show");
 const helpClose = () => $("helpOverlay").classList.remove("show");
-$("helpBtn").onclick = helpOpen;
 $("helpClose").onclick = helpClose;
 $("helpOverlay").addEventListener("click", (ev) => {
   if (ev.target === $("helpOverlay")) helpClose();
