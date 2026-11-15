@@ -126,7 +126,7 @@
               max-height: 84vh; overflow-y: auto; }
   #helpCard h1 { font-size: 15px; margin-bottom: 4px; }
   #helpCard .sub { color: var(--muted); margin-bottom: 14px; }
-  #helpCard h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  #helpCard h2 { font-size: 12px; font-weight: 600;
                  color: var(--accent); margin: 14px 0 6px; }
   #helpCard table { width: 100%; border-collapse: collapse; }
   #helpCard td { padding: 4px 0; border-bottom: 1px solid var(--line);
@@ -234,8 +234,8 @@
                     -webkit-box-orient: vertical; }
   .cpCard .cpTime { font-size: 10px; color: var(--muted); }
   .cpCard.auto { opacity: .6; }
-  .cpHead { font-size: 10px; letter-spacing: .06em; color: var(--muted);
-            margin: 2px 0 5px; text-transform: uppercase; }
+  .cpHead { font-size: 11px; font-weight: 600; color: var(--muted);
+            margin: 2px 0 5px; }
   .histRow .flagged { color: var(--accent); margin-right: 3px; }
   .histRow { padding: 3px 5px; border-radius: 5px; font-size: 11px;
              color: var(--muted); cursor: pointer; overflow: hidden;
@@ -273,8 +273,7 @@
   .titleEdit:hover { border-color: var(--line); }
   .titleEdit:focus { border-color: var(--accent); outline: none;
                      background: #14161a; }
-  #inspectBody .objKind { color: var(--accent); font-size: 11px; text-transform: uppercase;
-                          letter-spacing: .06em; margin-bottom: 10px; }
+  #inspectBody .objKind { color: var(--accent); font-size: 12px; margin-bottom: 10px; }
   #inspectBody .prow { display: flex; justify-content: space-between; gap: 8px;
                        align-items: center; padding: 3px 0;
                        border-bottom: 1px solid var(--line); }
@@ -2678,7 +2677,7 @@ function renderInspect(objs) {
   });
   const kind = document.createElement("div");
   kind.className = "objKind";
-  kind.textContent = `${o.kind} · ${humanizeType(o.stitch_type)}`;
+  kind.textContent = `${sentenceCase(o.kind)} · ${humanizeType(o.stitch_type)}`;
   body.append(title, kind);
   if (usesIgnoredMethod(o)) {
     const warn = document.createElement("div");
