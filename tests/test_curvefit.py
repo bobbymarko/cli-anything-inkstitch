@@ -286,3 +286,97 @@ class TestEngineStitchesWhereTheOriginalDid:
         ref = [apply_matrix(m, *p) for p in flatten_path(d, 100)]
         assert _max_off(a, [ref]) < 0.05 * PX_PER_MM             # control
         assert _max_off(b, [ref]) < 0.05 * PX_PER_MM
+
+
+# ---------------------------------------------------------------- planner columns
+
+def _arc_column(n=90, r_mm=20.0, w_mm=3.0, twist_deg=0.0):
+    """A planner column along a 120° arc: one node pair per stitch-ish step,
+    pairs radial, optionally twisted (the planner tilts rungs into turns)."""
+    from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn
+    left, right = [], []
+    for i in range(n):
+        t = math.radians(-60 + 120 * i / (n - 1))
+        tw = math.radians(twist_deg) * math.sin(math.pi * i / (n - 1))
+        for rad, out in ((r_mm - w_mm / 2, left), (r_mm + w_mm / 2, right)):
+            a = t + (tw if out is right else -tw) * (w_mm / 2) / r_mm
+            out.append((rad * math.sin(a), rad * math.cos(a) - r_mm / 2))
+    return PlannedColumn(left=left, right=right)
+
+
+def _column_tx():
+    from cli_anything_inkstitch.trace.glyph_columns import make_transform
+    return make_transform(PX_PER_MM, 100, 110)
+
+
+class TestPlannerColumnsKeepCurves:
+    def test_rails_become_a_few_curves_with_explicit_rungs(self):
+        from cli_anything_inkstitch.trace.glyph_columns import satin_d, satin_d_curves
+        col, tx = _arc_column(), _column_tx()
+        dense = satin_d(col, tx)
+        d = satin_d_curves(col, tx, TOL)
+        subs = [c for c in re.split(r"(?=M)", d) if c.strip()]
+        assert "C" in subs[0] and "C" in subs[1]
+        assert len(subs) > 2                          # explicit rungs: no node pairing left to break
+        assert _anchors(" ".join(subs[:2])) < _anchors(dense) / 4
+        # the refit rails stay within tolerance of the planned rails
+        for sub, rail in zip(subs[:2], (col.left, col.right)):
+            assert _hausdorff(flatten_path(sub, 200), [tx(p) for p in rail]) < TOL * 1.5
+
+    def test_short_column_is_written_as_before(self):
+        from cli_anything_inkstitch.trace.glyph_columns import satin_d, satin_d_curves
+        col, tx = _arc_column(n=4), _column_tx()
+        assert satin_d_curves(col, tx, TOL) == satin_d(col, tx)
+
+
+def _zigzag(stitches, min_len_px):
+    """(midpoint, direction angle) of each satin crossing: consecutive
+    stitches farther apart than ``min_len_px`` (underlay and locks are short)."""
+    out = []
+    for p, q in zip(stitches, stitches[1:]):
+        dx, dy = q[0] - p[0], q[1] - p[1]
+        if math.hypot(dx, dy) > min_len_px:
+            out.append((((p[0] + q[0]) / 2, (p[1] + q[1]) / 2), math.atan2(dy, dx) % math.pi))
+    return out
+
+
+def _angle_err_deg(ref, test):
+    """Per crossing of ``test``: angle difference to the nearest crossing of ``ref``."""
+    from scipy.spatial import cKDTree
+    t = cKDTree([m for m, _ in ref])
+    errs = []
+    for m, a in test:
+        _, j = t.query(m)
+        d = abs(a - ref[j][1]) % math.pi
+        errs.append(math.degrees(min(d, math.pi - d)))
+    return sorted(errs)
+
+
+@_needs_binary
+class TestPlannerColumnsStitchAsPlanned:
+    """satin_d pairs every node (the engine's _synthesize_rungs); satin_d_curves
+    keeps only some of those pairs as rungs. The plans must still match:
+    stitches on the same rails AND at the planner's stitch angle where it
+    twisted its pairs (that angle is what explicit rungs could lose)."""
+
+    @pytest.mark.parametrize("twist", [0.0, 25.0])
+    def test_curved_column_stitches_like_the_dense_one(self, tmp_path, twist):
+        from cli_anything_inkstitch.trace.glyph_columns import satin_d, satin_d_curves
+        col, tx = _arc_column(twist_deg=twist), _column_tx()
+        for k in "abc":
+            (tmp_path / k).mkdir()
+        dense = _stitches(tmp_path / "a", _satin(satin_d(col, tx)))
+        fit = _stitches(tmp_path / "b", _satin(satin_d_curves(col, tx, TOL)))
+        # rails: every stitch of the fit within tolerance of the planned rails
+        rails = [[tx(p) for p in col.left], [tx(p) for p in col.right]]
+        assert _max_off(dense, rails) < 0.15 * PX_PER_MM          # measurement control
+        assert _max_off(fit, rails) < TOL + 0.1 + 0.02
+        # angle: control first — a pairing twisted 20 degrees the other way
+        # (same rails) must read as wrong
+        zl = 1.5 * PX_PER_MM
+        ref = _zigzag(dense, zl)
+        wrong = _stitches(tmp_path / "c", _satin(satin_d(_arc_column(twist_deg=twist - 20.0), tx)))
+        assert _angle_err_deg(ref, _zigzag(wrong, zl))[len(ref) // 2] > 4.0
+        errs = _angle_err_deg(ref, _zigzag(fit, zl))
+        assert errs[int(0.95 * len(errs))] < 2.0
+        assert abs(len(fit) - len(dense)) <= max(3, 0.05 * len(dense))

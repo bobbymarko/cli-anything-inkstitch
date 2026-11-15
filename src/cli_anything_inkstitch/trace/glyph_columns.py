@@ -1103,6 +1103,78 @@ def satin_d(column: PlannedColumn, tx) -> str:
     return f"M {_fmt(left)} M {_fmt(right)}"
 
 
+def satin_d_curves(column: PlannedColumn, tx, tol: float, skew_tol: float | None = None,
+                   max_gap: int = 60) -> str:
+    """Like satin_d, but with a few explicit rungs and bezier-refit rails, so
+    the column arrives in the editor with a handful of handles instead of one
+    node per stitch pair (Bob 11/15: the keep-curves fix, 40b5136, skips
+    rung-less satins, so every planner column stayed a node forest).
+
+    Engine contract: lib/elements/satin_column.py ``rungs`` treats every
+    subpath that is not a rail as a rung (rails by intersection,
+    ``rail_indices``), and between two rungs the satin walks both rail
+    sections in proportion. ``_synthesize_rungs`` (what satin_d's two-subpath
+    layout gets) makes one rung per node pair, the pair's line scaled 1.1
+    about its midpoint. We write a SUBSET of those same lines as explicit
+    rungs, chosen greedily: a planner pair is dropped only when walking the
+    rails in proportion between the kept rungs on either side puts it within
+    ``skew_tol`` (document units, default tol / 2: measured, 0.1 mm let a
+    25-degree twisted test column drift 8 degrees) of where the planner put
+    it, so the stitch angle the planner chose survives everywhere.
+    trace/satinize.py ``simplify_satin_d`` then refits the rails within
+    ``tol`` while proving every rung still crosses both rails. Columns too
+    short to need it fall back to satin_d unchanged."""
+    import math as _m
+    from cli_anything_inkstitch.trace.satinize import simplify_satin_d
+    left = [tx(p) for p in column.left]
+    right = [tx(p) for p in column.right]
+    assert len(left) == len(right) >= 2
+    n = len(left)
+    if n < 5:
+        return satin_d(column, tx)
+    skew_tol = tol / 2 if skew_tol is None else skew_tol
+
+    def arclen(pts):
+        out = [0.0]
+        for p, q in zip(pts, pts[1:]):
+            out.append(out[-1] + _m.dist(p, q))
+        return out
+    s0, s1 = arclen(left), arclen(right)
+
+    def fits(i, j):
+        """Every pair strictly between i and j reproduced by proportional walking."""
+        d0, d1 = s0[j] - s0[i], s1[j] - s1[i]
+        if d0 <= 0 or d1 <= 0:
+            return False
+        for k in range(i + 1, j):
+            t0 = (s0[k] - s0[i]) / d0
+            t1 = (s1[k] - s1[i]) / d1
+            if abs(t0 - t1) * max(d0, d1) > skew_tol:
+                return False
+        return True
+
+    keep, i = [], 0
+    while i < n - 1:
+        j = i + 1
+        while j + 1 <= n - 1 and j + 1 - i <= max_gap and fits(i, j + 1):
+            j += 1
+        if j < n - 1:
+            keep.append(j)
+        i = j
+
+    def rung(k):
+        (ax, ay), (bx, by) = left[k], right[k]
+        cx, cy = (ax + bx) / 2, (ay + by) / 2
+        return [(cx + (ax - cx) * 1.1, cy + (ay - cy) * 1.1),
+                (cx + (bx - cx) * 1.1, cy + (by - cy) * 1.1)]
+
+    if not keep:                       # the engine needs a rung; one mid-column pair is exact
+        keep = [n // 2]
+    d = " ".join([f"M {_fmt(left)}", f"M {_fmt(right)}"] + [f"M {_fmt(rung(k))}" for k in keep])
+    new_d, _, _ = simplify_satin_d(d, tolerance=tol)
+    return new_d
+
+
 def fill_ds(contours, tx) -> list[str]:
     """The letter's outline as fill paths, one per separate piece (an i's
     dot is its own path). The engine's FillStitch.original_shape
