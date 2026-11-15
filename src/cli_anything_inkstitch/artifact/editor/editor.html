@@ -508,6 +508,28 @@
   .zoomMarquee { fill: color-mix(in srgb, var(--accent) 8%, transparent); stroke: var(--accent);
                  stroke-dasharray: 5 4; vector-effect: non-scaling-stroke;
                  pointer-events: none; }
+  /* ---------- motion ----------
+     Every animation here is transform/opacity on a small element and runs
+     once (no idle animation), so the canvas never pays for it. */
+  #ctxMenu, #palettePop, #pillPopover { animation: ds-pop var(--dur-2) var(--ease-spring); }
+  #themeOverlay.show, #helpOverlay.show { animation: ds-fade var(--dur-2) var(--ease-out); }
+  #themeOverlay.show #themeCard, #helpOverlay.show #helpCard {
+    animation: ds-pop var(--dur-3) var(--ease-spring); }
+  @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px) scale(.97); } }
+  #toast.show { animation: toast-in var(--dur-2) var(--ease-spring); }
+  #presence.waiting { animation: ds-rise var(--dur-2) var(--ease-out); }
+  #chat.live .msg { animation: ds-rise var(--dur-2) var(--ease-out); }
+  /* press feedback */
+  #toolbar .tool, .collapseBtn, #fileMenuBtn, .ctxItem, .themeTile, #send, .askOpt {
+    transition: transform var(--dur-1) var(--ease-out), background-color var(--dur-1) var(--ease-out),
+                color var(--dur-1) var(--ease-out); }
+  #toolbar .tool:active, .collapseBtn:active, #fileMenuBtn:active, .themeTile:active,
+  #send:active, .askOpt:active:not(:disabled) { transform: scale(.92); }
+  .ctxItem:active { transform: scale(.98); }
+  .layerRow, .colorRow, .histRow { transition: background-color var(--dur-1) var(--ease-out); }
+  .panelGrip::after { transition: background-color var(--dur-1) var(--ease-out),
+                                  transform var(--dur-1) var(--ease-spring); }
+  .panelGrip:hover::after, .panelGrip.drag::after { transform: scaleX(1.4); }
 </style>
 </head>
 <body>
@@ -3337,8 +3359,11 @@ function showContextMenu(ev, items) {
     m.appendChild(row);
   }
   document.body.appendChild(m);
-  m.style.left = Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8) + "px";
-  m.style.top = Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8) + "px";
+  const left = Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8);
+  const top = Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8);
+  m.style.left = left + "px";
+  m.style.top = top + "px";
+  m.style.transformOrigin = `${ev.clientX - left}px ${ev.clientY - top}px`;   // grow from the click
   ctxMenu = m;
   setTimeout(() => document.addEventListener("pointerdown", _ctxOutside, true), 0);
 }
@@ -4063,6 +4088,15 @@ function themeSwatches(id) {
   return out;
 }
 function setTheme(id) {
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (document.startViewTransition && !reduce &&
+      (document.documentElement.dataset.theme || "default") !== id) {
+    document.startViewTransition(() => setThemeNow(id));
+    return;
+  }
+  setThemeNow(id);
+}
+function setThemeNow(id) {
   applyTheme(id);
   try { localStorage.setItem("artifact-theme", id); } catch (e) { /* private */ }
   // canvas-drawn chrome doesn't follow CSS vars on its own
@@ -4126,6 +4160,7 @@ for (const id of ["settingsBtn", "settingsBtnCenter"]) {
       { label: "Theme…", run: openThemeModal },
       { label: "Keyboard shortcuts", run: helpOpen },
     ]);
+    ctxMenu.style.transformOrigin = "top right";   // grow from the gear
   });
 }
 /* File menu: the chevron after the file name (Claude-app style) holds
@@ -4265,6 +4300,10 @@ for (const b of document.querySelectorAll("#viewModes button"))
 function connectSSE() {
   const es = new EventSource(`/events/${KEY}`);
   es.addEventListener("chat-sync", (ev) => {
+    // a full rebuild (connect/reconnect) shouldn't replay every message's
+    // entrance; only messages that arrive afterwards animate
+    $("chat").classList.remove("live");
+    requestAnimationFrame(() => requestAnimationFrame(() => $("chat").classList.add("live")));
     $("chat").textContent = "";
     workingBubble = null;      // chat rebuild orphans the bubble node
     const chat = JSON.parse(ev.data).chat;

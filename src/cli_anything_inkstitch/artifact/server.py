@@ -915,8 +915,16 @@ code { font: var(--fs-sm) ui-monospace, Menlo, monospace; }
 .card:focus-visible { outline: none; }
 .thumb { aspect-ratio: 4 / 3; display: grid; place-items: center; margin-bottom: var(--sp-2);
          background: var(--panel); border-radius: var(--r-md); corner-shape: squircle;
-         overflow: hidden; transition: background .12s; }
-.card:hover .thumb { background: var(--raised); }
+         overflow: hidden; transition: background-color var(--dur-1) var(--ease-out),
+         transform var(--dur-2) var(--ease-spring); }
+.card:hover .thumb { background: var(--raised); transform: translateY(-2px); }
+.card:active .thumb { transform: scale(.98); }
+/* tiles settle in one after another (transform/opacity only) */
+.card { animation: ds-rise var(--dur-3) var(--ease-spring) backwards; }
+.card:nth-child(2) { animation-delay: 30ms; } .card:nth-child(3) { animation-delay: 60ms; }
+.card:nth-child(4) { animation-delay: 90ms; } .card:nth-child(5) { animation-delay: 120ms; }
+.card:nth-child(n+6) { animation-delay: 150ms; }
+.empty { animation: ds-pop var(--dur-3) var(--ease-spring); }
 .card:focus-visible .thumb { outline: 2px solid var(--accent); outline-offset: 2px; }
 .thumb img { max-width: 78%; max-height: 78%; }
 .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
