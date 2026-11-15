@@ -222,9 +222,16 @@
           overflow: hidden; }
   #panel { width: 320px; border-right: 1px solid var(--border); }   /* left side */
   #inspect { width: 260px; border-left: 1px solid var(--border); }  /* right side */
-  #panelStack { flex: 1; overflow-y: auto; padding: 0 0 var(--sp-3); }
+  /* All panels stay in view: closed ones are just their header, open ones
+     share the column's height by weight (--pw) and scroll inside. The stack
+     only scrolls as a last resort, when even minimum heights don't fit. */
+  #panelStack { flex: 1; min-height: 0; overflow-y: auto; display: flex;
+                flex-direction: column; }
   /* the inset lives on the panel so its divider runs the full column width */
-  .panel { border-bottom: 1px solid var(--border); padding: 0 var(--sp-4); }
+  .panel { border-bottom: 1px solid var(--border); padding: 0 var(--sp-4);
+           display: flex; flex-direction: column; flex: none; min-height: 0; }
+  .panel:not(.closed) { flex: var(--pw, 1) 1 0px; min-height: 96px; }
+  .panelHead { flex: none; }
   .panelHead { padding: var(--sp-2) 0; font-size: var(--fs-sm); font-weight: 600; color: var(--text); cursor: pointer;
                user-select: none; display: flex; justify-content: space-between;
                align-items: center; }
@@ -233,13 +240,12 @@
   .panel.closed .panelChev .ic { transform: rotate(-90deg); }
   .panel.closed .panelHead { color: var(--muted); }
   .panel.closed .panelBody, .panel.closed .panelGrip { display: none; }
-  /* fixed, user-adjustable height per panel (drag the grip under it):
-     content scrolls inside, so selecting something can't change a panel's
-     size and shove the panels below it around */
-  .panelBody { padding: 2px 0 var(--sp-3); height: var(--ph, auto);
+  .panelBody { padding: 2px 0 var(--sp-2); flex: 1; min-height: 0;
                overflow-y: auto; overscroll-behavior: contain; }
-  .panelGrip { height: 7px; margin: 0 -4px; cursor: ns-resize; position: relative;
+  /* grip between this panel and the next open one */
+  .panelGrip { flex: none; height: 7px; margin: 0 -4px; cursor: ns-resize; position: relative;
                touch-action: none; }
+  .panel:not(.hasNext) .panelGrip { display: none; }
   .panelGrip::after { content: ""; position: absolute; left: 50%; top: 2px;
                       width: 28px; height: 3px; margin-left: -14px; border-radius: var(--r-xs); corner-shape: squircle;
                       background: var(--line); }
@@ -4457,56 +4463,107 @@ for (const pnl of ["overview", "inspect", "layers", "colors", "reference", "hist
                            root.classList.contains("closed") ? "1" : "0");
     } catch (e) { /* private mode */ }
     if (pnl === "history" && !root.classList.contains("closed")) renderHistory();
+    layoutPanels();
   });
   try {
     const saved = localStorage.getItem("artifact-panel-" + pnl);
     if (saved === "1") root.classList.add("closed");
     else if (saved === "0") root.classList.remove("closed");
   } catch (e) { /* private mode */ }
-  setupPanelHeight(pnl, root);
+  setupPanelGrip(pnl, root);
   const chev = document.createElement("span");
   chev.className = "panelChev";
   chev.innerHTML = icon("chevron-down");
   root.querySelector(".panelHead").appendChild(chev);
 }
-/* Panel heights: each open panel has a fixed body height (content scrolls
-   inside) set by dragging the grip below it; double-click the grip to
-   reset. Remembered per panel in this browser. */
-function setupPanelHeight(pnl, root) {
-  const DEFAULT_H = { overview: 190, inspect: 300, layers: 300, colors: 160,
-                      reference: 170, history: 240 };
-  const MIN_H = 60, MAX_H = 1200;
-  const body = root.querySelector(".panelBody");
-  const key = "artifact-panel-h-" + pnl;
-  const apply = (h) => body.style.setProperty("--ph", Math.round(h) + "px");
-  let h = DEFAULT_H[pnl] || 200;
-  try { const v = +localStorage.getItem(key); if (v >= MIN_H) h = v; } catch (e) { /* defaults */ }
-  apply(h);
+/* Panel layout: every panel stays in view. Open panels share the column's
+   height in proportion to a weight (--pw); each grip moves the boundary
+   with the next open panel (VS Code split panes), double-click evens the
+   pair. Weights persist per panel in this browser. Replaces fixed per-panel
+   heights, which pushed panels below the fold of a scrolling stack. */
+const PANEL_IDS = ["overview", "inspect", "layers", "colors", "reference", "history"];
+const PANEL_DEFAULT_W = { overview: 0.7, inspect: 1.3, layers: 1.6, colors: 0.7,
+                          reference: 0.7, history: 1 };
+const PANEL_MIN_PX = 96;          // matches .panel:not(.closed) min-height
+const panelRoot = (id) => document.querySelector(`[data-panel="${id}"]`);
+function panelWeight(id) {
+  try {
+    const v = parseFloat(localStorage.getItem("artifact-panel-w-" + id));
+    if (v > 0) return v;
+  } catch (e) { /* defaults */ }
+  return PANEL_DEFAULT_W[id] || 1;
+}
+function setPanelWeight(id, w) {
+  panelRoot(id).style.setProperty("--pw", w);
+  try { localStorage.setItem("artifact-panel-w-" + id, String(+w.toFixed(4))); }
+  catch (e) { /* private */ }
+}
+function nextOpenPanel(root) {
+  for (let n = root.nextElementSibling; n; n = n.nextElementSibling)
+    if (n.classList.contains("panel") && !n.classList.contains("closed")) return n;
+  return null;
+}
+function layoutPanels() {
+  for (const id of PANEL_IDS) {
+    const r = panelRoot(id);
+    r.style.setProperty("--pw", panelWeight(id));
+    r.classList.toggle("hasNext", !r.classList.contains("closed") && !!nextOpenPanel(r));
+  }
+}
+/* Make the weights describe what's on screen: a panel held at its minimum
+   height renders taller than its weight says, so re-weighting a pair
+   against stale weights shifted every other panel too (measured: a 30 px
+   drag moved Layers 36 px, Colors 25 px and two other panels). Weights are
+   normalised to a mean of 1 so a panel opened later (default ~1) gets a
+   fair share. */
+function snapshotPanelWeights() {
+  const open = PANEL_IDS.map(panelRoot).filter(r => !r.classList.contains("closed"));
+  const hs = open.map(r => r.getBoundingClientRect().height);
+  const mean = hs.reduce((a, b) => a + b, 0) / (hs.length || 1) || 1;
+  open.forEach((r, i) => setPanelWeight(r.dataset.panel, hs[i] / mean));
+  return mean;
+}
+function setupPanelGrip(pnl, root) {
   const grip = document.createElement("div");
   grip.className = "panelGrip";
-  grip.title = "Drag to resize · double-click to reset";
-  body.after(grip);
-  const save = (v) => { try { localStorage.setItem(key, String(Math.round(v))); } catch (e) { /* private */ } };
+  grip.title = "Drag to resize · double-click to even out";
+  root.querySelector(".panelBody").after(grip);
   grip.addEventListener("pointerdown", (ev) => {
+    const next = nextOpenPanel(root);
+    if (!next || notPrimary(ev)) return;
     ev.preventDefault();
-    const y0 = ev.clientY, h0 = body.getBoundingClientRect().height;
+    const idB = next.dataset.panel;
+    const hA = root.getBoundingClientRect().height, hB = next.getBoundingClientRect().height;
+    snapshotPanelWeights();
+    const wSum = panelWeight(pnl) + panelWeight(idB), hSum = hA + hB, y0 = ev.clientY;
     grip.classList.add("drag");
     grip.setPointerCapture(ev.pointerId);
-    const move = (e) => apply(Math.max(MIN_H, Math.min(MAX_H, h0 + e.clientY - y0)));
+    const move = (e) => {
+      if (e.buttons === 0) { up(); return; }
+      const a = Math.max(PANEL_MIN_PX, Math.min(hSum - PANEL_MIN_PX, hA + e.clientY - y0));
+      root.style.setProperty("--pw", wSum * a / hSum);
+      next.style.setProperty("--pw", wSum * (hSum - a) / hSum);
+    };
     const up = () => {
       grip.classList.remove("drag");
       grip.removeEventListener("pointermove", move);
       grip.removeEventListener("pointerup", up);
-      save(body.getBoundingClientRect().height);
+      setPanelWeight(pnl, parseFloat(root.style.getPropertyValue("--pw")));
+      setPanelWeight(idB, parseFloat(next.style.getPropertyValue("--pw")));
     };
     grip.addEventListener("pointermove", move);
     grip.addEventListener("pointerup", up);
   });
   grip.addEventListener("dblclick", () => {
-    try { localStorage.removeItem(key); } catch (e) { /* private */ }
-    apply(DEFAULT_H[pnl] || 200);
+    const next = nextOpenPanel(root);
+    if (!next) return;
+    snapshotPanelWeights();
+    const half = (panelWeight(pnl) + panelWeight(next.dataset.panel)) / 2;
+    setPanelWeight(pnl, half);
+    setPanelWeight(next.dataset.panel, half);
   });
 }
+layoutPanels();   // after the constants above exist (TDZ)
 
 function renderOverview() {
   const body = $("overviewBody");
