@@ -1621,8 +1621,10 @@ uniform float uR;
 uniform float uPxPerMm;
 uniform sampler2D uPly;    // rgb = ply normal (tangent space), a = fiber brightness
 out vec4 outColor;
-const vec3 L1 = vec3(0.3437, 0.6230, 0.8056);     // key light, upper right
-const vec3 L2 = vec3(-0.3700, -0.4757, 0.8667);   // fill light, lower left
+uniform vec3 uL1;        // key light (unit vector, screen y-up, z toward viewer)
+uniform vec3 uL2;        // fill light
+uniform vec3 uLightK;    // (ambient, key, fill) diffuse weights
+uniform float uSpecK;    // highlight strength multiplier
 void main() {
   float along = vLocal.x, across = vLocal.y;
   float ca = clamp(along, 0.0, vLen);
@@ -1661,8 +1663,9 @@ void main() {
   vec2 T = vec2(vDir.x, -vDir.y);                   // along, y-up
   vec2 B = vec2(-vDir.y, -vDir.x);                  // +across (VS's n), y-up
   vec3 N = normalize(vec3(B * ln.x + T * ln.y, ln.z));
+  vec3 L1 = uL1, L2 = uL2;
   float d1 = max(dot(N, L1), 0.0), d2 = max(dot(N, L2), 0.0);
-  float diffuse = 0.48 + 0.42 * d1 + 0.10 * d2;
+  float diffuse = uLightK.x + uLightK.y * d1 + uLightK.z * d2;
   // Kajiya-Kay: fiber highlight from the thread direction, not the normal
   vec3 Tw = vec3(T, 0.0);
   vec3 H1 = normalize(L1 + vec3(0.0, 0.0, 1.0));
@@ -1672,7 +1675,7 @@ void main() {
   float s2 = pow(sqrt(max(0.0, 1.0 - th2 * th2)), mix(6.0, 14.0, isSatin));
   float spine = mix(1.0 - smoothstep(0.0, 0.50, edge),
                     (1.0 - smoothstep(0.0, 0.42, edge)) * pinch, isSatin);
-  float spec = (s1 * 0.42 + s2 * 0.14) * spine * (0.85 + 0.30 * max(0.0, tn.z));
+  float spec = (s1 * 0.42 + s2 * 0.14) * spine * (0.85 + 0.30 * max(0.0, tn.z)) * uSpecK;
   vec3 specColor = mix(vec3(1.0), vColor, 0.45);
   float fresnel = pow(1.0 - max(N.z, 0.0), 3.0) * 0.05;
   vec3 col = vColor * (1.0 + fiberMod) * (diffuse * widthAO * punctAO + fresnel)
@@ -1923,6 +1926,101 @@ function glDrawCounts(R, pos) {
   return [nInst, nJump];
 }
 /* draw one frame; returns false when WebGL can't be used (caller falls back) */
+/* ---------- lighting debug (Shift+L, or ?lightdebug=1) ----------
+   Live controls for the WebGL realistic shader's two lights so a setting
+   can be picked by eye. Defaults reproduce the shipped constants: key
+   light upper-right (az 61°, el 54°), fill lower-left (az 232°, el 60°),
+   diffuse 0.48 + 0.42·key + 0.10·fill. "Overhead" points both lights
+   straight down — the direction-free look (no banding between fill
+   areas sewn at different angles). Settings persist per browser. */
+const LIGHT_DEFAULTS = { keyAz: 61, keyEl: 54, fillAz: 232, fillEl: 60,
+                         ambient: 0.48, key: 0.42, fill: 0.10, spec: 1.0,
+                         overhead: false, shadowFollows: false };
+let lightSettings = { ...LIGHT_DEFAULTS };
+try {
+  Object.assign(lightSettings,
+                JSON.parse(localStorage.getItem("artifact-light") || "{}"));
+} catch (e) { /* defaults */ }
+function saveLight() {
+  try { localStorage.setItem("artifact-light", JSON.stringify(lightSettings)); }
+  catch (e) { /* private mode */ }
+}
+function lightDebugPanel() {
+  let el = document.getElementById("lightDebug");
+  if (el) return el;
+  el = document.createElement("div");
+  el.id = "lightDebug";
+  el.style.cssText = "position:absolute;right:12px;top:12px;z-index:30;" +
+    "background:rgba(20,22,27,.94);color:#e6e8ee;border:1px solid #3a3f4b;" +
+    "border-radius:8px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;" +
+    "width:250px;box-shadow:0 6px 24px rgba(0,0,0,.4)";
+  const sliders = [
+    ["keyAz", "Key azimuth °", 0, 360, 1], ["keyEl", "Key elevation °", 5, 90, 1],
+    ["fillAz", "Fill azimuth °", 0, 360, 1], ["fillEl", "Fill elevation °", 5, 90, 1],
+    ["ambient", "Ambient", 0, 1, 0.01], ["key", "Key strength", 0, 1, 0.01],
+    ["fill", "Fill strength", 0, 1, 0.01], ["spec", "Highlight ×", 0, 3, 0.05],
+  ];
+  el.innerHTML = '<div style="display:flex;justify-content:space-between;' +
+    'align-items:center;margin-bottom:6px"><b>Lighting debug</b>' +
+    '<span style="opacity:.6">Shift+L</span></div>' +
+    sliders.map(([k, label, lo, hi, st]) =>
+      `<label style="display:block;margin:4px 0">${label} ` +
+      `<span data-v="${k}" style="float:right;font-variant-numeric:tabular-nums"></span>` +
+      `<input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${st}" ` +
+      `style="width:100%"></label>`).join("") +
+    '<label style="display:block;margin-top:6px"><input type="checkbox" data-c="overhead"> ' +
+    'Overhead (direction-free)</label>' +
+    '<label style="display:block"><input type="checkbox" data-c="shadowFollows"> ' +
+    'Shadow follows key light</label>' +
+    '<div style="display:flex;gap:6px;margin-top:8px">' +
+    '<button data-a="reset" style="flex:1">Reset</button>' +
+    '<button data-a="copy" style="flex:1">Copy values</button></div>' +
+    '<pre data-out style="margin:8px 0 0;white-space:pre-wrap;word-break:break-all;font-size:11px;' +
+    'opacity:.8"></pre>';
+  const sync = () => {
+    for (const inp of el.querySelectorAll("[data-k]")) {
+      inp.value = lightSettings[inp.dataset.k];
+      el.querySelector(`[data-v="${inp.dataset.k}"]`).textContent =
+        (+lightSettings[inp.dataset.k]).toFixed(inp.step < 1 ? 2 : 0);
+    }
+    for (const c of el.querySelectorAll("[data-c]")) c.checked = !!lightSettings[c.dataset.c];
+    el.querySelector("[data-out]").textContent = JSON.stringify(lightSettings);
+  };
+  const apply = () => { saveLight(); sync(); renderPlanLayer(); };
+  el.addEventListener("input", (ev) => {
+    const t = ev.target;
+    if (t.dataset.k) lightSettings[t.dataset.k] = +t.value;
+    if (t.dataset.c) lightSettings[t.dataset.c] = t.checked;
+    apply();
+  });
+  el.addEventListener("click", (ev) => {
+    const a = ev.target.dataset && ev.target.dataset.a;
+    if (a === "reset") { lightSettings = { ...LIGHT_DEFAULTS }; apply(); }
+    if (a === "copy") {
+      navigator.clipboard && navigator.clipboard.writeText(JSON.stringify(lightSettings))
+        .then(() => showToast("lighting values copied"), () => {});
+    }
+  });
+  // keep wheel/keys inside the panel from panning or zooming the canvas
+  el.addEventListener("wheel", (ev) => ev.stopPropagation());
+  el.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+  $("canvasWrap").appendChild(el);
+  sync();
+  return el;
+}
+function toggleLightDebug(show) {
+  const el = lightDebugPanel();
+  el.hidden = show === undefined ? !el.hidden : !show;
+}
+document.addEventListener("keydown", (ev) => {
+  const inText = ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT";
+  if (!inText && ev.shiftKey && ev.key.toLowerCase() === "l") {
+    ev.preventDefault();
+    toggleLightDebug();
+  }
+});
+if (new URLSearchParams(location.search).has("lightdebug"))
+  window.addEventListener("load", () => toggleLightDebug(true));
 function glDrawRealistic() {
   const R = glInit();
   if (!R || R.gl.isContextLost()) return false;
@@ -1968,7 +2066,24 @@ function glDrawRealistic() {
     gl.uniform2f(u.uOff, ox * dpr, oy * dpr);
     gl.uniform2f(u.uRes, pw, ph);
     gl.uniform1f(u.uR, twCss * dpr / 2);
-    gl.uniform2f(u.uShadow, twCss * dpr * 0.14, twCss * dpr * 0.24);
+    const Lt = lightSettings;
+    const lv = (az, el) => {                    // degrees → unit vector, y-up
+      const a = az * Math.PI / 180, e = el * Math.PI / 180;
+      return [Math.cos(e) * Math.cos(a), Math.cos(e) * Math.sin(a), Math.sin(e)];
+    };
+    const k1 = Lt.overhead ? [0, 0, 1] : lv(Lt.keyAz, Lt.keyEl);
+    const k2 = Lt.overhead ? [0, 0, 1] : lv(Lt.fillAz, Lt.fillEl);
+    gl.uniform3f(u.uL1, ...k1);
+    gl.uniform3f(u.uL2, ...k2);
+    gl.uniform3f(u.uLightK, Lt.ambient, Lt.key, Lt.fill);
+    gl.uniform1f(u.uSpecK, Lt.spec);
+    if (Lt.shadowFollows && !Lt.overhead) {
+      // shadow falls away from the key light; screen y points down
+      const len = 0.278 * twCss * dpr, a = Lt.keyAz * Math.PI / 180;
+      gl.uniform2f(u.uShadow, -Math.cos(a) * len, Math.sin(a) * len);
+    } else {
+      gl.uniform2f(u.uShadow, twCss * dpr * 0.14, twCss * dpr * 0.24);
+    }
     gl.uniform1f(u.uPxPerMm, s * dpr * R.upm);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, R.ply);
