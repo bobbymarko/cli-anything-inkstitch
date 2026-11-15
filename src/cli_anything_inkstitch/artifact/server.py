@@ -239,6 +239,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/":
                 self._handle_root()
+            elif len(parts) == 2 and parts[0] == "assets":
+                self._handle_asset(parts[1])
             elif parsed.path == "/health":
                 self._json({"ok": True, "app": "cli-anything-inkstitch artifact", "version": __version__})
             elif parsed.path == "/api/poll":
@@ -267,6 +269,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
                 self._handle_reference_image(parts[1])
             elif len(parts) == 3 and parts[0] == "api" and parts[2] == "checkpoints":
                 self._handle_checkpoints_list(parts[1])
+            elif len(parts) == 3 and parts[0] == "api" and parts[2] == "thumbnail":
+                self._handle_design_thumbnail(parts[1])
             elif (len(parts) == 5 and parts[0] == "api"
                     and parts[2] == "checkpoints" and parts[4] == "thumbnail"):
                 self._handle_checkpoint_thumbnail(parts[1], parts[3])
@@ -331,9 +335,81 @@ class ArtifactHandler(BaseHTTPRequestHandler):
 
     # -- session lifecycle -------------------------------------------------------
 
+    # shared design system (editor + sessions page); a fixed allow-list, so
+    # the route can never serve anything else from the package
+    _ASSETS = {"design-system.css": "text/css; charset=utf-8",
+               "theme.js": "text/javascript; charset=utf-8"}
+
+    def _handle_asset(self, name: str) -> None:
+        ctype = self._ASSETS.get(name)
+        path = Path(__file__).parent / "editor" / name
+        if not ctype or not path.is_file():
+            self._json({"error": "not found"}, 404)
+            return
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    @staticmethod
+    def _session_design(file: str) -> dict[str, str]:
+        """Display info for a session: the design SVG's name and folder (the
+        project JSON is an implementation detail), falling back to the
+        project file itself."""
+        name = Path(file or "").name
+        folder = str(Path(file or "").parent)
+        try:
+            svg = json.loads(Path(file).read_text(encoding="utf-8")).get("svg_path")
+            if svg:
+                name, folder = Path(svg).name, str(Path(svg).parent)
+        except (OSError, ValueError, TypeError):
+            pass
+        home = str(Path.home())
+        if folder.startswith(home):
+            folder = "~" + folder[len(home):]
+        return {"name": name, "folder": folder}
+
+    @staticmethod
+    def _ago(iso: str) -> str:
+        from datetime import datetime, timezone
+        try:
+            t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        s = (datetime.now(timezone.utc) - t).total_seconds()
+        for unit, n in (("day", 86400), ("hour", 3600), ("minute", 60)):
+            if s >= n:
+                k = int(s // n)
+                return f"Edited {k} {unit}{'s' if k != 1 else ''} ago"
+        return "Edited just now"
+
+    def _handle_design_thumbnail(self, key: str) -> None:
+        """The session's design SVG, for <img> thumbnails on the sessions
+        page (scripts inside an SVG never run in an <img>)."""
+        file = self._session_file(key)
+        if file is None:
+            return
+        try:
+            svg = json.loads(Path(file).read_text(encoding="utf-8")).get("svg_path")
+            data = Path(svg).read_bytes()
+        except (OSError, ValueError, TypeError):
+            self._json({"error": "design not found"}, 404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _handle_root(self) -> None:
         """`/` goes straight to the open session, so a person can bookmark the server
-        instead of a per-design URL. Several open: newest first, as links. None: say so."""
+        instead of a per-design URL. Several open: newest first, as cards. None: say so.
+        Built from the editor's design system (/assets/design-system.css + theme.js),
+        so it follows the theme chosen in the editor (same origin, same storage)."""
         import html
         rows = self.state.store.open_sessions()
         if len(rows) == 1:
@@ -342,16 +418,36 @@ class ArtifactHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
+        esc = html.escape
         if rows:
-            items = "".join(
-                f"<li><a href='/session/{r['key']}'>{html.escape(Path(r['file'] or '').parent.name or r['key'])}"
-                f" / {html.escape(Path(r['file'] or '').name)}</a></li>" for r in rows)
-            body = f"<h1>Open sessions</h1><ul>{items}</ul>"
+            cards = []
+            for r in rows:
+                d = self._session_design(r["file"])
+                cards.append(
+                    f"<a class='card' href='/session/{esc(r['key'])}'>"
+                    f"<span class='thumb'><img src='/api/{esc(r['key'])}/thumbnail' alt='' loading='lazy'"
+                    f" onerror=\"this.remove()\"></span>"
+                    f"<span class='meta'><span class='name'>{esc(d['name'])}</span>"
+                    f"<span class='folder' title='{esc(d['folder'])}'>{esc(d['folder'])}</span>"
+                    f"<span class='when'>{esc(self._ago(r.get('updated_at') or ''))}</span></span>"
+                    f"<span class='chev' aria-hidden='true'>"
+                    f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'"
+                    f" stroke-linecap='round' stroke-linejoin='round'><path d='M9 6l6 6l-6 6'/></svg>"
+                    f"</span></a>")
+            body = ("<header><h1>Open designs</h1>"
+                    "<p>Pick a design to keep editing.</p></header>"
+                    f"<nav class='list'>{''.join(cards)}</nav>")
         else:
-            body = "<h1>No open session</h1><p>Ask your agent to open a design in the editor.</p>"
-        page = ("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
-                "<title>Stitch editor</title><style>body{font:16px system-ui;margin:2rem;"
-                "background:#16171a;color:#e8e8e8}a{color:#8ab4f8}</style>" + body)
+            body = ("<div class='empty'><h1>No open designs</h1>"
+                    "<p>Ask your agent to open a design in the editor "
+                    "(<code>artifact open</code>).</p></div>")
+        page = ("<!doctype html><html><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                "<title>Stitch editor</title>"
+                "<link rel='stylesheet' href='/assets/design-system.css'>"
+                "<script src='/assets/theme.js'></script>"
+                "<style>" + _SESSIONS_CSS + "</style></head><body><main>" + body
+                + "</main></body></html>")
         data = page.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -802,6 +898,36 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         from cli_anything_inkstitch.artifact.gate import run_gate
         self._json(run_gate(session["file"]))
 
+
+_SESSIONS_CSS = """
+* { box-sizing: border-box; margin: 0; }
+body { min-height: 100vh; background: var(--bg); color: var(--text);
+       font: var(--fs-md)/1.45 "Inter", -apple-system, "Segoe UI", sans-serif;
+       -webkit-font-smoothing: antialiased; }
+main { max-width: 640px; margin: 0 auto; padding: 72px var(--sp-4) var(--sp-4); }
+header { margin-bottom: var(--sp-4); }
+h1 { font-size: var(--fs-xl); font-weight: 600; }
+header p, .empty p { color: var(--muted); margin-top: var(--sp-1); }
+code { font: var(--fs-sm) ui-monospace, Menlo, monospace; }
+.list { display: grid; gap: var(--sp-2); }
+.card { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2);
+        background: var(--panel); border-radius: var(--r-md); corner-shape: squircle;
+        color: inherit; text-decoration: none; transition: background .12s; }
+.card:hover { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.thumb { flex: none; width: 88px; height: 64px; display: grid; place-items: center;
+         background: var(--canvas); border-radius: var(--r-sm); corner-shape: squircle;
+         overflow: hidden; }
+.thumb img { max-width: 80%; max-height: 80%; }
+.meta { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder, .when { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; }
+.chev { flex: none; width: 16px; height: 16px; color: var(--muted); margin-right: var(--sp-2); }
+.card:hover .chev { color: var(--text); }
+.empty { margin-top: 18vh; padding: var(--sp-4); text-align: center;
+         background: var(--panel); border-radius: var(--r-lg); corner-shape: squircle; }
+"""
 
 def _load_editor_html(key: str) -> str:
     editor = Path(__file__).parent / "editor" / "editor.html"
