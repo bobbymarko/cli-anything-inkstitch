@@ -152,9 +152,10 @@
                letter-spacing: .07em; color: var(--text); cursor: pointer;
                user-select: none; display: flex; justify-content: space-between;
                align-items: center; }
-  .panelHead::after { content: "▾"; color: var(--muted); font-size: 9px; }
+  .panelChev { color: var(--muted); display: flex; }
+  .panelChev .ic { width: 13px; height: 13px; transition: transform .12s ease; }
+  .panel.closed .panelChev .ic { transform: rotate(-90deg); }
   .panel.closed .panelHead { color: var(--muted); }
-  .panel.closed .panelHead::after { content: "▸"; }
   .panel.closed .panelBody, .panel.closed .panelGrip { display: none; }
   /* fixed, user-adjustable height per panel (drag the grip under it):
      content scrolls inside, so selecting something can't change a panel's
@@ -224,8 +225,9 @@
   .histRow.future { opacity: .45; }
   .sideHead { display: flex; align-items: center; justify-content: flex-end;
               padding: 6px 10px 0 14px; }
-  .collapseBtn { all: unset; cursor: pointer; color: var(--muted); padding: 0 4px;
-                 font-size: 14px; line-height: 1; }
+  .collapseBtn { all: unset; cursor: pointer; color: var(--muted); padding: 2px 4px;
+                 line-height: 1; display: flex; border-radius: 4px; }
+  .collapseBtn .ic { width: 15px; height: 15px; }
   .collapseBtn:hover { color: var(--text); }
   /* id-qualified: must outrank the #inspect/#panel width rules above */
   #inspect.collapsed, #panel.collapsed { width: 26px; cursor: pointer; }
@@ -1046,6 +1048,9 @@ function nearestOnPoly(pts, x, y) {
 const ICONS = {
   "eye": '<path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0"/><path d="M21 12c-2.4 4 -5.4 6 -9 6c-3.6 0 -6.6 -2 -9 -6c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6"/>',
   "eye-off": '<path d="M10.585 10.587a2 2 0 0 0 2.829 2.828"/><path d="M16.681 16.673a8.717 8.717 0 0 1 -4.681 1.327c-3.6 0 -6.6 -2 -9 -6c1.272 -2.12 2.712 -3.678 4.32 -4.674m2.86 -1.146a9.055 9.055 0 0 1 1.82 -.18c3.6 0 6.6 2 9 6c-.666 1.11 -1.379 2.067 -2.138 2.87"/><path d="M3 3l18 18"/>',
+  "chevron-down": '<path d="M6 9l6 6l6 -6"/>',
+  "chevrons-left": '<path d="M11 7l-5 5l5 5"/><path d="M17 7l-5 5l5 5"/>',
+  "chevrons-right": '<path d="M7 7l5 5l-5 5"/><path d="M13 7l5 5l-5 5"/>',
   "alert-triangle": '<path d="M12 9v4"/><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0"/><path d="M12 16h.01"/>',
 };
 function icon(name, extraClass = "") {
@@ -3932,7 +3937,8 @@ $("endBtn").onclick = async () => {
 $("gateEndAnyway").onclick = endSession;
 $("gateDismiss").onclick = () => $("gateBanner").classList.remove("show");
 /* ---------- collapsible sidebars ---------- */
-const CHEVRONS = { panel: ["«", "»"], inspect: ["»", "«"] };  // [expanded, collapsed]
+const CHEVRONS = { panel: ["chevrons-left", "chevrons-right"],     // [expanded, collapsed]
+                   inspect: ["chevrons-right", "chevrons-left"] };
 function setCollapsed(id, collapsed) {
   const side = $(id);
   if (!_lastCanvasRect) preserveScaleOnResize();   // baseline before the jump
@@ -3947,7 +3953,7 @@ function setCollapsed(id, collapsed) {
     delete side.dataset.width;
   }
   const btn = $(id + "Toggle");
-  btn.textContent = CHEVRONS[id][collapsed ? 1 : 0];
+  btn.innerHTML = icon(CHEVRONS[id][collapsed ? 1 : 0]);
   btn.title = (collapsed ? "Expand " : "Collapse ") +
               (id === "inspect" ? "inspector" : "conversation");
   try { localStorage.setItem("artifact-collapse-" + id, collapsed ? "1" : ""); }
@@ -3957,6 +3963,7 @@ function setCollapsed(id, collapsed) {
   if (typeof drawRulers === "function") { drawRulers(); renderGrid(); }
 }
 for (const id of ["inspect", "panel"]) {
+  $(id + "Toggle").innerHTML = icon(CHEVRONS[id][0]);   // replaced on collapse
   $(id + "Toggle").addEventListener("click", (ev) => {
     ev.stopPropagation();
     setCollapsed(id, !$(id).classList.contains("collapsed"));
@@ -4061,6 +4068,10 @@ for (const pnl of ["overview", "inspect", "layers", "colors", "reference", "hist
     else if (saved === "0") root.classList.remove("closed");
   } catch (e) { /* private mode */ }
   setupPanelHeight(pnl, root);
+  const chev = document.createElement("span");
+  chev.className = "panelChev";
+  chev.innerHTML = icon("chevron-down");
+  root.querySelector(".panelHead").appendChild(chev);
 }
 /* Panel heights: each open panel has a fixed body height (content scrolls
    inside) set by dragging the grip below it; double-click the grip to
