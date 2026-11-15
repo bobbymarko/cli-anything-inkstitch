@@ -126,14 +126,21 @@ class TestApplyEdits:
         # and a follow-up read works without --force
         read_design(project)
 
-    def test_history_entry_per_op(self, project):
+    def test_history_one_entry_per_batch(self, project):
+        # a batch is one user action -> one undo step (was one entry per op;
+        # an align of 3 marked satins took 9 Cmd+Z presses)
+        from cli_anything_inkstitch.artifact.design_model import apply_history_step
         before = len(ProjectFile.load(project).history["entries"])
         apply_edits(project, [
             {"op": "set_attr", "id": "elem_fill", "name": "angle", "value": "10"},
             {"op": "set_attr", "id": "elem_fill", "name": "row_spacing_mm", "value": "0.3"},
         ])
         after = len(ProjectFile.load(project).history["entries"])
-        assert after == before + 2
+        assert after == before + 1
+        apply_history_step(project)
+        params = next(o for o in read_design(project)["objects"]
+                      if o["id"] == "elem_fill")["params"]
+        assert params.get("angle") != "10" and params.get("row_spacing_mm") != "0.3"
 
     def test_set_path(self, project):
         apply_edits(project, [{"op": "set_path", "id": "elem_run", "d": "M2,22 L28,22"}])
@@ -274,6 +281,9 @@ class TestRoutePlan:
         assert by["b0"]["entry"] == [31.0, 12.0]
         assert by["b0"]["exit"] == [31.0, 2.0]
 
+    @pytest.mark.skipif(__import__("importlib.util").util.find_spec("shapely") is None,
+                        reason="route_plan measures bare fabric with shapely; "
+                               "without it, it deliberately flags no jumps")
     def test_jump_flagged_only_across_bare_fabric(self, route_project):
         cols = route_plan(route_project)["columns"]
         by = {c["element_id"]: c for c in cols}
@@ -314,12 +324,24 @@ class TestStitchSequenceExclude:
     The engine call is faked — what's under test is the include-list math."""
 
     def _capture(self, monkeypatch):
+        # fake the whole engine boundary — snapshot, plan AND the trim pass.
+        # Faking only the plan left _cut_moves calling the real binary, so
+        # these tests failed on every CI machine (no Ink/Stitch installed)
+        from contextlib import contextmanager
         from cli_anything_inkstitch.artifact import design_model as dm
         captured = {}
-        def fake_plan(project_file, *, binary_override=None, ids=None):
+
+        @contextmanager
+        def fake_snapshot(project_file, *, binary_override=None):
+            yield "fake-binary", "fake.svg"
+
+        def fake_plan(binary, svg_path, ids):
             captured["ids"] = ids
             return TestExtractStitchBlocks.PLAN
-        monkeypatch.setattr(dm, "stitch_plan_svg", fake_plan)
+
+        monkeypatch.setattr(dm, "engine_snapshot", fake_snapshot)
+        monkeypatch.setattr(dm, "_render_plan", fake_plan)
+        monkeypatch.setattr(dm, "_cut_moves", lambda binary, path, ids: None)
         return captured
 
     def test_exclude_selects_the_others(self, project, monkeypatch):

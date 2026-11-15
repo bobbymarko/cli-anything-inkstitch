@@ -155,3 +155,16 @@ def test_y_junction_runs_the_smooth_pair_through_with_a_leg_left_over():
     out = A._smooth_pairs(es, dirs, at, 1.0, corners, near_lines)
     assert len(out) == 1                                   # the bowl pair runs through
     assert set(out[0]) == {(0, True), (1, True)}           # ...the two smooth branches, not the leg
+
+
+def test_a_sliver_column_under_the_others_is_dropped():
+    """Futura Condensed's R planned a 4th column along its stem: 0.11 mm of rail, 3.3 mm stitches lying
+    lengthwise. It sewed as a diagonal line over the stem (11/13). Dropped; a real narrow stroke is kept."""
+    from cli_anything_inkstitch.planner import art_columns as ac
+    from cli_anything_inkstitch.planner import columns as col
+
+    stem = col.Column(pairs=[((0.0, 0.0), (0.8, 0.0)), ((0.0, 5.0), (0.8, 5.0))], curve=[False, False], closed=False)
+    sliver = col.Column(pairs=[((0.6, 3.0), (0.5, 0.0)), ((0.7, 3.0), (0.6, 0.0))], curve=[False, False], closed=False)
+    apart = col.Column(pairs=[((3.0, 3.0), (2.9, 0.0)), ((3.1, 3.0), (3.0, 0.0))], curve=[False, False], closed=False)
+    assert ac.drop_slivers([stem, sliver]) == [stem]
+    assert ac.drop_slivers([stem, apart]) == [stem, apart]      # not under anything: kept

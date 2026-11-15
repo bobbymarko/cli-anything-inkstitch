@@ -226,6 +226,34 @@ def flat_check(lt: col.Letter) -> dict:
     return check
 
 
+def _rail_mm(c: col.Column) -> float:
+    def length(pts):
+        return float(sum(np.hypot(*np.subtract(b, a)) for a, b in zip(pts, pts[1:])))
+
+    return max(length([a for a, _ in c.pairs]), length([b for _, b in c.pairs]))
+
+
+def drop_slivers(columns: list[col.Column], min_mm: float = MIN_TIP_MM, max_bare_share: float = 0.25) -> list[col.Column]:
+    """Leave out a column that is a sliver: rails shorter than `min_mm` (so its stitches are the long way, a
+    few stitches laid lengthwise) and most of it under the letter's other columns. Futura Condensed's R left
+    one along its stem where the leg meets it: 0.11 mm of rail, 3.3 mm stitches lying diagonally across the
+    stem ("funky lower left legs", stitch-out, 11/13)."""
+    from shapely.ops import unary_union
+
+    def area(c):
+        return unary_union([q for q in c.quads() if not q.is_empty])
+
+    keep = list(columns)
+    for c in columns:
+        if c.closed or len(keep) < 2 or _rail_mm(c) >= min_mm:
+            continue
+        others = unary_union([area(o) for o in keep if o is not c])
+        mine = area(c)
+        if mine.is_empty or mine.difference(others).area <= max_bare_share * mine.area:
+            keep.remove(c)
+    return keep
+
+
 def text_columns(font: str, text: str, height_mm: float, letter_spacing_pct: float | None = None,
                  font_file=None):
     """A line of lettering as satin columns for flat work: the font's built-in strokes where it has
@@ -246,7 +274,7 @@ def text_columns(font: str, text: str, height_mm: float, letter_spacing_pct: flo
     spacing = min(col.DEFAULT_SPACING_MM, max(MIN_SPACING_MM, 0.075 * height_mm))
     letters = col.word_columns(font_file, text, height_mm, letter_spacing_pct, strokes, spacing, flat=True)
     for lt in letters:
-        lt.columns = [trim_tips(c) for c in lt.columns]
+        lt.columns = drop_slivers([trim_tips(c) for c in lt.columns])
     return letters, {lt.char: flat_check(lt) for lt in letters}, auto
 
 

@@ -538,14 +538,89 @@ def open_closed_subpaths(d: str) -> str:
 _D_TOKEN = None  # populated lazily in transform_d
 
 
+def arc_to_cubics(x0: float, y0: float, rx: float, ry: float, phi_deg: float,
+                  large: bool, sweep: bool, x: float, y: float):
+    """SVG elliptical arc → list of cubic segments ((x1,y1),(x2,y2),(x,y)).
+
+    Endpoint → center parameterization per SVG 1.1 F.6.5/F.6.6 (same math as
+    artifact/gate.py flatten_path), then the standard 4/3·tan(θ/4) cubic
+    approximation per ≤90° piece (radial error < 0.03% of the radius).
+    Cubics survive any affine transform exactly, which an arc's rx/ry/rotation
+    parameters do not under shear — that is why transform_d emits these.
+    Degenerate arcs (zero radius or coincident ends) return a straight cubic.
+    """
+    if rx < 1e-9 or ry < 1e-9 or (abs(x - x0) < 1e-12 and abs(y - y0) < 1e-12):
+        return [((x0, y0), (x, y), (x, y))]
+    rx, ry = abs(rx), abs(ry)
+    phi = math.radians(phi_deg)
+    cosp, sinp = math.cos(phi), math.sin(phi)
+    x1p = (cosp * (x0 - x) + sinp * (y0 - y)) / 2
+    y1p = (-sinp * (x0 - x) + cosp * (y0 - y)) / 2
+    lam = (x1p / rx) ** 2 + (y1p / ry) ** 2
+    if lam > 1:
+        k = math.sqrt(lam)
+        rx *= k; ry *= k
+    num_ = (rx * ry) ** 2 - (rx * y1p) ** 2 - (ry * x1p) ** 2
+    den = (rx * y1p) ** 2 + (ry * x1p) ** 2
+    coef = math.sqrt(max(num_, 0.0) / den) if den else 0.0
+    if large == sweep:
+        coef = -coef
+    cxp = coef * rx * y1p / ry
+    cyp = -coef * ry * x1p / rx
+    ccx = cosp * cxp - sinp * cyp + (x0 + x) / 2
+    ccy = sinp * cxp + cosp * cyp + (y0 + y) / 2
+
+    def ang(ux, uy, vx, vy):
+        dd = math.hypot(ux, uy) * math.hypot(vx, vy) or 1.0
+        a = math.acos(max(-1.0, min(1.0, (ux * vx + uy * vy) / dd)))
+        return a if ux * vy - uy * vx >= 0 else -a
+
+    th1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry)
+    dth = ang((x1p - cxp) / rx, (y1p - cyp) / ry,
+              (-x1p - cxp) / rx, (-y1p - cyp) / ry)
+    if not sweep and dth > 0:
+        dth -= 2 * math.pi
+    elif sweep and dth < 0:
+        dth += 2 * math.pi
+    n = max(1, math.ceil(abs(dth) / (math.pi / 2) - 1e-9))
+    step = dth / n
+    alpha = 4 / 3 * math.tan(step / 4)
+
+    def on(t):
+        return (ccx + rx * math.cos(t) * cosp - ry * math.sin(t) * sinp,
+                ccy + rx * math.cos(t) * sinp + ry * math.sin(t) * cosp)
+
+    def deriv(t):
+        return (-rx * math.sin(t) * cosp - ry * math.cos(t) * sinp,
+                -rx * math.sin(t) * sinp + ry * math.cos(t) * cosp)
+
+    out = []
+    t = th1
+    px, py = x0, y0
+    for k in range(n):
+        t2 = th1 + step * (k + 1)
+        d1 = deriv(t); d2 = deriv(t2)
+        ex, ey = (x, y) if k == n - 1 else on(t2)
+        out.append(((px + alpha * d1[0], py + alpha * d1[1]),
+                    (ex - alpha * d2[0], ey - alpha * d2[1]),
+                    (ex, ey)))
+        px, py, t = ex, ey, t2
+    return out
+
+
 def transform_d(d: str, matrix) -> str:
     """Apply an affine matrix to every coordinate of a path's d.
 
-    Parses to absolute M/L/C segments (H/V normalize to L; S/Q/T/A endpoints
-    conservatively to L, matching the editor's tokenizer) and matrix-applies
-    each point — used to FLATTEN an element's transform into its geometry so
-    the whole pipeline can keep working in root coordinates. Engine tools
-    (e.g. convert_to_satin) emit elements with compensating transforms.
+    Parses to absolute M/L/C segments and matrix-applies each point — used
+    to FLATTEN an element's transform into its geometry so the whole
+    pipeline can keep working in root coordinates. Engine tools (e.g.
+    convert_to_satin) emit elements with compensating transforms.
+
+    Curves stay curves: H/V normalize to L; S reflects the previous cubic
+    control and Q/T degree-elevate to C (both exact); A becomes cubics via
+    arc_to_cubics. Collapsing S/Q/T/A to their endpoints (the old behavior)
+    turned Illustrator exports — which lean on ``s`` — into straight-edged
+    polygons the moment a transform was baked.
     """
     import re as _re
     global _D_TOKEN
@@ -557,6 +632,8 @@ def transform_d(d: str, matrix) -> str:
     i = 0
     cx = cy = sx = sy = 0.0
     cmd = None
+    last_c: tuple[float, float] | None = None   # trailing cubic control (for S)
+    last_q: tuple[float, float] | None = None   # trailing quadratic control (for T)
 
     def num() -> float:
         nonlocal i
@@ -567,6 +644,9 @@ def transform_d(d: str, matrix) -> str:
         tx, ty = apply_matrix(matrix, x, y)
         return f"{round(tx, 3)},{round(ty, 3)}"
 
+    def cubic(x1, y1, x2, y2, x, y) -> None:
+        out.append("C" + " ".join((pt(x1, y1), pt(x2, y2), pt(x, y))))
+
     while i < len(tokens):
         if _re.match(r"[A-Za-z]", tokens[i]):
             cmd = tokens[i]; i += 1
@@ -576,28 +656,57 @@ def transform_d(d: str, matrix) -> str:
             x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
             out.append("M" + pt(x, y)); cx, cy, sx, sy = x, y, x, y
             cmd = "l" if rel else "L"
+            last_c = last_q = None
         elif c == "L":
             x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
             out.append("L" + pt(x, y)); cx, cy = x, y
+            last_c = last_q = None
         elif c == "H":
             x = num() + (cx if rel else 0)
             out.append("L" + pt(x, cy)); cx = x
+            last_c = last_q = None
         elif c == "V":
             y = num() + (cy if rel else 0)
             out.append("L" + pt(cx, y)); cy = y
+            last_c = last_q = None
         elif c == "C":
             x1 = num() + (cx if rel else 0); y1 = num() + (cy if rel else 0)
             x2 = num() + (cx if rel else 0); y2 = num() + (cy if rel else 0)
             x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
-            out.append("C" + " ".join((pt(x1, y1), pt(x2, y2), pt(x, y))))
+            cubic(x1, y1, x2, y2, x, y)
             cx, cy = x, y
-        elif c in ("S", "Q", "T", "A"):
-            n = {"S": 4, "Q": 4, "T": 2, "A": 7}[c]
-            vals = [num() for _ in range(n)]
-            x = vals[-2] + (cx if rel else 0); y = vals[-1] + (cy if rel else 0)
-            out.append("L" + pt(x, y)); cx, cy = x, y
+            last_c = (x2, y2); last_q = None
+        elif c == "S":
+            x2 = num() + (cx if rel else 0); y2 = num() + (cy if rel else 0)
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
+            x1 = 2 * cx - last_c[0] if last_c else cx
+            y1 = 2 * cy - last_c[1] if last_c else cy
+            cubic(x1, y1, x2, y2, x, y)
+            cx, cy = x, y
+            last_c = (x2, y2); last_q = None
+        elif c in ("Q", "T"):
+            if c == "Q":
+                qx = num() + (cx if rel else 0); qy = num() + (cy if rel else 0)
+            else:
+                qx = 2 * cx - last_q[0] if last_q else cx
+                qy = 2 * cy - last_q[1] if last_q else cy
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
+            cubic(cx + 2 / 3 * (qx - cx), cy + 2 / 3 * (qy - cy),
+                  x + 2 / 3 * (qx - x), y + 2 / 3 * (qy - y), x, y)
+            cx, cy = x, y
+            last_q = (qx, qy); last_c = None
+        elif c == "A":
+            rx = num(); ry = num(); rot = num()
+            large = num() != 0; sweep = num() != 0
+            x = num() + (cx if rel else 0); y = num() + (cy if rel else 0)
+            for (x1, y1), (x2, y2), (ex, ey) in arc_to_cubics(
+                    cx, cy, rx, ry, rot, large, sweep, x, y):
+                cubic(x1, y1, x2, y2, ex, ey)
+            cx, cy = x, y
+            last_c = last_q = None
         elif c == "Z":
             out.append("Z"); cx, cy = sx, sy
+            last_c = last_q = None
         else:
             i += 1
     return " ".join(out)

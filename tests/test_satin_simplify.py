@@ -52,10 +52,12 @@ class TestSimplifySatinD:
         new_d, before, after = simplify_satin_d(d)
         assert before == 402
         assert after < before * 0.2          # arcs need a handful of points
+        # rails now come back as bezier curves, not polylines
+        assert "C" in new_d
         # endpoints exact — rung↔rail contact at the ends must survive
-        subs = new_d.split(" M")
-        assert subs[0].startswith("M20.0000,0.0000".replace("0000", "000")) \
-            or new_d.startswith("M20.000,0.000")
+        from cli_anything_inkstitch.svg.curvefit import parse_segments
+        start, segs, _ = parse_segments(new_d.split(" M")[0])
+        assert start == (20.0, 0.0) and segs[-1][-1] == (0.0, 20.0)
         # rungs content-identical (subpath splitting may shuffle whitespace)
         assert " ".join(new_d.split()).endswith("M20,0 L24,0 M0,20 L0,24")
 
@@ -69,10 +71,9 @@ class TestSimplifySatinD:
              + " M9,0 L13,0")
         new_d, before, after = simplify_satin_d(d)
         assert after < before
-        first_sub = new_d.split(" M")[0]
-        pts = [tuple(map(float, p.split(",")))
-               for p in first_sub.lstrip("M").split(" ")]
-        assert math.dist(pts[0], pts[-1]) < 1e-9
+        from cli_anything_inkstitch.svg.curvefit import parse_segments
+        start, segs, _ = parse_segments(new_d.split(" M")[0])
+        assert math.dist(start, segs[-1][-1]) < 1e-9
 
     def test_bezier_rails_pass_through_byte_identical(self):
         d = ("M0,0 C5,0 10,5 10,10 M2,0 C7,0 12,5 12,10 M0,0 L2,0")
