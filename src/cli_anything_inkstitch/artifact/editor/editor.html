@@ -235,8 +235,6 @@
   .layerRow:hover { background: rgba(110,168,254,.08); }
   .layerRow.sel { background: rgba(110,168,254,.16); }
   .layerRow.dropTarget { box-shadow: 0 -2px 0 var(--accent); }
-  .layerRow .num { color: var(--muted); width: 16px; text-align: right;
-                   font-size: var(--fs-xs); }
   .layerRow .sw { width: 11px; height: 11px; border-radius: 3px;
                   border: 1px solid var(--line); flex: none; }
   .layerRow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis;
@@ -4375,14 +4373,11 @@ function renderLayers() {
   const body = $("layersBody");
   body.textContent = "";
   if (!design) return;
-  design.objects.forEach((o, i) => {
+  design.objects.forEach((o) => {
     const r = document.createElement("div");
     r.className = "layerRow" + (selection.includes(o.id) ? " sel" : "");
     r.dataset.id = o.id;
     r.draggable = true;
-    const num = document.createElement("span");
-    num.className = "num";
-    num.textContent = i + 1;
     // editable swatch: recolors just this element (Colors panel rethreads
     // the whole thread group; this is the per-element complement)
     const sw = document.createElement("input");
@@ -4432,8 +4427,8 @@ function renderLayers() {
       warn.className = "warnBadge";
       warn.innerHTML = icon("alert-triangle");
       warn.title = ignoredMethodNote();
-      r.append(eye, num, sw, nm, warn, kd);
-    } else r.append(eye, num, sw, nm, kd);   // visibility first, as in Illustrator
+      r.append(eye, sw, nm, warn, kd);
+    } else r.append(eye, sw, nm, kd);   // visibility first, as in Illustrator
     r.addEventListener("click", (ev) =>
       select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey));
     r.addEventListener("contextmenu", (ev) =>
