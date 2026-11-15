@@ -126,14 +126,21 @@ class TestApplyEdits:
         # and a follow-up read works without --force
         read_design(project)
 
-    def test_history_entry_per_op(self, project):
+    def test_history_one_entry_per_batch(self, project):
+        # a batch is one user action -> one undo step (was one entry per op;
+        # an align of 3 marked satins took 9 Cmd+Z presses)
+        from cli_anything_inkstitch.artifact.design_model import apply_history_step
         before = len(ProjectFile.load(project).history["entries"])
         apply_edits(project, [
             {"op": "set_attr", "id": "elem_fill", "name": "angle", "value": "10"},
             {"op": "set_attr", "id": "elem_fill", "name": "row_spacing_mm", "value": "0.3"},
         ])
         after = len(ProjectFile.load(project).history["entries"])
-        assert after == before + 2
+        assert after == before + 1
+        apply_history_step(project)
+        params = next(o for o in read_design(project)["objects"]
+                      if o["id"] == "elem_fill")["params"]
+        assert params.get("angle") != "10" and params.get("row_spacing_mm") != "0.3"
 
     def test_set_path(self, project):
         apply_edits(project, [{"op": "set_path", "id": "elem_run", "d": "M2,22 L28,22"}])
