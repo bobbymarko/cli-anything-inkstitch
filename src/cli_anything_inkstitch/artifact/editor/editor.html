@@ -431,6 +431,11 @@
   .penDraft { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
               vector-effect: non-scaling-stroke; pointer-events: none; }
   .node.penFirst { fill: var(--start); }
+  .knifeDraft { fill: none; stroke: #ff5a5a; stroke-width: 1.5;
+                stroke-dasharray: 6 3; vector-effect: non-scaling-stroke;
+                pointer-events: none; }
+  .knifeNode { fill: #ff5a5a; stroke: #fff; stroke-width: 1;
+               vector-effect: non-scaling-stroke; pointer-events: none; }
   .selMarquee { fill: rgba(110,168,254,.06); stroke: var(--accent);
                 stroke-dasharray: 4 3; vector-effect: non-scaling-stroke;
                 pointer-events: none; }
@@ -508,6 +513,15 @@
           <path d="M8.9 3.5 L12.5 7.1"/>
         </svg>
         <span class="kbd">P</span>
+      </button>
+      <button class="tool" id="toolKnife" type="button"
+              title="Knife (K) — drag across shapes to cut them apart; or click points for a multi-segment cut, then Enter (or click the last point again). Shift snaps to 45°, Esc cancels. Cuts the selection, or everything visible under the line when nothing is selected">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+          <path d="M2 14 L9.2 6.8 L13.6 2.4 C14.6 4.6 13.4 7.6 10.6 8.2 L4 14.4 Z"/>
+          <path d="M9.2 6.8 L10.6 8.2"/>
+        </svg>
+        <span class="kbd">K</span>
       </button>
       <button class="tool" id="toolPan" type="button"
               title="Pan (H) — drag to move the view; hold Space for a temporary pan with any tool">
@@ -1973,7 +1987,21 @@ canvas.addEventListener("pointerdown", (ev) => {
     penSel = null;
     renderEditLayer();
   }
+  if (activeTool === "knife" && ev.button === 0) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    if (document.activeElement && document.activeElement !== document.body
+        && document.activeElement.blur) document.activeElement.blur();
+    knifePointerDown(ev);
+  }
 }, true);
+canvas.addEventListener("pointermove", (ev) => {
+  if (activeTool === "knife" && knifeDraft && !knifeDragging) {
+    knifeHover = penConstrain(clientToSvg(ev), knifeDraft[knifeDraft.length - 1],
+                              ev.shiftKey);
+    renderKnifeDraft(true);
+  }
+});
 canvas.addEventListener("pointermove", (ev) => {
   // pen rubber band: live preview of the next segment (shift shows the
   // constrained line, so you see the snap before committing the click)
@@ -2087,6 +2115,111 @@ async function commitPen(closed) {
     // STAY in the pen: tracing places many lines back-to-back, and the old
     // auto-switch to node raced the commit against the NEXT draft, wiping
     // points the user had already placed (reproduced: 2 clicks vanished)
+  } catch (e) { await refresh(); }
+}
+
+/* knife tool: slice shapes apart along a line (Illustrator's knife, made
+   straight so the cut is predictable on stitch geometry).
+   Drag = one straight cut, committed on release. Click without dragging
+   starts a multi-segment cut: each click adds a corner; Enter, or clicking
+   the last point again, cuts; Esc cancels. Shift snaps to 45°.
+   The server does the geometry (design_model.py _knife): fills split with
+   exact bezier subdivision, runs split at each crossing, satins through
+   the engine's own cut_satin. One knife = one history entry, so a single
+   Cmd+Z restores every shape it cut. */
+let knifeDraft = null;        // [{x, y}] placed points
+let knifeHover = null;        // rubber-band end
+let knifeDragging = false;
+function knifePointerDown(ev) {
+  const p0 = clientToSvg(ev);
+  if (knifeDraft) {                           // click mode: add / finish
+    const last = knifeDraft[knifeDraft.length - 1];
+    if (Math.hypot(p0.x - last.x, p0.y - last.y) < px(6)) {
+      commitKnife();
+      return;
+    }
+    const p = penConstrain(p0, last, ev.shiftKey);
+    knifeDraft.push({ x: p.x, y: p.y });
+    knifeHover = null;
+    renderKnifeDraft(true);
+    return;
+  }
+  knifeDraft = [{ x: p0.x, y: p0.y }];
+  knifeHover = null;
+  knifeDragging = false;
+  const sx = ev.clientX, sy = ev.clientY;
+  const move = (e) => {
+    if (!knifeDragging && Math.hypot(e.clientX - sx, e.clientY - sy) > 4)
+      knifeDragging = true;
+    if (!knifeDragging || !knifeDraft) return;
+    knifeHover = penConstrain(clientToSvg(e), knifeDraft[0], e.shiftKey);
+    renderKnifeDraft(true);
+  };
+  const up = (e) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (!knifeDragging || !knifeDraft) {     // a click: stay in click mode
+      knifeDragging = false;
+      renderKnifeDraft(true);
+      return;
+    }
+    knifeDragging = false;
+    const p = penConstrain(clientToSvg(e), knifeDraft[0], e.shiftKey);
+    knifeDraft.push({ x: p.x, y: p.y });
+    commitKnife();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  renderKnifeDraft(true);
+}
+function cancelKnife() {
+  knifeDraft = null; knifeHover = null; knifeDragging = false;
+  renderEditLayer();
+}
+let knifeEls = [];
+function renderKnifeDraft(only = false) {
+  // `only`: redraw just the knife overlay (pointermove rate) instead of
+  // rebuilding the whole edit layer
+  for (const e of knifeEls) e.remove();
+  knifeEls = [];
+  if (!editLayer || !knifeDraft || !knifeDraft.length) return;
+  const pts = knifeHover ? [...knifeDraft, knifeHover] : knifeDraft;
+  if (pts.length > 1)
+    knifeEls.push(el("polyline", {
+      points: pts.map(p => fmt(p.x) + "," + fmt(p.y)).join(" "),
+      class: "knifeDraft" }, editLayer));
+  for (const p of knifeDraft)
+    knifeEls.push(el("circle", { cx: p.x, cy: p.y, r: px(3.5),
+                                 class: "knifeNode" }, editLayer));
+}
+async function commitKnife() {
+  const pts = knifeDraft;
+  knifeDraft = null; knifeHover = null; knifeDragging = false;
+  renderEditLayer();
+  if (!pts || pts.length < 2) return;
+  if (Math.hypot(pts[pts.length - 1].x - pts[0].x,
+                 pts[pts.length - 1].y - pts[0].y) < px(3)) return;
+  // Illustrator: the knife cuts the selection, or — with nothing selected —
+  // every visible shape under the line (hidden ones are out of reach)
+  const ids = selection.length
+    ? [...selection]
+    : design.objects.filter(o => !hiddenIds.has(o.id)).map(o => o.id);
+  if (!ids.length) return;
+  const hasSatin = ids.some(i => { const o = byId(i); return o && o.kind === "satin"; });
+  if (hasSatin) showToast("cutting… (satins go through Ink/Stitch's cut_satin)");
+  try {
+    const r = await postEdit([{ op: "knife",
+      line: pts.map(p => [Number(fmt(p.x)), Number(fmt(p.y))]), ids }]);
+    const res = r && r.results && r.results[0];
+    if (!res || !res.cut.length) {
+      showToast("knife: the line didn't cut through any shape");
+      return;
+    }
+    const n = res.cut.length;
+    const m = Object.values(res.pieces).reduce((a, v) => a + v.length, 0);
+    if (selection.length) setSelection([]);
+    showToast(`cut ${n} shape${n > 1 ? "s" : ""} into ${m} pieces — `
+              + `${MOD_LABEL}Z puts ${n > 1 ? "them" : "it"} back`);
   } catch (e) { await refresh(); }
 }
 
@@ -2507,6 +2640,11 @@ function renderEditLayer() {
   renderInspect(objs);
   if (activeTool === "pen") {
     renderPenDraft();
+    return;
+  }
+  if (activeTool === "knife") {
+    knifeEls = [];                  // the layer was just cleared
+    renderKnifeDraft();
     return;
   }
   if (activeTool === "select") {
@@ -3284,10 +3422,14 @@ document.addEventListener("keydown", (ev) => {
       penDraft = null; penSel = null; penHover = null;
       renderEditLayer(); return;
     }
+    if (knifeDraft) { cancelKnife(); return; }
     setSelection([]);
   } else if (ev.key === "Enter" && penDraft) {
     ev.preventDefault();
     commitPen(false);
+  } else if (ev.key === "Enter" && knifeDraft) {
+    ev.preventDefault();
+    commitKnife();
   } else if ((ev.key === "Delete" || ev.key === "Backspace")
              && penDraft && penSel != null) {
     ev.preventDefault();
@@ -3302,6 +3444,8 @@ document.addEventListener("keydown", (ev) => {
     setTool("pen");
   } else if (!mod && k === "h") {
     setTool("pan");
+  } else if (!mod && k === "k") {
+    setTool("knife");
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeRung) {
     const o = byId(activeRung.objId);
     const idx = activeRung.index;
@@ -3342,7 +3486,8 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 const restoreCursor = () =>
-  canvas.style.cursor = activeTool === "pen" ? "crosshair" : "";
+  canvas.style.cursor = activeTool === "pen" || activeTool === "knife"
+    ? "crosshair" : "";
 document.addEventListener("keyup", (ev) => {
   if (ev.key === " ") { spaceHeld = false; restoreCursor(); }
   if (ev.key.toLowerCase() === "z") { zHeld = false; restoreCursor(); }
@@ -3583,10 +3728,12 @@ function setTool(t) {
   $("toolNode").classList.toggle("on", t === "node");
   $("toolPen").classList.toggle("on", t === "pen");
   $("toolPan").classList.toggle("on", t === "pan");
+  $("toolKnife").classList.toggle("on", t === "knife");
   activeRung = null;
   activeNode = null;
   if (t !== "pen") { penDraft = null; penSel = null; penHover = null; }
-  canvas.style.cursor = t === "pen" ? "crosshair"
+  if (t !== "knife") { knifeDraft = null; knifeHover = null; knifeDragging = false; }
+  canvas.style.cursor = t === "pen" || t === "knife" ? "crosshair"
                       : t === "pan" ? "grab" : "";
   renderEditLayer();
 }
@@ -3594,6 +3741,7 @@ $("toolSelect").onclick = () => setTool("select");
 $("toolNode").onclick = () => setTool("node");
 $("toolPen").onclick = () => setTool("pen");
 $("toolPan").onclick = () => setTool("pan");
+$("toolKnife").onclick = () => setTool("knife");
 
 function setViewMode(mode) {
   viewMode = mode;
@@ -4154,6 +4302,7 @@ const HELP = [
     ["V — Select", "drag to move, corners to scale, side midpoints to squish; hover just outside a corner to rotate (shift = 45° snaps); markers move with their shape"],
     ["A — Edit nodes", "boundary nodes, satin rails and rungs, fill start/end handles, angle knob"],
     ["P — Pen", "click to place points; click the first point to close as a fill, Enter finishes a running stitch, Esc cancels. Smooth corners afterwards with A + double-click"],
+    ["K — Knife", "drag across shapes to cut them apart (or click corners, then Enter); cuts the selection, or every visible shape under the line. Curves stay curves; satins are cut by Ink/Stitch's cut_satin. One undo restores the cut"],
   ]],
   ["View modes", [
     ["Outline", "artwork and edit handles only"],

@@ -653,7 +653,298 @@ def _apply_one(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
     if name == "add_element":
         return _add_element(proj, tree, op)
 
+    if name == "knife":
+        return _knife(proj, tree, op)
+
     raise UserError(f"unknown edit op: {name!r}")
+
+
+# -- knife ---------------------------------------------------------------------
+
+_KNIFE_SRC = "data-knife-src"        # our own marker; the engine never reads it
+
+
+def _design_elements(tree):
+    """Stitchable shapes: not command plumbing, not template geometry inside
+    defs/symbol/marker (svg/attrs.py in_nonrendered_container cites the
+    engine readers that skip those)."""
+    from cli_anything_inkstitch.svg.attrs import in_nonrendered_container
+    for e in tree.getroot().iter():
+        if (isinstance(e.tag, str) and e.get("id")
+                and etree.QName(e.tag).localname in _SHAPE_TAGS
+                and not _is_command_use(e) and not _is_command_plumbing(e)
+                and not in_nonrendered_container(e)):
+            yield e
+
+
+def _fresh_id(tree, taken: set[str]) -> str:
+    import secrets
+    while True:
+        cand = "elem_" + secrets.token_hex(3)
+        if cand not in taken and find_by_id(tree, cand) is None:
+            taken.add(cand)
+            return cand
+
+
+def _knife(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
+    """Slice shapes along a polyline (editor knife tool). Atomic: every cut
+    element is replaced by its pieces under ONE history entry, so a single
+    undo restores all of them.
+
+    op = {"op": "knife", "line": [[x, y], ...], "ids": [...] (optional)}
+    ``line`` is in root user units (the editor's canvas space); without
+    ``ids`` every design element is a candidate (Illustrator's knife cuts
+    whatever lies under it).
+
+    * fill / run: svg/knife.py, exact bezier subdivision. The line is mapped
+      into each element's own coordinate system (inverse of its composed
+      transform — an affine map keeps a straight cut straight), so pieces
+      keep the original's transform and need no baking.
+    * satin: the engine's own tool (CLAUDE.md "prefer the engine's tool"),
+      see _knife_satins.
+
+    Pieces are deep copies of the original — style, inkscape:label (with a
+    piece suffix) and every inkstitch:* param carry over — with fresh ids,
+    inserted where the original was (element order is stitch order).
+    Commands attached to the original (fill start/end, …) reference its id
+    and would dangle, so they are detached, as delete_element does.
+    """
+    from cli_anything_inkstitch.history import multi_patch
+    from cli_anything_inkstitch.svg import commands as vc
+    from cli_anything_inkstitch.svg.geometry import apply_matrix, ctm_for
+    from cli_anything_inkstitch.svg.knife import knife_fill, knife_run
+
+    raw = op.get("line") or []
+    try:
+        line = [(float(p[0]), float(p[1])) for p in raw]
+    except (TypeError, ValueError, IndexError):
+        raise UserError("knife: 'line' must be a list of [x, y] points")
+    if len(line) < 2:
+        raise UserError("knife: 'line' needs at least two points")
+    ids = op.get("ids")
+    if ids:
+        targets = []
+        for i in ids:
+            e = find_by_id(tree, str(i))
+            if e is None:
+                raise UserError(f"no element with id={i!r}")
+            targets.append(e)
+    else:
+        targets = list(_design_elements(tree))
+
+    plans: list[tuple[Any, list[str]]] = []     # (element, piece d's)
+    satins = []
+    skipped: list[dict[str, str]] = []
+    for elem in targets:
+        kind = _kind_of(elem, classify(elem))
+        if etree.QName(elem.tag).localname != "path":
+            if ids:
+                skipped.append({"id": elem.get("id"), "reason": "not a <path>"})
+            continue
+        if kind == "satin":
+            satins.append(elem)
+            continue
+        if kind not in ("fill", "run"):
+            continue
+        m = _invert(ctm_for(elem))
+        local = [apply_matrix(m, x, y) for x, y in line]
+        d = elem.get("d") or ""
+        try:
+            pieces = (knife_fill if kind == "fill" else knife_run)(d, local)
+        except (ValueError, IndexError, ZeroDivisionError):
+            skipped.append({"id": elem.get("id"), "reason": "unreadable path data"})
+            continue
+        if pieces:
+            plans.append((elem, pieces))
+    if satins:
+        plans.extend(_knife_satins(proj, tree, satins, line))
+    if not plans:
+        return {"op": "knife", "cut": [], "pieces": {}, "skipped": skipped}
+
+    patches: list[dict] = []
+    taken: set[str] = set()
+    result_pieces: dict[str, list[str]] = {}
+    for elem, pieces in plans:
+        src_id = elem.get("id")
+        for cmd in vc.find_commands(tree, elem):
+            r = vc.detach_command(tree, cmd["use_id"])
+            patches.append(node_delete(parent_xpath=_xpath(r["parent_id"]),
+                                       index=r["index"], before_xml=r["xml"]))
+        parent = elem.getparent()
+        _ensure_id(parent)
+        index = list(parent).index(elem)
+        patches.append(node_delete(parent_xpath=_xpath(parent.get("id")), index=index,
+                                   before_xml=etree.tostring(elem).decode("utf-8")))
+        parent.remove(elem)
+        from cli_anything_inkstitch.svg.commands import INKSCAPE_LABEL
+        label = elem.get(INKSCAPE_LABEL) or src_id
+        new_ids = []
+        for k, piece in enumerate(pieces):
+            if isinstance(piece, str):
+                node = _copy_node(elem)
+                node.set("d", piece)
+            else:
+                node = piece                       # engine-made satin piece
+            # one label scheme for every kind, numbered in stitch order
+            # (cut_satin's own "label n" counts backwards)
+            node.set(INKSCAPE_LABEL, f"{label} {k + 1}")
+            node.set("id", _fresh_id(tree, taken))
+            node.tail = elem.tail
+            parent.insert(index + k, node)
+            patches.append(node_insert(parent_xpath=_xpath(parent.get("id")),
+                                       index=index + k,
+                                       after_xml=etree.tostring(node).decode("utf-8")))
+            new_ids.append(node.get("id"))
+        result_pieces[src_id] = new_ids
+    cut = list(result_pieces)
+    push(proj.history, make_entry(
+        command=f"artifact edit knife ({', '.join(cut)})",
+        patch=multi_patch(patches)))
+    return {"op": "knife", "cut": cut, "pieces": result_pieces, "skipped": skipped}
+
+
+def _copy_node(elem):
+    import copy
+    node = copy.deepcopy(elem)
+    node.tail = None
+    return node
+
+
+def _invert(m):
+    a, b, c, d, e, f = m
+    det = a * d - b * c
+    if abs(det) < 1e-15:
+        raise UserError("knife: element has a degenerate transform")
+    return (d / det, -b / det, -c / det, a / det,
+            (c * f - d * e) / det, (b * e - a * f) / det)
+
+
+def _rails_bbox(d: str):
+    """Bbox of a satin's two rails ON the curve (flattened), not of the
+    bezier control polygon — control points overstate a curved rail's span
+    and made the drift guard below fire on an exact cut."""
+    from cli_anything_inkstitch.artifact.gate import flatten_path
+    pts = [q for sub in split_subpaths(d)[:2] for q in flatten_path(sub, 32)]
+    if not pts:
+        return None
+    xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _knife_satins(proj: ProjectFile, tree, satins, line) -> list[tuple[Any, list]]:
+    """Cut satin columns with the engine's own cut_satin extension.
+
+    Engine contract (inkstitch/lib/extensions/cut_satin.py CutSatin):
+    selected Stroke elements are cut lines — each subpath separately
+    (``_select_elements``: ``as_multi_line_string().geoms``) — and a line
+    cuts a satin where it intersects a rail in exactly one point
+    (``_get_cut_points``: ``geom_type == "Point"``). The cut itself is
+    ``SatinColumn.split(None, cut_points)`` (lib/elements/satin_column.py):
+    rails are cut at the projected points, existing rungs go to the piece
+    whose two rails they cross (``_assign_rungs_to_split_rails``) and rungs
+    are added where a piece would lack them (``_add_rungs_if_necessary``).
+    Pieces are inserted at the satin's index with the correction transform
+    applied (``insert_satin``: ``apply_transform``), the satin and the cut
+    lines are deleted.
+
+    So the knife polyline is handed over with every segment as its own
+    subpath (one rail crossing per segment, as the engine requires), in root
+    coordinates on a root-level stroke. The engine runs on a scratch copy of
+    the IN-MEMORY tree, so this op batches safely with others.
+
+    The engine rebuilds rails from flattened coordinates, so pieces come
+    back as polylines; their rails are refit as beziers the same way
+    convert_element does (trace/satinize.py simplify_satin_d).
+    """
+    import tempfile
+    from cli_anything_inkstitch.binary import require, run_extension
+    from cli_anything_inkstitch.svg import commands as vc
+    from cli_anything_inkstitch.svg.geometry import (
+        apply_matrix,
+        ctm_for,
+        parse_transform,
+        transform_d,
+        transformed_bbox,
+    )
+    from cli_anything_inkstitch.svg.knife import knife_run
+    from cli_anything_inkstitch.svg.units import check_scale_drift
+    from cli_anything_inkstitch.trace.satinize import simplify_satin_d
+    from cli_anything_inkstitch.commands.tools import _fit_tolerance
+
+    # only satins whose rails the line actually crosses go to the engine
+    crossed = []
+    for s in satins:
+        m = _invert(ctm_for(s))
+        local = [apply_matrix(m, x, y) for x, y in line]
+        subs = split_subpaths(s.get("d") or "")
+        if any(knife_run(sub, local) for sub in subs[:2]):
+            crossed.append(s)
+    if not crossed:
+        return []
+
+    binary = require(None, proj.session)
+    root_copy = etree.fromstring(etree.tostring(tree.getroot()))
+    work = etree.ElementTree(root_copy)
+    for s in crossed:
+        twin = find_by_id(work, s.get("id"))
+        twin.set(_KNIFE_SRC, s.get("id"))
+        # the satin's own satin_cut_point commands would ALSO cut it
+        # (cut_satin reads satin.get_commands("satin_cut_point")); the knife
+        # is the only cut the user asked for, and every attached command is
+        # detached from the original anyway
+        for cmd in vc.find_commands(work, twin):
+            vc.detach_command(work, cmd["use_id"])
+    cut_id = "knife_cut_line"
+    cut = etree.SubElement(root_copy, f"{{{SVG_NS}}}path")
+    cut.set("id", cut_id)
+    cut.set("d", " ".join(f"M{a[0]:.6g},{a[1]:.6g} L{b[0]:.6g},{b[1]:.6g}"
+                          for a, b in zip(line, line[1:])))
+    cut.set("fill", "none")
+    cut.set("stroke", "#000000")       # a Stroke element (classify by paint)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_svg = str(Path(tmp) / "knife.svg")
+        Path(tmp_svg).write_bytes(etree.tostring(work, xml_declaration=True,
+                                                 encoding="utf-8"))
+        stdout = run_extension(binary, "cut_satin", tmp_svg,
+                               ids=[s.get("id") for s in crossed] + [cut_id],
+                               capture_stdout=True)
+    if not stdout:
+        return []
+    out_root = etree.fromstring(stdout)
+    tol = _fit_tolerance(tree)
+    plans = []
+    for s in crossed:
+        sid = s.get("id")
+        pieces = [e for e in out_root.iter()
+                  if isinstance(e.tag, str) and e.get(_KNIFE_SRC) == sid]
+        if len(pieces) < 2:
+            continue                   # engine found no usable cut point
+        before = _rails_bbox(s.get("d") or "")
+        boxes = []
+        for p in pieces:
+            del p.attrib[_KNIFE_SRC]
+            p.tail = None
+            # insert_satin applied the correction transform; anything left
+            # would mean raw d is not effective geometry (CLAUDE.md rule 5)
+            if p.get("transform"):
+                p.set("d", transform_d(p.get("d"), parse_transform(p.get("transform"))))
+                del p.attrib["transform"]
+            new_d, nb, na = simplify_satin_d(p.get("d"), tolerance=tol)
+            if na < nb:
+                p.set("d", new_d)
+            bb = _rails_bbox(p.get("d"))
+            if bb:
+                boxes.append(bb)
+        if s.get("transform") and before:
+            # (bbox of a transformed box: the guard only checks spans)
+            # pieces are baked into the parent's space; compare like for like
+            before = transformed_bbox(before, parse_transform(s.get("transform")))
+        if boxes:
+            after = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                     max(b[2] for b in boxes), max(b[3] for b in boxes))
+            check_scale_drift("cut_satin", before, after, tolerance=0.05)
+        plans.append((s, pieces))
+    return plans
 
 
 def _add_element(proj: ProjectFile, tree, op: dict[str, Any]) -> dict[str, Any]:
