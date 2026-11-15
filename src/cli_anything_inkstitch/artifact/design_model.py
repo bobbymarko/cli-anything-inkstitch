@@ -1206,9 +1206,13 @@ def _ensure_id(elem) -> None:
 def apply_edits(project_file: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
     """Apply edit ops in order under one lock/load/save cycle.
 
-    Each op records its own history entry, so per-batch undo works with the
-    existing `session undo` machinery. All-or-nothing: an invalid op aborts
-    the batch before anything is written to disk.
+    A batch is one user action (a group move, an align, a nudge burst), so
+    its entries are folded into ONE history entry (`multi_patch`, which
+    undoes its parts in reverse order): one Cmd+Z undoes the whole action.
+    Before, an align of three satins with start/end markers took nine undo
+    steps. Entries are only folded when all of them are plain SVG patches;
+    anything else keeps its own entries. All-or-nothing: an invalid op
+    aborts the batch before anything is written to disk.
     """
     if not ops:
         return {"applied": 0}
@@ -1219,11 +1223,33 @@ def apply_edits(project_file: str, ops: list[dict[str, Any]]) -> dict[str, Any]:
         raise UserError("convert_element must be the only op in its batch")
     results = []
     with _open_locked(project_file, mutate=True) as (proj, tree):
+        before_ids = {e.get("id") for e in proj.history.get("entries", [])}
         for op in ops:
             results.append(_apply_one(proj, tree, op))
+        _fold_batch_history(proj.history, before_ids)
     proj_after = ProjectFile.load(project_file)
     return {"applied": len(results), "results": results,
             "svg_sha256": proj_after.svg_sha256}
+
+
+def _fold_batch_history(history: dict, before_ids: set) -> None:
+    """Replace the entries a batch just pushed with one multi-patch entry."""
+    from cli_anything_inkstitch.history import multi_patch
+    entries = history.get("entries", [])
+    new = [e for e in entries if e.get("id") not in before_ids]
+    if len(new) < 2 or entries[-len(new):] != new:
+        return                                  # nothing to fold / not contiguous
+    if any(e.get("scope", "svg") != "svg"
+           or e["patch"].get("type") in ("oversize", "metadata_diff") for e in new):
+        return
+    commands = [e["command"] for e in new]
+    label = commands[0] if len(set(commands)) == 1 else \
+        f"{commands[0]} (+{len(commands) - 1} more)"
+    merged = make_entry(command=label,
+                        patch=multi_patch([e["patch"] for e in new]))
+    history["entries"] = entries[:-len(new)]
+    history["cursor"] = len(history["entries"]) - 1
+    push(history, merged)
 
 
 def apply_history_step(project_file: str, *, redo: bool = False) -> dict[str, Any]:

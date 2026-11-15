@@ -296,6 +296,7 @@
              font-size: 12px; color: var(--text); }
   .ctxItem:hover { background: rgba(110,168,254,.12); }
   .ctxItem.danger { color: var(--end); }
+  .ctxItem:disabled { opacity: .4; cursor: default; background: none; }
   .ctxItem.danger:hover { background: rgba(229,83,75,.12); }
   .ctxSep { height: 1px; background: var(--line); margin: 4px 6px; }
   #rulerTop { position: absolute; top: 0; left: 18px; right: 0; height: 18px;
@@ -2369,6 +2370,15 @@ function renderAll() {
     if (activeTool === "select" && !spaceHeld) return startMarquee(ev);
     return startPan(ev);
   });
+  // empty canvas: our menu instead of the browser's
+  bg.addEventListener("contextmenu", (ev) => {
+    const items = selection.length > 1 ? selectionMenuItems(clientToSvg(ev)) : [];
+    if (items.length) items.push("-");
+    items.push({ label: "Select all", run: () => setSelection(design.objects.map(o => o.id)) });
+    if (selection.length) items.push({ label: "Deselect", run: () => setSelection([]) });
+    items.push({ label: "Fit to window", run: () => { vb = { ...baseVb }; setViewBox(); } });
+    showContextMenu(ev, items);
+  });
   gridLayer = el("g", {}, canvas);
   refLayer = el("g", {}, canvas);   // reference art under the design, over grid
   artworkLayer = el("g", { class: "artwork" }, canvas);
@@ -2464,7 +2474,7 @@ function renderAll() {
     hit.addEventListener("dblclick", (ev) => { ev.stopPropagation(); addRung(o, ev); });
     hit.addEventListener("contextmenu", (ev) => {
       if (!selection.includes(o.id)) select(o.id);
-      showContextMenu(ev, objectMenuItems(o, clientToSvg(ev)));
+      showContextMenu(ev, selectionMenuItems(clientToSvg(ev)));
     });
   }
   renderEditLayer();
@@ -2796,6 +2806,119 @@ const M_ROTATE = (ang, cx, cy) => {
   return [cos, sin, -sin, cos,
           cx - cx * cos + cy * sin, cy - cx * sin - cy * cos];
 };
+/* edit ops that persist a transformed snapshot: the path plus any
+   start/end command markers riding along with it */
+function transformOps(snap) {
+  const ops = [];
+  for (const rec of snap) {
+    ops.push({ op: "set_path", id: rec.o.id, d: rec.o.d });
+    for (const h of [rec.o.start, rec.o.end])
+      if (h && h.use_id && !h.legacy)
+        ops.push({ op: "move_command", use_id: h.use_id,
+                   x: fmt(h.x), y: fmt(h.y) });
+  }
+  return ops;
+}
+function uuPerMm() {
+  const m = /^([\d.]+)\s*mm$/.exec(design.width || "");
+  return m ? baseVb.w / parseFloat(m[1]) : 96 / 25.4;
+}
+/* ---------- arrow-key nudge ----------
+   Arrow = 0.25 mm, Shift+Arrow = 2.5 mm (Illustrator's 10x ratio). A burst
+   of presses previews live and saves as one edit 350 ms after the last
+   press; while a burst is open it counts as a drag, so a reload can't
+   swap the shapes out from under it. */
+const NUDGE_MM = 0.25, NUDGE_BIG_MM = 2.5;
+let nudge = null;                 // {ids, snap, tx, ty, timer}
+function nudgeSelection(dxDir, dyDir, big) {
+  const objs = selection.map(byId).filter(Boolean);
+  if (!objs.length) return;
+  const key = objs.map(o => o.id).join(",");
+  if (!nudge || nudge.key !== key) {
+    if (nudge) commitNudge();
+    nudge = { key, snap: snapshotObjs(objs), tx: 0, ty: 0, timer: null };
+    dragging = { type: "nudge" };
+  }
+  const step = (big ? NUDGE_BIG_MM : NUDGE_MM) * uuPerMm();
+  nudge.tx += dxDir * step;
+  nudge.ty += dyDir * step;
+  applyAffine(nudge.snap, M_MOVE(nudge.tx, nudge.ty));
+  renderEditLayer();
+  clearTimeout(nudge.timer);
+  nudge.timer = setTimeout(commitNudge, 350);
+}
+function commitNudge() {
+  if (!nudge) return;
+  const n = nudge;
+  nudge = null;
+  clearTimeout(n.timer);
+  if (dragging && dragging.type === "nudge") dragging = null;
+  if (n.tx || n.ty) postEdit(transformOps(n.snap)).catch(() => refresh());
+  else settleReload();
+}
+/* ---------- align / distribute (selection menu) ----------
+   Align moves each shape so its bounding box edge meets the selection's
+   edge. Distribute keeps the outermost shapes put and spaces the others
+   so the GAPS between neighbours are equal (shapes of different sizes
+   still look evenly spaced). */
+function alignSelection(mode) {
+  const objs = selection.map(byId).filter(Boolean);
+  if (objs.length < 2) return;
+  const all = selectionBBox(objs);
+  const snap = snapshotObjs(objs);
+  const boxes = objs.map(o => selectionBBox([o]));
+  const moves = boxes.map(() => [0, 0]);
+  if (mode === "left") boxes.forEach((b, i) => { moves[i][0] = all.minx - b.minx; });
+  if (mode === "right") boxes.forEach((b, i) => { moves[i][0] = all.maxx - b.maxx; });
+  if (mode === "top") boxes.forEach((b, i) => { moves[i][1] = all.miny - b.miny; });
+  if (mode === "bottom") boxes.forEach((b, i) => { moves[i][1] = all.maxy - b.maxy; });
+  if (mode === "dist-h" || mode === "dist-v") {
+    const lo = mode === "dist-h" ? "minx" : "miny", hi = mode === "dist-h" ? "maxx" : "maxy";
+    const axis = mode === "dist-h" ? 0 : 1;
+    const order = boxes.map((b, i) => i).sort((a, b) =>
+      (boxes[a][lo] + boxes[a][hi]) - (boxes[b][lo] + boxes[b][hi]));
+    const sizes = order.map(i => boxes[i][hi] - boxes[i][lo]);
+    const span = boxes[order[order.length - 1]][hi] - boxes[order[0]][lo];
+    const gap = (span - sizes.reduce((a, b) => a + b, 0)) / (order.length - 1);
+    let cursor = boxes[order[0]][lo];
+    order.forEach((i, k) => {
+      moves[i][axis] = cursor - boxes[i][lo];
+      cursor += sizes[k] + gap;
+    });
+  }
+  const changed = [];
+  snap.forEach((rec, i) => {
+    const [tx, ty] = moves[i];
+    if (Math.abs(tx) < 1e-6 && Math.abs(ty) < 1e-6) return;
+    applyAffine([rec], M_MOVE(tx, ty));
+    changed.push(rec);
+  });
+  if (!changed.length) { showToast("already aligned"); return; }
+  renderEditLayer();
+  postEdit(transformOps(changed)).catch(() => refresh());
+}
+function selectionMenuItems(at) {
+  const objs = selection.map(byId).filter(Boolean);
+  if (objs.length === 1) return objectMenuItems(objs[0], at);
+  const n = objs.length;
+  return [
+    { label: "Align left", run: () => alignSelection("left") },
+    { label: "Align right", run: () => alignSelection("right") },
+    { label: "Align top", run: () => alignSelection("top") },
+    { label: "Align bottom", run: () => alignSelection("bottom") },
+    "-",
+    { label: "Distribute horizontally", run: () => alignSelection("dist-h"),
+      disabled: n < 3, hint: "needs 3 or more" },
+    { label: "Distribute vertically", run: () => alignSelection("dist-v"),
+      disabled: n < 3, hint: "needs 3 or more" },
+    "-",
+    { label: `Delete ${n} objects`, danger: true, run: () => {
+        const ids = [...selection];
+        setSelection([]);
+        postEdit(ids.map(id => ({ op: "delete_element", id })));
+      } },
+  ];
+}
 function applyAffine(snap, m) {
   const [a, b, c, d, e, f] = m;
   const mapX = (x, y) => a * x + c * y + e;
@@ -2839,6 +2962,9 @@ function renderTransformGizmo(objs) {
   };
   fillRect.addEventListener("pointerdown", startMove);
   box.addEventListener("pointerdown", startMove);
+  const menu = (ev) => showContextMenu(ev, selectionMenuItems(clientToSvg(ev)));
+  fillRect.addEventListener("contextmenu", menu);
+  box.addEventListener("contextmenu", menu);
   const corners = [[bb.minx, bb.miny], [bb.maxx, bb.miny],
                    [bb.maxx, bb.maxy], [bb.minx, bb.maxy]];
   const cx = (bb.minx + bb.maxx) / 2, cy = (bb.miny + bb.maxy) / 2;
@@ -3069,6 +3195,10 @@ function showContextMenu(ev, items) {
     const row = document.createElement("button");
     row.className = "ctxItem" + (it.danger ? " danger" : "");
     row.textContent = it.label;
+    if (it.disabled) {
+      row.disabled = true;
+      if (it.hint) row.title = it.hint;
+    }
     row.addEventListener("click", () => { closeContextMenu(); it.run(); });
     m.appendChild(row);
   }
@@ -3187,9 +3317,11 @@ function select(id, additive = false) {
    enclosed-vs-touched nuance deliberately not replicated yet). A plain
    click still deselects, matching startPan's old behavior. */
 function startMarquee(ev0) {
+  if (notPrimary(ev0)) return;
   const from = clientToSvg(ev0);
   let rect = null, moved = false;
   const move = (e) => {
+    if (e.buttons === 0) { up(e); return; }     // release happened unseen
     if (Math.hypot(e.clientX - ev0.clientX, e.clientY - ev0.clientY) > 4) moved = true;
     if (!moved) return;
     const p = clientToSvg(e);
@@ -3222,10 +3354,12 @@ function startMarquee(ev0) {
   window.addEventListener("pointerup", up);
 }
 function startPan(ev) {
+  if (ev.button === 2) return;                  // right button: menu, not pan
   const from = { x: ev.clientX, y: ev.clientY, vb: { ...vb } };
   const rect = canvas.getBoundingClientRect();
   let moved = false;
   const move = (e) => {
+    if (e.buttons === 0) { up(); return; }      // release happened unseen
     if (Math.hypot(e.clientX - from.x, e.clientY - from.y) > 3) moved = true;
     vb.x = from.vb.x - (e.clientX - from.x) * vb.w / rect.width;
     vb.y = from.vb.y - (e.clientY - from.y) * vb.h / rect.height;
@@ -3243,13 +3377,21 @@ function startPan(ev) {
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
 }
+/* Only the primary button drags. A right-click used to start a move-drag
+   here, the OS context menu then swallowed the button release, and the
+   shape stayed glued to the cursor until the next click — which saved the
+   move. As a backstop, every drag ends if the pointer moves with no button
+   held (a release we never saw). */
+const notPrimary = (ev) => ev.button !== undefined && ev.button !== 0;
 function startDrag(ev, desc) {
+  if (notPrimary(ev)) return;
   ev.stopPropagation();
   ev.preventDefault();
   let last = clientToSvg(ev);
   let movedAny = false;
   dragging = desc;
   const move = (e) => {
+    if (e.buttons === 0) { up(); return; }      // release happened unseen
     movedAny = true;
     // node-following drags snap the pointer to nearby guides
     const p = snapPoint(clientToSvg(e));
@@ -3372,15 +3514,7 @@ function startDrag(ev, desc) {
                           x: fmt(h.x), y: fmt(h.y) }]);
       } else if (desc.type === "g-move" || desc.type === "g-scale" ||
                  desc.type === "g-rotate" || desc.type === "g-squish") {
-        const ops = [];
-        for (const rec of desc.snap) {
-          ops.push({ op: "set_path", id: rec.o.id, d: rec.o.d });
-          for (const h of [rec.o.start, rec.o.end])
-            if (h && h.use_id && !h.legacy)
-              ops.push({ op: "move_command", use_id: h.use_id,
-                         x: fmt(h.x), y: fmt(h.y) });
-        }
-        await postEdit(ops);
+        await postEdit(transformOps(desc.snap));
       } else if (desc.type === "fill-node") {
         await postEdit([{ op: "set_path", id: desc.obj.id, d: desc.obj.d }]);
       } else if (desc.type === "bez") {
@@ -3571,6 +3705,12 @@ document.addEventListener("keydown", (ev) => {
     const ids = [...selection];
     setSelection([]);
     postEdit(ids.map(id => ({ op: "delete_element", id })));
+  } else if (ev.key.startsWith("Arrow") && selection.length && !mod
+             && !penDraft && !knifeDraft && !activeNode && !activeRung) {
+    ev.preventDefault();
+    const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+                ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
+    if (d) nudgeSelection(d[0], d[1], ev.shiftKey);
   } else if (mod && ev.shiftKey && k === "a") {
     ev.preventDefault(); setSelection([]);
   } else if (mod && k === "a") {
