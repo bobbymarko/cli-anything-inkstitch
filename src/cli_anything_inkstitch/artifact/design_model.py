@@ -313,6 +313,7 @@ def read_design(project_file: str) -> dict[str, Any]:
                         obj["end"] = entry
             objects.append(obj)
         return {
+            "origin": _origin_command_point(root),
             "svg_path": proj.svg_path,
             "width": root.get("width"),
             "height": root.get("height"),
@@ -332,6 +333,28 @@ def read_design(project_file: str) -> dict[str, Any]:
             # (the gate's ignored_fill_method check measures actual cases)
             "engine": _engine_versions(),
         }
+
+
+def _origin_command_point(root) -> list[float] | None:
+    """The export origin the engine will use, if the design pins one.
+
+    Engine reader: lib/output.py get_origin — a global "origin" command
+    wins, else the centre of the stitch plan's bounding box. Global commands
+    are standalone <use xlink:href="#inkstitch_origin"> symbols
+    (lib/commands.py _standalone_commands / global_command, which errors on
+    more than one); the point is the use's x/y through its transforms
+    (StandaloneCommand.point). Returned in root user units, like every other
+    editor coordinate; None when absent or ambiguous.
+    """
+    from cli_anything_inkstitch.svg.geometry import apply_matrix, ctm_for
+    xlink = "{http://www.w3.org/1999/xlink}href"
+    uses = [u for u in root.iter("{http://www.w3.org/2000/svg}use")
+            if (u.get(xlink) or u.get("href") or "") == "#inkstitch_origin"]
+    if len(uses) != 1:
+        return None
+    u = uses[0]
+    x, y = apply_matrix(ctm_for(u), float(u.get("x", 0)), float(u.get("y", 0)))
+    return [round(x, 4), round(y, 4)]
 
 
 def _engine_versions() -> dict[str, Any]:

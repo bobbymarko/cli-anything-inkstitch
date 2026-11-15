@@ -1419,6 +1419,7 @@ async function fetchTier2() {
     renderPlanLayer();
     renderDensity();                   // heat overlay tracks the fresh plan
     renderOverview();                  // stitch count + block colors just landed
+    drawRulers();                      // ruler 0,0 follows the stitch bounds
   } catch (e) {
     if (gen === tier2Gen) {
       setPlanError("Could not reach the artifact server.",
@@ -1866,8 +1867,34 @@ function rulerStepMm(pxPerMm) {
     if (pxPerMm * minor >= 5) return [minor, major];
   return [100, 500];
 }
+/* Ruler 0,0 = the machine file's origin, so ruler readings match the
+   exported coordinates. Engine rule (lib/output.py get_origin): a global
+   "origin" command if the design has one (design.origin, read server-side),
+   else the centre of the bounding box of ALL stitches (StitchPlan /
+   ColorBlock.bounding_box). The stitch plan is used only when it is the
+   whole design (no layers hidden); before it loads, the artwork's bounding
+   box centre stands in. */
+function rulerOrigin() {
+  if (design && design.origin) return { x: design.origin[0], y: design.origin[1], src: "origin command" };
+  if (stitchData && !hiddenIds.size && stitchData.blocks.length) {
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    for (const b of stitchData.blocks)
+      for (const path of b.paths)
+        for (const [x, y] of path) {
+          if (x < minx) minx = x; if (x > maxx) maxx = x;
+          if (y < miny) miny = y; if (y > maxy) maxy = y;
+        }
+    return { x: (minx + maxx) / 2, y: (miny + maxy) / 2, src: "stitch bounds" };
+  }
+  if (design && design.objects.length) {
+    const bb = selectionBBox(design.objects);
+    if (isFinite(bb.minx)) return { x: (bb.minx + bb.maxx) / 2, y: (bb.miny + bb.maxy) / 2, src: "artwork bounds" };
+  }
+  return { x: 0, y: 0, src: "page" };
+}
 function drawRulers() {
   const rt = $("rulerTop"), rl = $("rulerLeft"), rc = $("rulerCorner");
+  rc.title = `Rulers: 0,0 = export origin (${rulerOrigin().src})`;
   const on = rulersOn && !!design && !!baseVb;
   rt.style.display = rl.style.display = rc.style.display = on ? "block" : "none";
   if (!on) return;
@@ -1889,7 +1916,8 @@ function drawRulers() {
     ctx.font = `${getComputedStyle(document.documentElement).getPropertyValue("--fs-2xs").trim() || "9px"} ui-monospace, monospace`;
     ctx.beginPath();
     // ruler canvases sit 18px in from the wrap origin — offset accordingly
-    const off = horiz ? ox - 18 : oy - 18;
+    const o = rulerOrigin();                // 0,0 = the export origin
+    const off = (horiz ? ox + o.x * s : oy + o.y * s) - 18;
     const span = horiz ? w : h;
     const mm0 = Math.floor((0 - off) / pxPerMm / minor) * minor;
     const mm1 = (span - off) / pxPerMm;
