@@ -118,7 +118,7 @@ class TestRoot:
 
     def test_no_session_says_so(self, server):
         status, _, body = self._raw(server, "/")
-        assert status == 200 and "No open session" in body
+        assert status == 200 and "No open designs" in body
 
     def test_one_session_redirects(self, server, project):
         opened = _open_session(server, project)
@@ -130,7 +130,7 @@ class TestRoot:
         opened = _open_session(server, project)
         _post(server, f"/api/{opened['key']}/end")
         status, _, body = self._raw(server, "/")
-        assert status == 200 and "No open session" in body
+        assert status == 200 and "No open designs" in body
 
     def test_several_sessions_listed(self, server, project, tmp_path):
         other = tmp_path / "other" / "design.inkstitch-cli.json"
@@ -141,6 +141,47 @@ class TestRoot:
         status, _, body = self._raw(server, "/")
         assert status == 200
         assert f"/session/{a['key']}" in body and f"/session/{b['key']}" in body
+
+    def test_sessions_route_lists_even_a_single_session(self, server, project):
+        # the editor's "Change design…" goes here; "/" would bounce back
+        opened = _open_session(server, project)
+        status, _, body = self._raw(server, "/sessions")
+        assert status == 200 and f"/session/{opened['key']}" in body
+
+    def test_page_uses_the_shared_design_system(self, server):
+        _, _, body = self._raw(server, "/")
+        assert "/assets/design-system.css" in body and "/assets/theme.js" in body
+
+    def test_cards_name_the_design_and_serve_its_thumbnail(self, server, tmp_path):
+        projects = []
+        for name in ("rose", "leaf"):
+            d = tmp_path / name
+            d.mkdir()
+            svg = d / f"{name}.svg"
+            svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+            pj = d / "p.json"
+            pj.write_text(json.dumps({"schema_version": 1, "svg_path": str(svg)}))
+            projects.append(_open_session(server, str(pj)))
+        _, _, body = self._raw(server, "/")
+        assert "rose.svg" in body and "leaf.svg" in body       # design, not p.json
+        status, headers, svg_body = self._raw(server, f"/api/{projects[0]['key']}/thumbnail")
+        assert status == 200 and headers["Content-Type"] == "image/svg+xml"
+        assert svg_body.startswith("<svg")
+
+
+class TestAssets:
+    """The shared design system is served from a fixed allow-list."""
+
+    def test_design_system_and_theme_are_served(self, server):
+        for name, ctype in (("design-system.css", "text/css"), ("theme.js", "text/javascript")):
+            with urllib.request.urlopen(_url(server, f"/assets/{name}"), timeout=10) as r:
+                assert r.status == 200 and r.headers["Content-Type"].startswith(ctype)
+
+    def test_anything_else_is_not_found(self, server):
+        for name in ("editor.html", "server.py", "..%2Fserver.py"):
+            with pytest.raises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(_url(server, f"/assets/{name}"), timeout=10)
+            assert e.value.code == 404
 
 
 class TestPollLoop:

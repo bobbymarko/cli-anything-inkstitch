@@ -23,19 +23,58 @@ LONG_STITCH_MM = 8.0
 _NUM = re.compile(r"-?\d+(?:\.\d+)?(?:e-?\d+)?")
 
 
-def satin_pairs(d: str):
-    """A two-rail, rung-less satin's pairs (as shapes-to-satin writes them: 'M l0 L l1 ... M r0 L
-    r1 ...', one node per pair). None for any other layout."""
-    subs = [s for s in re.split(r"[Mm]", d) if s.strip()]
-    if len(subs) != 2 or re.search(r"[CcQqSsTtAaHhVvZz]", d):
+def satin_pairs(d: str, step: float | None = None):
+    """A satin's stitch pairs as the planner wrote them, for the column checks.
+
+    Two layouts come from shapes-to-satin / text-to-satin:
+    * rung-less, 'M l0 L l1 ... M r0 L r1 ...', one node per pair (--no-keep-curves); the pairs
+      are the nodes;
+    * bezier rails + explicit rungs (glyph_columns.satin_d_curves, the default): rails are subpaths
+      0 and 1, each rung is a planner pair kept as a line. The pairs are rebuilt the way the engine
+      fills between rungs (lib/elements/satin_column.py: each rail section between two rungs is
+      walked in proportion), at most ``step`` user units apart (default: 1/40 of the rail).
+    None for any other layout."""
+    subs = [s for s in re.split(r"(?=[Mm])", d) if s.strip()]
+    if len(subs) == 2 and not re.search(r"[CcQqSsTtAaHhVvZz]", d):
+        rails = []
+        for s in subs:
+            nums = [float(v) for v in _NUM.findall(s)]
+            rails.append(list(zip(nums[0::2], nums[1::2])))
+        if len(rails[0]) != len(rails[1]) or len(rails[0]) < 2:
+            return None
+        return list(zip(rails[0], rails[1]))
+    if len(subs) < 3 or re.search(r"[a-z]", re.sub(r"e[+-]?\d", "", d)):
+        return None                                   # relative commands: not ours
+    from shapely.geometry import LineString
+    from cli_anything_inkstitch.artifact.gate import flatten_path
+    try:
+        r0, r1 = (LineString(flatten_path(s, 16)) for s in subs[:2])
+    except Exception:
         return None
-    rails = []
-    for s in subs:
-        nums = [float(v) for v in _NUM.findall(s)]
-        rails.append(list(zip(nums[0::2], nums[1::2])))
-    if len(rails[0]) != len(rails[1]) or len(rails[0]) < 2:
+    if r0.length == 0 or r1.length == 0:
         return None
-    return list(zip(rails[0], rails[1]))
+    anchors = [(0.0, 0.0)]
+    for s in subs[2:]:
+        rung = LineString(flatten_path(s, 2))
+        a, b = rung.intersection(r0), rung.intersection(r1)
+        if a.is_empty or b.is_empty or a.geom_type != "Point" or b.geom_type != "Point":
+            return None                               # not a rung crossing each rail once
+        anchors.append((r0.project(a), r1.project(b)))
+    anchors.append((r0.length, r1.length))
+    anchors.sort()
+    if any(q[1] < p[1] - 1e-6 for p, q in zip(anchors, anchors[1:])):
+        return None                                   # rungs cross each other: not a planner column
+    step = step or max(r0.length, r1.length) / 40
+    pairs = []
+    for (a0, b0), (a1, b1) in zip(anchors, anchors[1:]):
+        n = max(1, math.ceil(max(a1 - a0, b1 - b0) / step))
+        for k in range(n):
+            t = k / n
+            pa, pb = r0.interpolate(a0 + (a1 - a0) * t), r1.interpolate(b0 + (b1 - b0) * t)
+            pairs.append(((pa.x, pa.y), (pb.x, pb.y)))
+    pa, pb = r0.interpolate(r0.length), r1.interpolate(r1.length)
+    pairs.append(((pa.x, pa.y), (pb.x, pb.y)))
+    return pairs
 
 
 def shape_of(el) -> str:
