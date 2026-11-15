@@ -155,8 +155,18 @@
   .panelHead::after { content: "▾"; color: var(--muted); font-size: 9px; }
   .panel.closed .panelHead { color: var(--muted); }
   .panel.closed .panelHead::after { content: "▸"; }
-  .panel.closed .panelBody { display: none; }
-  .panelBody { padding: 2px 4px 10px; }
+  .panel.closed .panelBody, .panel.closed .panelGrip { display: none; }
+  /* fixed, user-adjustable height per panel (drag the grip under it):
+     content scrolls inside, so selecting something can't change a panel's
+     size and shove the panels below it around */
+  .panelBody { padding: 2px 4px 10px; height: var(--ph, auto);
+               overflow-y: auto; overscroll-behavior: contain; }
+  .panelGrip { height: 7px; margin: 0 -4px; cursor: ns-resize; position: relative;
+               touch-action: none; }
+  .panelGrip::after { content: ""; position: absolute; left: 50%; top: 2px;
+                      width: 28px; height: 3px; margin-left: -14px; border-radius: 2px;
+                      background: var(--line); }
+  .panelGrip:hover::after, .panelGrip.drag::after { background: var(--accent); }
   .refRow { display: flex; align-items: center; gap: 8px; padding: 3px 2px; }
   .refLabel { flex: 0 0 62px; font-size: 11px; color: var(--muted, #999); }
   .refRow input[type="range"] { flex: 1; min-width: 0; }
@@ -3910,6 +3920,45 @@ for (const pnl of ["overview", "inspect", "layers", "colors", "reference", "hist
     if (saved === "1") root.classList.add("closed");
     else if (saved === "0") root.classList.remove("closed");
   } catch (e) { /* private mode */ }
+  setupPanelHeight(pnl, root);
+}
+/* Panel heights: each open panel has a fixed body height (content scrolls
+   inside) set by dragging the grip below it; double-click the grip to
+   reset. Remembered per panel in this browser. */
+function setupPanelHeight(pnl, root) {
+  const DEFAULT_H = { overview: 190, inspect: 300, layers: 300, colors: 160,
+                      reference: 170, history: 240 };
+  const MIN_H = 60, MAX_H = 1200;
+  const body = root.querySelector(".panelBody");
+  const key = "artifact-panel-h-" + pnl;
+  const apply = (h) => body.style.setProperty("--ph", Math.round(h) + "px");
+  let h = DEFAULT_H[pnl] || 200;
+  try { const v = +localStorage.getItem(key); if (v >= MIN_H) h = v; } catch (e) { /* defaults */ }
+  apply(h);
+  const grip = document.createElement("div");
+  grip.className = "panelGrip";
+  grip.title = "Drag to resize · double-click to reset";
+  body.after(grip);
+  const save = (v) => { try { localStorage.setItem(key, String(Math.round(v))); } catch (e) { /* private */ } };
+  grip.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    const y0 = ev.clientY, h0 = body.getBoundingClientRect().height;
+    grip.classList.add("drag");
+    grip.setPointerCapture(ev.pointerId);
+    const move = (e) => apply(Math.max(MIN_H, Math.min(MAX_H, h0 + e.clientY - y0)));
+    const up = () => {
+      grip.classList.remove("drag");
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      save(body.getBoundingClientRect().height);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  });
+  grip.addEventListener("dblclick", () => {
+    try { localStorage.removeItem(key); } catch (e) { /* private */ }
+    apply(DEFAULT_H[pnl] || 200);
+  });
 }
 
 function renderOverview() {
