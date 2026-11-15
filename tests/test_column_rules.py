@@ -40,6 +40,7 @@ def _s_outline(r=7.0, w=5.0, n=60):
     return [list(poly.exterior.coords)[:-1]]
 
 
+@needs_planner                 # the fixtures build outlines with numpy
 class TestChecks:
     def test_pivot_is_a_fan_and_a_curve_is_not(self):
         # a column turning about a point: left rail still, right rail sweeping 90 degrees at r = 4
