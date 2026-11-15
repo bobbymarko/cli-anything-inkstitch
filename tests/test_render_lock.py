@@ -90,3 +90,31 @@ class TestRenderReleasesTheLock:
         assert Path(slow_engine["path"]).name == svg.name
         assert "M10,10" in slow_engine["content"]
         assert not Path(slow_engine["path"]).exists()     # cleaned up
+
+
+class TestEnginePassesOverlap:
+    """stitch_sequence needs two engine runs (plan + trim flags); each pays
+    ~1.1 s of binary startup, so they must run side by side, not back to
+    back."""
+
+    def test_plan_and_trim_passes_run_in_parallel(self, project, monkeypatch):
+        from cli_anything_inkstitch import binary
+        from cli_anything_inkstitch.artifact import design_model as dm
+        pass_s = 0.8
+        calls = []
+
+        def fake_run(binary_path, extension, svg_path, args=None, ids=None,
+                     capture_stdout=False, timeout=300):
+            calls.append(extension)
+            time.sleep(pass_s)
+            return b"<svg/>" if extension == "stitch_plan_preview" else b""
+
+        monkeypatch.setattr(binary, "run_extension", fake_run)
+        monkeypatch.setattr(binary, "require", lambda override, session: "fake-binary")
+        monkeypatch.setattr(dm, "extract_stitch_blocks",
+                            lambda svg: {"blocks": [], "total_stitches": 0})
+        t0 = time.monotonic()
+        dm.stitch_sequence(project[0])
+        elapsed = time.monotonic() - t0
+        assert sorted(calls) == ["output", "stitch_plan_preview"]   # control
+        assert elapsed < pass_s * 1.5, f"passes ran back to back ({elapsed:.2f}s)"

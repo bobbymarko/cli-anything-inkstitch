@@ -1352,7 +1352,71 @@ function stampSprite(ctx, img, sp, x1, y1, x2, y2, tw) {
   }
   ctx.restore();
 }
+/* Realistic view speed. A full render stamps ~3 thread sprites per stitch
+   (up to ~9 drawImage calls with 3-slice tiling): measured ~0.5 s on a
+   14k-stitch design, and it used to run on EVERY pan/zoom step (2 fps).
+   Now a gesture moves the last full render as one bitmap and the full
+   render runs once the view has been still for REAL_SETTLE_MS; full
+   renders also skip stitches outside the visible area. */
+const REAL_SETTLE_MS = 120;
+let realCache = null;          // {canvas, data, tl, pw, ph, s, ox, oy, dpr}
+let realSettleTimer = null;
+/* Bean/triple and lock stitches retrace the same needle points. The full
+   render fans repeats sideways; how many times each segment was already
+   sewn depends only on the plan, so count it once per plan, not on every
+   frame. "Same point" is a 0.05 mm grid: the engine's retraces land up to
+   ~0.006 mm off the first pass (measured on a lock stitch), so exact
+   equality misses them, while the old rule — 0.1 SCREEN px — caught them
+   only at some zooms. 0.05 mm is half the 0.1 mm a DST can even encode. */
+const BEAN_GRID_MM = 0.05;
+function beanRepeats(data) {
+  if (data._beanN) return data._beanN;
+  const m = /^([\d.]+)\s*mm$/.exec(design.width || "");
+  const uuPerMm = m ? baseVb.w / parseFloat(m[1]) : 96 / 25.4;
+  const q = BEAN_GRID_MM * uuPerMm;
+  const seen = new Map(), out = [];
+  for (const block of data.blocks)
+    for (const pts of block.paths)
+      for (let i = 1; i < pts.length; i++) {
+        const x1 = Math.round(pts[i - 1][0] / q), y1 = Math.round(pts[i - 1][1] / q);
+        const x2 = Math.round(pts[i][0] / q), y2 = Math.round(pts[i][1] / q);
+        const key = x1 < x2 || (x1 === x2 && y1 <= y2)
+          ? `${x1},${y1}|${x2},${y2}` : `${x2},${y2}|${x1},${y1}`;
+        const n = seen.get(key) || 0;
+        seen.set(key, n + 1);
+        out.push(n);
+      }
+  data._beanN = out;
+  return out;
+}
+/* pan/zoom entry point: cheap bitmap move now, full render once settled */
+function drawRealisticView() {
+  const rc = $("realCanvas");
+  const rect = $("canvasWrap").getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const pw = Math.round(rect.width * dpr), ph = Math.round(rect.height * dpr);
+  const c = realCache;
+  const usable = c && planOn && viewMode === "realistic" && stitchData
+    && c.data === stitchData && c.tl === timelinePos
+    && c.pw === pw && c.ph === ph && c.dpr === dpr;
+  if (!usable) { drawRealistic(); return; }
+  const s = Math.min(rect.width / vb.w, rect.height / vb.h);
+  const ox = (rect.width - vb.w * s) / 2 - vb.x * s;
+  const oy = (rect.height - vb.h * s) / 2 - vb.y * s;
+  // old device px p → new: p·k + dpr·(o_new − o_old·k), k = s_new / s_old
+  const k = s / c.s;
+  const ctx = rc.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, pw, ph);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(c.canvas, dpr * (ox - c.ox * k), dpr * (oy - c.oy * k),
+                c.canvas.width * k, c.canvas.height * k);
+  clearTimeout(realSettleTimer);
+  realSettleTimer = setTimeout(drawRealistic, REAL_SETTLE_MS);
+}
 function drawRealistic() {
+  clearTimeout(realSettleTimer);
+  realCache = null;
   const rc = $("realCanvas");
   const rect = $("canvasWrap").getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -1385,22 +1449,24 @@ function drawRealistic() {
   // if drawn in place. Real thread piles up beside the previous pass, so
   // fan repeated segments perpendicular by a fraction of thread width
   // (pass 1 → one side, pass 2 → other side, then further out).
-  const segSeen = new Map();
-  const beanOffset = (x1, y1, x2, y2) => {
-    const key = x1 < x2 || (x1 === x2 && y1 <= y2)
-      ? `${x1.toFixed(1)},${y1.toFixed(1)}|${x2.toFixed(1)},${y2.toFixed(1)}`
-      : `${x2.toFixed(1)},${y2.toFixed(1)}|${x1.toFixed(1)},${y1.toFixed(1)}`;
-    const n = segSeen.get(key) || 0;
-    segSeen.set(key, n + 1);
+  const beanN = beanRepeats(stitchData);
+  const beanOffset = (x1, y1, x2, y2, n) => {
     if (!n) return [0, 0];
     const len = Math.hypot(x2 - x1, y2 - y1) || 1;
     const mag = tw * 0.38 * Math.ceil(n / 2) * (n % 2 ? 1 : -1);
     return [(-(y2 - y1) / len) * mag, ((x2 - x1) / len) * mag];
   };
+  // stitches whose capsule (plus shadow) can't reach the screen are skipped
+  const margin = tw * 2 + 4, W = rect.width, Hh = rect.height;
+  const offscreen = (x1, y1, x2, y2) =>
+    (x1 < -margin && x2 < -margin) || (x1 > W + margin && x2 > W + margin) ||
+    (y1 < -margin && y2 < -margin) || (y1 > Hh + margin && y2 > Hh + margin);
+  let gi = 0;                             // global segment index (bean counts)
+  outer:
   for (const block of stitchData.blocks) {
     const sp = threadSprites(block.color, tw);
     for (let pi = 0; pi < block.paths.length; pi++) {
-      if (remaining <= 0) return;
+      if (remaining <= 0) break outer;
       if (pi > 0 && block.jumps && block.jumps[pi - 1]) {
         // needle-up travel. Cut before travelling: thin dashed grey, nothing
         // is there. Not cut: real thread on the garment, drawn as such.
@@ -1420,11 +1486,14 @@ function drawRealistic() {
       const pts = block.paths[pi];
       const take = Math.min(pts.length, remaining);
       remaining -= take;
+      const segStart = gi;
+      gi += Math.max(0, pts.length - 1);
       if (take < 2) continue;
       for (let i = 1; i < take; i++, si++) {
         let x1 = pts[i - 1][0] * s + ox, y1 = pts[i - 1][1] * s + oy;
         let x2 = pts[i][0] * s + ox, y2 = pts[i][1] * s + oy;
-        const [bdx, bdy] = beanOffset(x1, y1, x2, y2);
+        if (offscreen(x1, y1, x2, y2)) continue;
+        const [bdx, bdy] = beanOffset(x1, y1, x2, y2, beanN[segStart + i - 1]);
         x1 += bdx; y1 += bdy; x2 += bdx; y2 += bdy;
         stampSprite(ctx, sp.sh, sp,
                     x1 + tw * 0.14, y1 + tw * 0.24,
@@ -1441,6 +1510,15 @@ function drawRealistic() {
       }
     }
   }
+  // keep this render so the next pan/zoom can move it as one bitmap
+  const snap = (realCache && realCache.canvas.width === pw && realCache.canvas.height === ph)
+    ? realCache.canvas
+    : Object.assign(document.createElement("canvas"), { width: pw, height: ph });
+  const sc = snap.getContext("2d");
+  sc.clearRect(0, 0, pw, ph);
+  sc.drawImage(rc, 0, 0);
+  realCache = { canvas: snap, data: stitchData, tl: timelinePos,
+                pw, ph, s, ox, oy, dpr };
 }
 window.addEventListener("resize", () => drawRealistic());
 /* ---------- stitch-out timeline ---------- */
@@ -1500,7 +1578,7 @@ $("tlPlay").onclick = () => {
 function setViewBox() {
   canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
   renderEditLayer();                          // keep marker sizes screen-constant
-  if (typeof drawRealistic === "function") drawRealistic();
+  if (typeof drawRealisticView === "function") drawRealisticView();
   if (typeof drawRulers === "function") { drawRulers(); renderGrid(); }
 }
 /* ---------- rulers, grid & guides ---------- */
@@ -1934,8 +2012,7 @@ function startZoomDrag(ev0) {
       vb = { x: from.x - (from.x - vb.x) * f, y: from.y - (from.y - vb.y) * f,
              w: vb.w * f, h: vb.h * f };
     }
-    setViewBox();
-    if (typeof drawRealistic === "function") drawRealistic();
+    setViewBox();                       // settles into a full render itself
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
@@ -3122,7 +3199,7 @@ function startPan(ev) {
     vb.x = from.vb.x - (e.clientX - from.x) * vb.w / rect.width;
     vb.y = from.vb.y - (e.clientY - from.y) * vb.h / rect.height;
     canvas.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
-    drawRealistic();
+    drawRealisticView();                // bitmap move; full render on settle
   };
   const up = () => {
     window.removeEventListener("pointermove", move);
