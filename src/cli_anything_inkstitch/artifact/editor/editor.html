@@ -142,8 +142,6 @@
                    color: var(--muted); cursor: pointer; position: relative; }
   #toolbar .tool:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 10%, transparent); }
   #toolbar .tool.on { color: var(--on-accent); background: var(--accent); }
-  #toolbar .tool .kbd { position: absolute; bottom: 1px; right: 3px;
-                        font-size: var(--fs-2xs); opacity: .7; }
   .gizmoBox { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
               vector-effect: non-scaling-stroke; cursor: move; }
   .gizmoFill { fill: color-mix(in srgb, var(--accent) 5%, transparent); cursor: move; }
@@ -724,7 +722,6 @@ try { applyTheme(localStorage.getItem("artifact-theme") || "default"); } catch (
               title="Select and transform (V) — drag to move, corners to scale">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"
              aria-hidden="true"><path d="M3 1.5 L12.5 8.6 L8.2 9.3 L10.6 14 L8.8 14.9 L6.4 10.2 L3 13 Z"/></svg>
-        <span class="kbd">V</span>
       </button>
       <button class="tool" id="toolNode" type="button"
               title="Edit nodes, rungs, and handles (A)">
@@ -735,7 +732,6 @@ try { applyTheme(localStorage.getItem("artifact-theme") || "default"); } catch (
           <rect x="12" y="10.5" width="3" height="3" fill="currentColor" stroke="none"/>
           <rect x="6.6" y="4.6" width="2.8" height="2.8" fill="currentColor" stroke="none"/>
         </svg>
-        <span class="kbd">A</span>
       </button>
       <button class="tool" id="toolPen" type="button"
               title="Pen (P) — click to place points; click the first point to close as a fill, Enter finishes a running stitch, Esc cancels">
@@ -744,7 +740,6 @@ try { applyTheme(localStorage.getItem("artifact-theme") || "default"); } catch (
           <path d="M10.8 1.6 L14.4 5.2 L5.6 14 L1.5 14.5 L2 10.4 Z"/>
           <path d="M8.9 3.5 L12.5 7.1"/>
         </svg>
-        <span class="kbd">P</span>
       </button>
       <button class="tool" id="toolKnife" type="button"
               title="Knife (K) — drag across shapes to cut them apart; or click points for a multi-segment cut, then Enter (or click the last point again). Shift snaps to 45°, Esc cancels. Cuts the selection, or everything visible under the line when nothing is selected">
@@ -753,7 +748,6 @@ try { applyTheme(localStorage.getItem("artifact-theme") || "default"); } catch (
           <path d="M2 14 L9.2 6.8 L13.6 2.4 C14.6 4.6 13.4 7.6 10.6 8.2 L4 14.4 Z"/>
           <path d="M9.2 6.8 L10.6 8.2"/>
         </svg>
-        <span class="kbd">K</span>
       </button>
       <button class="tool" id="toolPan" type="button"
               title="Pan (H) — drag to move the view; hold Space for a temporary pan with any tool">
@@ -764,7 +758,6 @@ try { applyTheme(localStorage.getItem("artifact-theme") || "default"); } catch (
                    V9.4 c0 3-1.8 5-4.4 5 -2.2 0 -3.4-1.2-4.6-3.6
                    l-1-2 a1 1 0 0 1 1.7-1 l1.3 1.6"/>
         </svg>
-        <span class="kbd">H</span>
       </button>
       <span class="tbSep"></span>
       <div id="viewModes" role="group" aria-label="View mode">
