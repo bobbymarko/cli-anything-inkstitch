@@ -253,17 +253,18 @@
   .collapseBtn .ic { width: 15px; height: 15px; }
   .collapseBtn:hover { color: var(--text); }
   /* id-qualified: must outrank the #inspect/#panel width rules above */
-  #inspect.collapsed, #panel.collapsed { width: 26px; cursor: pointer; }
+  /* collapsed = gone (Claude-app style); the middle header shows a toggle
+     to bring it back: chat's left of the file name, panels' at the far right */
+  #inspect.collapsed, #panel.collapsed { display: none; }
+  .centerToggle { display: none; }
+  body.panelCollapsed #panelToggleCenter,
+  body.inspectCollapsed #inspectToggleCenter { display: flex; }
   .sideResizer { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 6;
                  cursor: col-resize; }
   .sideResizer:hover, .sideResizer.active { background: rgba(110,168,254,.25); }
   #panelResizer { right: -3px; }
   #inspectResizer { left: -3px; }
   .side { position: relative; }
-  .side.collapsed .sideResizer { display: none; }
-  .side.collapsed .sideHead { padding: 0; justify-content: center; }
-  .side.collapsed .sideBody, .side.collapsed #composer,
-  .side.collapsed #inspectBody { display: none; }
   #inspectBody { flex: 1; overflow-y: auto; padding: 4px 14px 14px; }
   #inspectBody .noSel { color: var(--muted); }
   #inspectBody .objTitle { font-weight: 700; margin-bottom: 2px; word-break: break-all; }
@@ -509,6 +510,8 @@
   </aside>
   <div id="center">
   <div id="centerBar" class="colHead">
+    <button class="collapseBtn centerToggle" id="panelToggleCenter" type="button"
+            title="Expand conversation"></button>
     <button id="fileMenuBtn" type="button" title="File" aria-haspopup="menu">
       <span class="brand" id="brand">Digitizing Artifact</span>
       <span class="fileChev"></span>
@@ -517,6 +520,8 @@
     <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
     <button class="chip" id="helpBtn" type="button" title="How to use"
             aria-label="How to use">?</button>
+    <button class="collapseBtn centerToggle" id="inspectToggleCenter" type="button"
+            title="Expand panels"></button>
     <!-- menu actions; hidden, their handlers are reused by the file menu -->
     <button id="exportBtn" type="button" hidden>Export</button>
     <button id="endBtn" type="button" hidden>End session</button>
@@ -4002,6 +4007,7 @@ function setCollapsed(id, collapsed) {
   const side = $(id);
   if (!_lastCanvasRect) preserveScaleOnResize();   // baseline before the jump
   side.classList.toggle("collapsed", collapsed);
+  document.body.classList.toggle(id + "Collapsed", collapsed);
   // a resized sidebar carries an inline width that would beat the
   // .collapsed CSS rule — park it while collapsed, restore on expand
   if (collapsed && side.style.width) {
@@ -4027,9 +4033,9 @@ for (const id of ["inspect", "panel"]) {
     ev.stopPropagation();
     setCollapsed(id, !$(id).classList.contains("collapsed"));
   });
-  $(id).addEventListener("click", () => {   // collapsed rail is one big reopen target
-    if ($(id).classList.contains("collapsed")) setCollapsed(id, false);
-  });
+  const reopen = $(id + "ToggleCenter");      // shown in the middle header while collapsed
+  reopen.innerHTML = icon(CHEVRONS[id][0]);
+  reopen.addEventListener("click", (ev) => { ev.stopPropagation(); setCollapsed(id, false); });
   try {
     if (localStorage.getItem("artifact-collapse-" + id) === "1") setCollapsed(id, true);
   } catch (e) { /* private mode */ }
