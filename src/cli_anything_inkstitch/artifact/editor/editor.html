@@ -9,6 +9,13 @@
     --bg: #14161a; --panel: #1c1f26; --line: #2a2e38; --text: #e6e8ee;
     --muted: #9aa1b0; --accent: #6ea8fe; --start: #37c46f; --end: #e5534b;
     --rail: #ffb347; --rung: #9d7bff; --zig: #ffd9a0;
+    /* spacing scale — use these, not ad-hoc px, for padding/gaps */
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+    /* sidebar panels: every row's content starts at the panel title's left
+       edge; hover/selection highlights bleed out by --row-bleed instead of
+       pushing content in. Label/value rows share one value column. */
+    --row-bleed: var(--sp-1);
+    --value-col: 42%;
   }
   /* UI font: Inter 4 (variable weight, Latin subset), embedded so the editor
      stays network-free. SIL OFL 1.1, (c) 2016 The Inter Project Authors —
@@ -174,9 +181,9 @@
           overflow: hidden; }
   #panel { width: 320px; border-right: 1px solid var(--line); }   /* left side */
   #inspect { width: 260px; border-left: 1px solid var(--line); }  /* right side */
-  #panelStack { flex: 1; overflow-y: auto; padding: 0 10px 12px; }
+  #panelStack { flex: 1; overflow-y: auto; padding: 0 var(--sp-4) var(--sp-3); }
   .panel { border-bottom: 1px solid var(--line); }
-  .panelHead { padding: 8px 4px; font-size: 12px; font-weight: 600; color: var(--text); cursor: pointer;
+  .panelHead { padding: var(--sp-2) 0; font-size: 12px; font-weight: 600; color: var(--text); cursor: pointer;
                user-select: none; display: flex; justify-content: space-between;
                align-items: center; }
   .panelChev { color: var(--muted); display: flex; }
@@ -187,7 +194,7 @@
   /* fixed, user-adjustable height per panel (drag the grip under it):
      content scrolls inside, so selecting something can't change a panel's
      size and shove the panels below it around */
-  .panelBody { padding: 2px 4px 10px; height: var(--ph, auto);
+  .panelBody { padding: 2px 0 var(--sp-3); height: var(--ph, auto);
                overflow-y: auto; overscroll-behavior: contain; }
   .panelGrip { height: 7px; margin: 0 -4px; cursor: ns-resize; position: relative;
                touch-action: none; }
@@ -195,26 +202,27 @@
                       width: 28px; height: 3px; margin-left: -14px; border-radius: 2px;
                       background: var(--line); }
   .panelGrip:hover::after, .panelGrip.drag::after { background: var(--accent); }
-  .refRow { display: flex; align-items: center; gap: 8px; padding: 3px 2px; }
+  .refRow { display: flex; align-items: center; gap: var(--sp-2); padding: 3px 0; }
   .refLabel { flex: 0 0 62px; font-size: 11px; color: var(--muted, #999); }
   .refRow input[type="range"] { flex: 1; min-width: 0; }
   .refNum { width: 64px; font-size: 11px; }
   .refName { font-size: 11px; padding: 2px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
   .ic { width: 14px; height: 14px; display: block; flex: none; }
-  .eyeBtn { background: none; border: none; cursor: pointer; padding: 0 2px;
+  .eyeBtn { background: none; border: none; cursor: pointer; padding: 0;
             color: var(--muted); line-height: 1; opacity: .85;
-            width: 18px; flex: none; display: flex; justify-content: center; }   /* first column */
+            flex: none; display: flex; }   /* first column, on the content edge */
   .eyeBtn:hover { opacity: 1; color: inherit; }
   .eyeBtn.off { opacity: .35; }
   .layerRow.hiddenRow .nm { opacity: .4; text-decoration: line-through; }
-  .ovRow { display: flex; justify-content: space-between; gap: 8px;
-           padding: 2px 0; font-size: 12px; }
+  .ovRow { display: grid; grid-template-columns: var(--value-col) 1fr;
+           column-gap: var(--sp-2); padding: 2px 0; font-size: 12px; }
   .ovRow .k { color: var(--muted); }
-  .ovSwatches { display: flex; gap: 5px; padding: 4px 0; }
+  .ovSwatches { display: flex; gap: var(--sp-1); padding: var(--sp-1) 0; }
   .ovSwatches i { width: 16px; height: 16px; border-radius: 4px;
                   border: 1px solid var(--line); display: inline-block; }
-  .layerRow { display: flex; align-items: center; gap: 7px; padding: 4px 5px;
+  .layerRow { display: flex; align-items: center; gap: var(--sp-2);
+              padding: var(--sp-1) var(--row-bleed); margin: 0 calc(-1 * var(--row-bleed));
               border-radius: 6px; font-size: 12px; cursor: pointer; }
   .layerRow:hover { background: rgba(110,168,254,.08); }
   .layerRow.sel { background: rgba(110,168,254,.16); }
@@ -244,7 +252,8 @@
   .cpHead { font-size: 11px; font-weight: 600; color: var(--muted);
             margin: 2px 0 5px; }
   .histRow .flagged { color: var(--accent); margin-right: 3px; }
-  .histRow { padding: 3px 5px; border-radius: 5px; font-size: 11px;
+  .histRow { padding: 3px var(--row-bleed); margin: 0 calc(-1 * var(--row-bleed));
+             border-radius: 5px; font-size: 11px;
              color: var(--muted); cursor: pointer; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
   .histRow:hover { background: rgba(110,168,254,.08); color: var(--text); }
@@ -271,29 +280,32 @@
   #panelResizer { right: -3px; }
   #inspectResizer { left: -3px; }
   .side { position: relative; }
-  #inspectBody { flex: 1; overflow-y: auto; padding: 4px 14px 14px; }
+  #inspectBody { flex: 1; overflow-y: auto; padding: 2px 0 var(--sp-3); }
   #inspectBody .noSel { color: var(--muted); }
   #inspectBody .objTitle { font-weight: 700; margin-bottom: 2px; word-break: break-all; }
   .titleEdit { background: transparent; border: 1px solid transparent;
                border-radius: 4px; color: var(--text); font: inherit;
-               font-weight: 700; width: 100%; padding: 1px 4px; }
+               font-weight: 700; width: calc(100% + var(--sp-1) + 1px); padding: 1px var(--sp-1);
+               margin-left: calc(-1 * (var(--sp-1) + 1px)); }
   .titleEdit:hover { border-color: var(--line); }
   .titleEdit:focus { border-color: var(--accent); outline: none;
                      background: #14161a; }
   #inspectBody .objKind { color: var(--accent); font-size: 12px; margin-bottom: 10px; }
-  #inspectBody .prow { display: flex; justify-content: space-between; gap: 8px;
-                       align-items: center; padding: 3px 0;
+  #inspectBody .prow { display: grid; grid-template-columns: var(--value-col) 1fr;
+                       column-gap: var(--sp-2); align-items: center; padding: var(--sp-1) 0;
                        border-bottom: 1px solid var(--line); }
   #inspectBody .pname { color: var(--muted); word-break: normal; }
   #inspectBody .pname.hasTip { cursor: help;
     text-decoration: underline dotted rgba(154,161,176,.5);
     text-underline-offset: 3px; }
   #inspectBody .pname.hasTip:hover { color: var(--text); }
-  #inspectBody .pctrl { display: inline-flex; align-items: center; gap: 5px; }
+  #inspectBody .pctrl { display: inline-flex; align-items: center; gap: var(--sp-1);
+                        justify-self: start; }
   #inspectBody .punit { color: var(--muted); font-size: 11px; }
   #inspectBody .moreHead { margin: 8px 0 2px; font-size: 11px; color: var(--muted);
           cursor: pointer; user-select: none; }
-  .colorRow { display: flex; align-items: center; gap: 8px; padding: 4px 2px;
+  .colorRow { display: flex; align-items: center; gap: var(--sp-2);
+              padding: var(--sp-1) var(--row-bleed); margin: 0 calc(-1 * var(--row-bleed));
               border-radius: 6px; cursor: pointer; }
   .colorRow:hover { background: rgba(255,255,255,0.04); }
   .colorRow .nm { flex: 1; font-family: ui-monospace, monospace; font-size: 11px; }
@@ -358,15 +370,16 @@
                                              border-radius: 3px; }
   #inspectBody .moreHead::before { content: "▸ "; }
   #inspectBody .moreHead.open::before { content: "▾ "; }
-  #inspectBody .pval { text-align: right; word-break: break-all; }
+  #inspectBody .pval { text-align: left; word-break: break-all; }
   .pvalEdit { background: transparent; border: 1px solid transparent;
-              color: var(--text); text-align: right; width: 90px; font: inherit;
-              border-radius: 4px; padding: 1px 5px; }
+              color: var(--text); text-align: left; width: 90px; font: inherit;
+              border-radius: 4px; padding: 1px var(--sp-1);
+              margin-left: calc(-1 * (var(--sp-1) + 1px)); }
   .pvalEdit:hover { border-color: var(--line); }
   .pvalEdit:focus { border-color: var(--accent); outline: none; background: #14161a; }
   .pvalSelect { width: auto; max-width: 120px; background: #14161a;
                 border-color: var(--line); cursor: pointer; }
-  .pvalEdit[type="number"] { appearance: textfield; }
+  .pvalEdit[type="number"] { appearance: textfield; width: 64px; }   /* unit sits beside it */
   .pvalCheck { accent-color: var(--accent); }
   #chat { flex: 1; overflow-y: auto; padding: 4px 14px; display: flex;
           flex-direction: column; gap: 8px; }
@@ -4223,7 +4236,12 @@ function renderOverview() {
     r.append(kk, vv);
     body.appendChild(r);
   };
-  row("Size", `${design.width || "?"} × ${design.height || "?"}`.replaceAll("mm", " mm"));
+  // display to 0.1 mm (the SVG attr may carry 4+ decimals); unitless sizes pass through
+  const dim = (v) => {
+    const m = /^([\d.]+)\s*mm$/.exec(v || "");
+    return m ? `${+parseFloat(m[1]).toFixed(1)} mm` : (v || "?");
+  };
+  row("Size", `${dim(design.width)} × ${dim(design.height)}`);
   const counts = {};
   for (const o of design.objects) counts[o.kind] = (counts[o.kind] || 0) + 1;
   row("Objects", Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(" · "));
