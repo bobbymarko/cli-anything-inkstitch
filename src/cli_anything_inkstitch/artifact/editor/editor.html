@@ -155,17 +155,29 @@
   .panelHead::after { content: "▾"; color: var(--muted); font-size: 9px; }
   .panel.closed .panelHead { color: var(--muted); }
   .panel.closed .panelHead::after { content: "▸"; }
-  .panel.closed .panelBody { display: none; }
-  .panelBody { padding: 2px 4px 10px; }
+  .panel.closed .panelBody, .panel.closed .panelGrip { display: none; }
+  /* fixed, user-adjustable height per panel (drag the grip under it):
+     content scrolls inside, so selecting something can't change a panel's
+     size and shove the panels below it around */
+  .panelBody { padding: 2px 4px 10px; height: var(--ph, auto);
+               overflow-y: auto; overscroll-behavior: contain; }
+  .panelGrip { height: 7px; margin: 0 -4px; cursor: ns-resize; position: relative;
+               touch-action: none; }
+  .panelGrip::after { content: ""; position: absolute; left: 50%; top: 2px;
+                      width: 28px; height: 3px; margin-left: -14px; border-radius: 2px;
+                      background: var(--line); }
+  .panelGrip:hover::after, .panelGrip.drag::after { background: var(--accent); }
   .refRow { display: flex; align-items: center; gap: 8px; padding: 3px 2px; }
   .refLabel { flex: 0 0 62px; font-size: 11px; color: var(--muted, #999); }
   .refRow input[type="range"] { flex: 1; min-width: 0; }
   .refNum { width: 64px; font-size: 11px; }
   .refName { font-size: 11px; padding: 2px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
+  .ic { width: 14px; height: 14px; display: block; flex: none; }
   .eyeBtn { background: none; border: none; cursor: pointer; padding: 0 2px;
-            font-size: 11px; line-height: 1; opacity: .75; }
-  .eyeBtn:hover { opacity: 1; }
+            color: var(--muted); line-height: 1; opacity: .85;
+            width: 18px; flex: none; display: flex; justify-content: center; }   /* first column */
+  .eyeBtn:hover { opacity: 1; color: inherit; }
   .eyeBtn.off { opacity: .35; }
   .layerRow.hiddenRow .nm { opacity: .4; text-decoration: line-through; }
   .ovRow { display: flex; justify-content: space-between; gap: 8px;
@@ -186,6 +198,9 @@
   .layerRow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis;
                   white-space: nowrap; }
   .layerRow .kd { color: var(--muted); font-size: 10px; }
+  .layerRow .nmEdit { min-width: 0; font: inherit; color: inherit;
+                      background: var(--bg, #14161a); border: 1px solid var(--accent);
+                      border-radius: 3px; padding: 0 4px; margin: -1px 0; outline: none; }
   .cpCard { display: flex; gap: 8px; align-items: center; padding: 5px;
             border: 1px solid var(--line); border-radius: 7px; margin-bottom: 5px;
             cursor: pointer; }
@@ -281,6 +296,7 @@
              font-size: 12px; color: var(--text); }
   .ctxItem:hover { background: rgba(110,168,254,.12); }
   .ctxItem.danger { color: var(--end); }
+  .ctxItem:disabled { opacity: .4; cursor: default; background: none; }
   .ctxItem.danger:hover { background: rgba(229,83,75,.12); }
   .ctxSep { height: 1px; background: var(--line); margin: 4px 6px; }
   #rulerTop { position: absolute; top: 0; left: 18px; right: 0; height: 18px;
@@ -303,7 +319,8 @@
   .warnNote { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
               color: #e0a434; border-radius: 7px; padding: 6px 9px;
               font-size: 11.5px; margin: 2px 0 10px; }
-  .warnBadge { color: #e0a434; font-size: 11px; flex: none; cursor: help; }
+  .warnBadge { color: #e0a434; font-size: 11px; flex: none; cursor: help;
+               display: flex; }
   .ovWarn { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
             color: #e0a434; border-radius: 7px; padding: 5px 8px; font-size: 11.5px;
             margin-top: 6px; cursor: pointer; }
@@ -1021,6 +1038,21 @@ function nearestOnPoly(pts, x, y) {
   return best;
 }
 
+/* ---------- icons ----------
+   Icons: Tabler Icons 3.50.0 (MIT, (c) 2020-2026 Paweł Kuna) —
+   https://tabler.io/icons — outline set, inlined (no network at runtime).
+   License text: THIRD_PARTY_NOTICES.md. Path data copied verbatim from
+   @tabler/icons@3.50.0/icons/outline/<name>.svg, bounding box dropped. */
+const ICONS = {
+  "eye": '<path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0"/><path d="M21 12c-2.4 4 -5.4 6 -9 6c-3.6 0 -6.6 -2 -9 -6c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6"/>',
+  "eye-off": '<path d="M10.585 10.587a2 2 0 0 0 2.829 2.828"/><path d="M16.681 16.673a8.717 8.717 0 0 1 -4.681 1.327c-3.6 0 -6.6 -2 -9 -6c1.272 -2.12 2.712 -3.678 4.32 -4.674m2.86 -1.146a9.055 9.055 0 0 1 1.82 -.18c3.6 0 6.6 2 9 6c-.666 1.11 -1.379 2.067 -2.138 2.87"/><path d="M3 3l18 18"/>',
+  "alert-triangle": '<path d="M12 9v4"/><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0"/><path d="M12 16h.01"/>',
+};
+function icon(name, extraClass = "") {
+  return `<svg class="ic${extraClass ? " " + extraClass : ""}" viewBox="0 0 24 24" ` +
+    `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
+    `stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+}
 /* ---------- api ---------- */
 /* Edit ordering. Every drag paints its result locally first and then
    posts it; the server answers when it can, and while a stitch plan is
@@ -2338,6 +2370,15 @@ function renderAll() {
     if (activeTool === "select" && !spaceHeld) return startMarquee(ev);
     return startPan(ev);
   });
+  // empty canvas: our menu instead of the browser's
+  bg.addEventListener("contextmenu", (ev) => {
+    const items = selection.length > 1 ? selectionMenuItems(clientToSvg(ev)) : [];
+    if (items.length) items.push("-");
+    items.push({ label: "Select all", run: () => setSelection(design.objects.map(o => o.id)) });
+    if (selection.length) items.push({ label: "Deselect", run: () => setSelection([]) });
+    items.push({ label: "Fit to window", run: () => { vb = { ...baseVb }; setViewBox(); } });
+    showContextMenu(ev, items);
+  });
   gridLayer = el("g", {}, canvas);
   refLayer = el("g", {}, canvas);   // reference art under the design, over grid
   artworkLayer = el("g", { class: "artwork" }, canvas);
@@ -2433,7 +2474,7 @@ function renderAll() {
     hit.addEventListener("dblclick", (ev) => { ev.stopPropagation(); addRung(o, ev); });
     hit.addEventListener("contextmenu", (ev) => {
       if (!selection.includes(o.id)) select(o.id);
-      showContextMenu(ev, objectMenuItems(o, clientToSvg(ev)));
+      showContextMenu(ev, selectionMenuItems(clientToSvg(ev)));
     });
   }
   renderEditLayer();
@@ -2765,6 +2806,119 @@ const M_ROTATE = (ang, cx, cy) => {
   return [cos, sin, -sin, cos,
           cx - cx * cos + cy * sin, cy - cx * sin - cy * cos];
 };
+/* edit ops that persist a transformed snapshot: the path plus any
+   start/end command markers riding along with it */
+function transformOps(snap) {
+  const ops = [];
+  for (const rec of snap) {
+    ops.push({ op: "set_path", id: rec.o.id, d: rec.o.d });
+    for (const h of [rec.o.start, rec.o.end])
+      if (h && h.use_id && !h.legacy)
+        ops.push({ op: "move_command", use_id: h.use_id,
+                   x: fmt(h.x), y: fmt(h.y) });
+  }
+  return ops;
+}
+function uuPerMm() {
+  const m = /^([\d.]+)\s*mm$/.exec(design.width || "");
+  return m ? baseVb.w / parseFloat(m[1]) : 96 / 25.4;
+}
+/* ---------- arrow-key nudge ----------
+   Arrow = 0.25 mm, Shift+Arrow = 2.5 mm (Illustrator's 10x ratio). A burst
+   of presses previews live and saves as one edit 350 ms after the last
+   press; while a burst is open it counts as a drag, so a reload can't
+   swap the shapes out from under it. */
+const NUDGE_MM = 0.25, NUDGE_BIG_MM = 2.5;
+let nudge = null;                 // {ids, snap, tx, ty, timer}
+function nudgeSelection(dxDir, dyDir, big) {
+  const objs = selection.map(byId).filter(Boolean);
+  if (!objs.length) return;
+  const key = objs.map(o => o.id).join(",");
+  if (!nudge || nudge.key !== key) {
+    if (nudge) commitNudge();
+    nudge = { key, snap: snapshotObjs(objs), tx: 0, ty: 0, timer: null };
+    dragging = { type: "nudge" };
+  }
+  const step = (big ? NUDGE_BIG_MM : NUDGE_MM) * uuPerMm();
+  nudge.tx += dxDir * step;
+  nudge.ty += dyDir * step;
+  applyAffine(nudge.snap, M_MOVE(nudge.tx, nudge.ty));
+  renderEditLayer();
+  clearTimeout(nudge.timer);
+  nudge.timer = setTimeout(commitNudge, 350);
+}
+function commitNudge() {
+  if (!nudge) return;
+  const n = nudge;
+  nudge = null;
+  clearTimeout(n.timer);
+  if (dragging && dragging.type === "nudge") dragging = null;
+  if (n.tx || n.ty) postEdit(transformOps(n.snap)).catch(() => refresh());
+  else settleReload();
+}
+/* ---------- align / distribute (selection menu) ----------
+   Align moves each shape so its bounding box edge meets the selection's
+   edge. Distribute keeps the outermost shapes put and spaces the others
+   so the GAPS between neighbours are equal (shapes of different sizes
+   still look evenly spaced). */
+function alignSelection(mode) {
+  const objs = selection.map(byId).filter(Boolean);
+  if (objs.length < 2) return;
+  const all = selectionBBox(objs);
+  const snap = snapshotObjs(objs);
+  const boxes = objs.map(o => selectionBBox([o]));
+  const moves = boxes.map(() => [0, 0]);
+  if (mode === "left") boxes.forEach((b, i) => { moves[i][0] = all.minx - b.minx; });
+  if (mode === "right") boxes.forEach((b, i) => { moves[i][0] = all.maxx - b.maxx; });
+  if (mode === "top") boxes.forEach((b, i) => { moves[i][1] = all.miny - b.miny; });
+  if (mode === "bottom") boxes.forEach((b, i) => { moves[i][1] = all.maxy - b.maxy; });
+  if (mode === "dist-h" || mode === "dist-v") {
+    const lo = mode === "dist-h" ? "minx" : "miny", hi = mode === "dist-h" ? "maxx" : "maxy";
+    const axis = mode === "dist-h" ? 0 : 1;
+    const order = boxes.map((b, i) => i).sort((a, b) =>
+      (boxes[a][lo] + boxes[a][hi]) - (boxes[b][lo] + boxes[b][hi]));
+    const sizes = order.map(i => boxes[i][hi] - boxes[i][lo]);
+    const span = boxes[order[order.length - 1]][hi] - boxes[order[0]][lo];
+    const gap = (span - sizes.reduce((a, b) => a + b, 0)) / (order.length - 1);
+    let cursor = boxes[order[0]][lo];
+    order.forEach((i, k) => {
+      moves[i][axis] = cursor - boxes[i][lo];
+      cursor += sizes[k] + gap;
+    });
+  }
+  const changed = [];
+  snap.forEach((rec, i) => {
+    const [tx, ty] = moves[i];
+    if (Math.abs(tx) < 1e-6 && Math.abs(ty) < 1e-6) return;
+    applyAffine([rec], M_MOVE(tx, ty));
+    changed.push(rec);
+  });
+  if (!changed.length) { showToast("already aligned"); return; }
+  renderEditLayer();
+  postEdit(transformOps(changed)).catch(() => refresh());
+}
+function selectionMenuItems(at) {
+  const objs = selection.map(byId).filter(Boolean);
+  if (objs.length === 1) return objectMenuItems(objs[0], at);
+  const n = objs.length;
+  return [
+    { label: "Align left", run: () => alignSelection("left") },
+    { label: "Align right", run: () => alignSelection("right") },
+    { label: "Align top", run: () => alignSelection("top") },
+    { label: "Align bottom", run: () => alignSelection("bottom") },
+    "-",
+    { label: "Distribute horizontally", run: () => alignSelection("dist-h"),
+      disabled: n < 3, hint: "needs 3 or more" },
+    { label: "Distribute vertically", run: () => alignSelection("dist-v"),
+      disabled: n < 3, hint: "needs 3 or more" },
+    "-",
+    { label: `Delete ${n} objects`, danger: true, run: () => {
+        const ids = [...selection];
+        setSelection([]);
+        postEdit(ids.map(id => ({ op: "delete_element", id })));
+      } },
+  ];
+}
 function applyAffine(snap, m) {
   const [a, b, c, d, e, f] = m;
   const mapX = (x, y) => a * x + c * y + e;
@@ -2808,6 +2962,9 @@ function renderTransformGizmo(objs) {
   };
   fillRect.addEventListener("pointerdown", startMove);
   box.addEventListener("pointerdown", startMove);
+  const menu = (ev) => showContextMenu(ev, selectionMenuItems(clientToSvg(ev)));
+  fillRect.addEventListener("contextmenu", menu);
+  box.addEventListener("contextmenu", menu);
   const corners = [[bb.minx, bb.miny], [bb.maxx, bb.miny],
                    [bb.maxx, bb.maxy], [bb.minx, bb.maxy]];
   const cx = (bb.minx + bb.maxx) / 2, cy = (bb.miny + bb.maxy) / 2;
@@ -3038,6 +3195,10 @@ function showContextMenu(ev, items) {
     const row = document.createElement("button");
     row.className = "ctxItem" + (it.danger ? " danger" : "");
     row.textContent = it.label;
+    if (it.disabled) {
+      row.disabled = true;
+      if (it.hint) row.title = it.hint;
+    }
     row.addEventListener("click", () => { closeContextMenu(); it.run(); });
     m.appendChild(row);
   }
@@ -3156,9 +3317,11 @@ function select(id, additive = false) {
    enclosed-vs-touched nuance deliberately not replicated yet). A plain
    click still deselects, matching startPan's old behavior. */
 function startMarquee(ev0) {
+  if (notPrimary(ev0)) return;
   const from = clientToSvg(ev0);
   let rect = null, moved = false;
   const move = (e) => {
+    if (e.buttons === 0) { up(e); return; }     // release happened unseen
     if (Math.hypot(e.clientX - ev0.clientX, e.clientY - ev0.clientY) > 4) moved = true;
     if (!moved) return;
     const p = clientToSvg(e);
@@ -3191,10 +3354,12 @@ function startMarquee(ev0) {
   window.addEventListener("pointerup", up);
 }
 function startPan(ev) {
+  if (ev.button === 2) return;                  // right button: menu, not pan
   const from = { x: ev.clientX, y: ev.clientY, vb: { ...vb } };
   const rect = canvas.getBoundingClientRect();
   let moved = false;
   const move = (e) => {
+    if (e.buttons === 0) { up(); return; }      // release happened unseen
     if (Math.hypot(e.clientX - from.x, e.clientY - from.y) > 3) moved = true;
     vb.x = from.vb.x - (e.clientX - from.x) * vb.w / rect.width;
     vb.y = from.vb.y - (e.clientY - from.y) * vb.h / rect.height;
@@ -3212,13 +3377,21 @@ function startPan(ev) {
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
 }
+/* Only the primary button drags. A right-click used to start a move-drag
+   here, the OS context menu then swallowed the button release, and the
+   shape stayed glued to the cursor until the next click — which saved the
+   move. As a backstop, every drag ends if the pointer moves with no button
+   held (a release we never saw). */
+const notPrimary = (ev) => ev.button !== undefined && ev.button !== 0;
 function startDrag(ev, desc) {
+  if (notPrimary(ev)) return;
   ev.stopPropagation();
   ev.preventDefault();
   let last = clientToSvg(ev);
   let movedAny = false;
   dragging = desc;
   const move = (e) => {
+    if (e.buttons === 0) { up(); return; }      // release happened unseen
     movedAny = true;
     // node-following drags snap the pointer to nearby guides
     const p = snapPoint(clientToSvg(e));
@@ -3341,15 +3514,7 @@ function startDrag(ev, desc) {
                           x: fmt(h.x), y: fmt(h.y) }]);
       } else if (desc.type === "g-move" || desc.type === "g-scale" ||
                  desc.type === "g-rotate" || desc.type === "g-squish") {
-        const ops = [];
-        for (const rec of desc.snap) {
-          ops.push({ op: "set_path", id: rec.o.id, d: rec.o.d });
-          for (const h of [rec.o.start, rec.o.end])
-            if (h && h.use_id && !h.legacy)
-              ops.push({ op: "move_command", use_id: h.use_id,
-                         x: fmt(h.x), y: fmt(h.y) });
-        }
-        await postEdit(ops);
+        await postEdit(transformOps(desc.snap));
       } else if (desc.type === "fill-node") {
         await postEdit([{ op: "set_path", id: desc.obj.id, d: desc.obj.d }]);
       } else if (desc.type === "bez") {
@@ -3540,6 +3705,12 @@ document.addEventListener("keydown", (ev) => {
     const ids = [...selection];
     setSelection([]);
     postEdit(ids.map(id => ({ op: "delete_element", id })));
+  } else if (ev.key.startsWith("Arrow") && selection.length && !mod
+             && !penDraft && !knifeDraft && !activeNode && !activeRung) {
+    ev.preventDefault();
+    const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+                ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
+    if (d) nudgeSelection(d[0], d[1], ev.shiftKey);
   } else if (mod && ev.shiftKey && k === "a") {
     ev.preventDefault(); setSelection([]);
   } else if (mod && k === "a") {
@@ -3889,6 +4060,45 @@ for (const pnl of ["overview", "inspect", "layers", "colors", "reference", "hist
     if (saved === "1") root.classList.add("closed");
     else if (saved === "0") root.classList.remove("closed");
   } catch (e) { /* private mode */ }
+  setupPanelHeight(pnl, root);
+}
+/* Panel heights: each open panel has a fixed body height (content scrolls
+   inside) set by dragging the grip below it; double-click the grip to
+   reset. Remembered per panel in this browser. */
+function setupPanelHeight(pnl, root) {
+  const DEFAULT_H = { overview: 190, inspect: 300, layers: 300, colors: 160,
+                      reference: 170, history: 240 };
+  const MIN_H = 60, MAX_H = 1200;
+  const body = root.querySelector(".panelBody");
+  const key = "artifact-panel-h-" + pnl;
+  const apply = (h) => body.style.setProperty("--ph", Math.round(h) + "px");
+  let h = DEFAULT_H[pnl] || 200;
+  try { const v = +localStorage.getItem(key); if (v >= MIN_H) h = v; } catch (e) { /* defaults */ }
+  apply(h);
+  const grip = document.createElement("div");
+  grip.className = "panelGrip";
+  grip.title = "Drag to resize · double-click to reset";
+  body.after(grip);
+  const save = (v) => { try { localStorage.setItem(key, String(Math.round(v))); } catch (e) { /* private */ } };
+  grip.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    const y0 = ev.clientY, h0 = body.getBoundingClientRect().height;
+    grip.classList.add("drag");
+    grip.setPointerCapture(ev.pointerId);
+    const move = (e) => apply(Math.max(MIN_H, Math.min(MAX_H, h0 + e.clientY - y0)));
+    const up = () => {
+      grip.classList.remove("drag");
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      save(body.getBoundingClientRect().height);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  });
+  grip.addEventListener("dblclick", () => {
+    try { localStorage.removeItem(key); } catch (e) { /* private */ }
+    apply(DEFAULT_H[pnl] || 200);
+  });
 }
 
 function renderOverview() {
@@ -3946,13 +4156,96 @@ function renderOverview() {
     row(sentenceCase(k.replaceAll("_", " ")), String(v));
 }
 
+/* Inline rename (double-click a layer name). While a name is being edited
+   the panel holds off re-rendering — a reload arriving mid-typing would
+   otherwise rebuild the rows and throw the text away — and catches up once
+   the edit commits or cancels. */
+let layerRenaming = null;        // id being renamed, or null
+/* Double-click on a layer name is detected by hand. The first click selects
+   the layer, which re-renders the panel AND fills the Inspect panel above
+   it, pushing the Layers list down — the second click then lands on
+   whatever slid under the pointer (measured: an Inspect row), so the
+   browser's dblclick never reaches the name. A second press at the same
+   screen spot within 450 ms is therefore the double-click on the layer
+   recorded by the first; that press is swallowed so it can't click the
+   element that moved under it. (Before this, the rename field never
+   opened and a Delete meant for the text deleted the shape.) */
+let lastNameClick = { id: null, t: 0, x: 0, y: 0 };
+let swallowClickUntil = 0;
+document.addEventListener("pointerdown", (ev) => {
+  const c = lastNameClick;
+  if (!c.id || layerRenaming) return;
+  const quick = performance.now() - c.t < 450;
+  const still = Math.abs(ev.clientX - c.x) < 5 && Math.abs(ev.clientY - c.y) < 5;
+  const id = c.id;
+  lastNameClick = { id: null, t: 0, x: 0, y: 0 };
+  if (!quick || !still) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  swallowClickUntil = performance.now() + 600;
+  const o = byId(id);
+  const row = [...document.querySelectorAll("#layersBody .layerRow")]
+    .find(r => r.dataset.id === id);
+  const nm = row && row.querySelector(".nm");
+  if (o && nm) {
+    row.scrollIntoView({ block: "nearest" });
+    startLayerRename(o, nm, row);
+  }
+}, true);
+for (const t of ["mousedown", "mouseup", "click", "dblclick"])
+  document.addEventListener(t, (ev) => {
+    if (performance.now() < swallowClickUntil) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (t === "dblclick") swallowClickUntil = 0;
+    }
+  }, true);
+let layersDirty = false;
+function startLayerRename(o, nm, row) {
+  if (layerRenaming) return;
+  layerRenaming = o.id;
+  row.draggable = false;          // text selection, not a row drag
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "nm nmEdit";
+  const original = o.label || o.id;
+  input.value = original;
+  nm.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const v = input.value.trim();
+    layerRenaming = null;
+    if (commit && v && v !== original) {
+      o.label = v;                // show it now; the reload confirms it
+      postEdit([{ op: "set_svg_attr", id: o.id, name: "label", value: v }])
+        .catch(() => refresh());
+    }
+    layersDirty = false;
+    renderLayers();
+  };
+  // keep typing out of the editor's shortcuts (Delete would delete the shape)
+  input.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+    else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  for (const t of ["click", "dblclick", "pointerdown", "contextmenu"])
+    input.addEventListener(t, (ev) => ev.stopPropagation());
+}
 function renderLayers() {
+  if (layerRenaming) { layersDirty = true; return; }
   const body = $("layersBody");
   body.textContent = "";
   if (!design) return;
   design.objects.forEach((o, i) => {
     const r = document.createElement("div");
     r.className = "layerRow" + (selection.includes(o.id) ? " sel" : "");
+    r.dataset.id = o.id;
     r.draggable = true;
     const num = document.createElement("span");
     num.className = "num";
@@ -3973,7 +4266,12 @@ function renderLayers() {
     const nm = document.createElement("span");
     nm.className = "nm";
     nm.textContent = o.label || o.id;
-    nm.title = o.id;
+    nm.title = `${o.id} — double-click to rename`;
+    // first half of a double-click; the second half is caught by the
+    // document-level pointerdown below (see lastNameClick)
+    nm.addEventListener("click", (ev) => {
+      lastNameClick = { id: o.id, t: performance.now(), x: ev.clientX, y: ev.clientY };
+    });
     const kd = document.createElement("span");
     kd.className = "kd";
     kd.textContent = o.kind;
@@ -3983,7 +4281,8 @@ function renderLayers() {
     const eye = document.createElement("button");
     eye.type = "button";
     eye.className = "eyeBtn" + (hiddenIds.has(o.id) ? " off" : "");
-    eye.textContent = hiddenIds.has(o.id) ? "◡" : "👁";
+    eye.innerHTML = icon(hiddenIds.has(o.id) ? "eye-off" : "eye");
+    eye.setAttribute("aria-label", hiddenIds.has(o.id) ? "Show" : "Hide");
     eye.title = hiddenIds.has(o.id)
       ? "Show on canvas" : "Hide on canvas (view only — still stitches)";
     eye.addEventListener("click", (ev) => {
@@ -3998,10 +4297,10 @@ function renderLayers() {
     if (usesIgnoredMethod(o)) {
       const warn = document.createElement("span");
       warn.className = "warnBadge";
-      warn.textContent = "⚠";
+      warn.innerHTML = icon("alert-triangle");
       warn.title = ignoredMethodNote();
-      r.append(num, sw, nm, warn, eye, kd);
-    } else r.append(num, sw, nm, eye, kd);
+      r.append(eye, num, sw, nm, warn, kd);
+    } else r.append(eye, num, sw, nm, kd);   // visibility first, as in Illustrator
     r.addEventListener("click", (ev) =>
       select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey));
     r.addEventListener("contextmenu", (ev) =>
