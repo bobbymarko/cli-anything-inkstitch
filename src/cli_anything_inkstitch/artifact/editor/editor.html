@@ -9,6 +9,9 @@
     --bg: #14161a; --panel: #1c1f26; --line: #2a2e38; --text: #e6e8ee;
     --muted: #9aa1b0; --accent: #6ea8fe; --start: #37c46f; --end: #e5534b;
     --rail: #ffb347; --rung: #9d7bff; --zig: #ffd9a0;
+    /* roles added for theming; defaults are the colours they replaced */
+    --canvas: #0e1013; --field: #14161a; --on-accent: #0c1523; --handle: #ffffff;
+    --warn: #e0a434; --guide: #46c8cd; --scrim: #0a0c0f;
     /* spacing scale — use these, not ad-hoc px, for padding/gaps */
     --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
     /* type scale — every font-size in the editor is one of these */
@@ -53,7 +56,7 @@
   #fileMenuBtn { all: unset; display: inline-flex; align-items: center; gap: 4px;
                  padding: 4px 6px 4px 8px; margin-left: -6px; border-radius: 6px;
                  cursor: pointer; max-width: 60%; }
-  #fileMenuBtn:hover, #fileMenuBtn.open { background: rgba(255,255,255,.06); }
+  #fileMenuBtn:hover, #fileMenuBtn.open { background: color-mix(in srgb, var(--text) 6%, transparent); }
   #fileMenuBtn .brand { font-weight: 600; white-space: nowrap; overflow: hidden;
                         text-overflow: ellipsis; }
   #fileMenuBtn .fileChev { color: var(--muted); display: flex; }
@@ -66,7 +69,7 @@
   #viewModes { display: flex; gap: 2px; }
   #presence { display: flex; align-items: center; gap: 6px; margin-top: 8px;
               color: var(--muted); font-size: var(--fs-sm); flex-wrap: wrap; }
-  #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; flex: none; }
+  #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
   #presenceHint { flex-basis: 100%; padding-left: 14px; font-size: var(--fs-xs); opacity: .8; }
   #presence:not(.waiting) #presenceHint { display: none; }
   #presence.listening .dot { background: var(--start); }
@@ -74,25 +77,25 @@
 
   #main { display: flex; flex: 1; min-height: 0; }
   #canvasWrap { position: relative; flex: 1; min-width: 0; overflow: hidden;
-                background: #0e1013; }
+                background: var(--canvas); }
   #canvas, #realCanvas, #gridCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
   #gridCanvas { pointer-events: none; }
   #realCanvas { pointer-events: none; display: none; }  /* under #canvas in DOM order */
   #canvasWrap.showPlan .artwork { opacity: .12; } /* plan is the truth while shown */
   .planLayer { pointer-events: none; }
   #toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 60px;
-           background: rgba(20,22,26,.95); border: 1px solid var(--line);
+           background: color-mix(in srgb, var(--bg) 95%, transparent); border: 1px solid var(--line);
            border-radius: 8px; padding: 6px 14px; color: var(--text); display: none;
            max-width: 60ch; z-index: 3; }
   #toast.show { display: block; }
-  #toast.error { border-color: rgba(229,83,75,.5); color: var(--end); }
+  #toast.error { border-color: color-mix(in srgb, var(--end) 50%, transparent); color: var(--end); }
   /* The stitch plan failing used to be a 4-second toast over artwork dimmed to
      12% -- miss it and the canvas just looks broken for ever, with no way to
      tell a failed plan from an empty one. This says so, and stays said. */
   #planError { position: absolute; left: 50%; top: 24px; transform: translateX(-50%);
                max-width: 560px; z-index: 20; padding: 10px 13px; border-radius: 8px;
-               background: rgba(38,16,16,.96); border: 1px solid rgba(229,83,75,.55);
-               color: #f4d7d4; font-size: var(--fs-sm); line-height: 1.5; }
+               background: color-mix(in srgb, var(--end) 14%, var(--panel)); border: 1px solid color-mix(in srgb, var(--end) 55%, transparent);
+               color: color-mix(in srgb, var(--end) 35%, var(--text)); font-size: var(--fs-sm); line-height: 1.5; }
   #planError[hidden] { display: none; }
   #planError .pe-head { font-weight: 600; color: var(--end); }
   #planError .pe-detail { margin-top: 3px; }
@@ -100,7 +103,7 @@
                         font-size: var(--fs-xs); opacity: .75; word-break: break-all; }
   #viewModes.loading button.on { animation: pulse 1.2s infinite; }
   #gateBanner { position: absolute; left: 10px; right: 10px; top: 10px; display: none;
-                background: rgba(46,22,24,.95); border: 1px solid rgba(229,83,75,.5);
+                background: color-mix(in srgb, var(--end) 14%, var(--panel)); border: 1px solid color-mix(in srgb, var(--end) 50%, transparent);
                 border-radius: 8px; padding: 10px 12px; z-index: 2; }
   #gateBanner.show { display: block; }
   #gateBanner h3 { font-size: var(--fs-sm); color: var(--end); margin-bottom: 6px; }
@@ -112,12 +115,12 @@
      shift when a stitch view toggles it on and off */
   #timelineBar { position: absolute; left: 50%; transform: translateX(-50%);
                  bottom: 60px; display: none; align-items: center; gap: 10px;
-                 background: rgba(28,31,38,.95); border: 1px solid var(--line);
+                 background: color-mix(in srgb, var(--panel) 95%, transparent); border: 1px solid var(--line);
                  border-radius: 10px; padding: 6px 12px; z-index: 3; }
   #timelineBar #timeline { width: 230px; }
   #toolbar { position: absolute; left: 50%; transform: translateX(-50%);
              bottom: 12px; display: flex; gap: 2px; align-items: center;
-             background: rgba(28,31,38,.95);
+             background: color-mix(in srgb, var(--panel) 95%, transparent);
              border: 1px solid var(--line); border-radius: 10px; padding: 4px 8px;
              z-index: 3; }
   .tbSep { width: 1px; height: 22px; background: var(--line); margin: 0 6px;
@@ -125,22 +128,44 @@
   #toolbar .tool { all: unset; width: 34px; height: 34px; border-radius: 7px;
                    display: flex; align-items: center; justify-content: center;
                    color: var(--muted); cursor: pointer; position: relative; }
-  #toolbar .tool:hover { color: var(--text); background: rgba(110,168,254,.10); }
-  #toolbar .tool.on { color: #0c1523; background: var(--accent); }
+  #toolbar .tool:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  #toolbar .tool.on { color: var(--on-accent); background: var(--accent); }
   #toolbar .tool .kbd { position: absolute; bottom: 1px; right: 3px;
                         font-size: var(--fs-2xs); opacity: .7; }
   .gizmoBox { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
               vector-effect: non-scaling-stroke; cursor: move; }
-  .gizmoFill { fill: rgba(110,168,254,.05); cursor: move; }
-  .gizmoHandle { fill: #fff; stroke: var(--accent); stroke-width: 1.5;
+  .gizmoFill { fill: color-mix(in srgb, var(--accent) 5%, transparent); cursor: move; }
+  .gizmoHandle { fill: var(--handle); stroke: var(--accent); stroke-width: 1.5;
                  vector-effect: non-scaling-stroke; cursor: nwse-resize; }
   .gizmoHandle.gizmoMid-x { cursor: ew-resize; }
   .gizmoHandle.gizmoMid-y { cursor: ns-resize; }
   /* invisible hit zones outside the corners; curved-arrow rotate cursor */
   .gizmoRotZone { fill: rgba(0,0,0,0); pointer-events: all;
     cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.5 9a4.5 4.5 0 1 1 1.3 3.2" fill="none" stroke="black" stroke-width="4"/><path d="M4.5 9a4.5 4.5 0 1 1 1.3 3.2" fill="none" stroke="white" stroke-width="2"/><path d="M2.8 8.2 l1.7 4.4 3.8-2.4z" fill="white" stroke="black" stroke-width="0.8"/></svg>') 9 9, crosshair; }
+  body.inspectCollapsed #settingsBtnCenter { display: flex; }
+  #inspect .sideHead { gap: var(--sp-1); }
+  #themeOverlay { position: fixed; inset: 0; display: none; align-items: center;
+                  justify-content: center; z-index: 30;
+                  background: color-mix(in srgb, var(--scrim) 70%, transparent); }
+  #themeOverlay.show { display: flex; }
+  #themeCard { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+               padding: var(--sp-4); width: min(440px, calc(100vw - 32px));
+               box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+  .themeHead { display: flex; align-items: center; justify-content: space-between;
+               margin-bottom: var(--sp-3); }
+  .themeHead h1 { font-size: var(--fs-lg); font-weight: 600; }
+  #themeList { display: grid; gap: var(--sp-2); }
+  .themeTile { all: unset; display: flex; align-items: center; justify-content: space-between;
+               gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: 8px;
+               border: 1px solid var(--line); cursor: pointer; font-size: var(--fs-md); }
+  .themeTile:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .themeTile.on { border-color: var(--accent);
+                  background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .themeSw { display: flex; gap: 3px; }
+  .themeSw i { width: 14px; height: 14px; border-radius: 4px;
+               box-shadow: inset 0 0 0 1px rgba(0,0,0,.25); }
   #helpOverlay { position: fixed; inset: 0; display: none; align-items: center;
-                 justify-content: center; background: rgba(10,12,15,.7); z-index: 20; }
+                 justify-content: center; background: color-mix(in srgb, var(--scrim) 70%, transparent); z-index: 20; }
   #helpOverlay.show { display: flex; }
   #helpCard { background: var(--panel); border: 1px solid var(--line);
               border-radius: 14px; padding: 22px 26px; width: min(560px, 92vw);
@@ -153,7 +178,7 @@
   #helpCard td { padding: 4px 0; border-bottom: 1px solid var(--line);
                  vertical-align: top; }
   #helpCard td:first-child { color: var(--muted); width: 46%; }
-  #helpCard kbd { background: #14161a; border: 1px solid var(--line);
+  #helpCard kbd { background: var(--field); border: 1px solid var(--line);
                   border-radius: 4px; padding: 1px 6px; font: var(--fs-xs) ui-monospace,
                   monospace; white-space: nowrap; }
   #helpClose { float: right; all: unset; cursor: pointer; color: var(--muted);
@@ -172,15 +197,15 @@
               border-radius: 4px; background: var(--line); outline: none;
               cursor: pointer; }
   #timeline::-webkit-slider-thumb { -webkit-appearance: none; width: 14px;
-              height: 14px; border-radius: 50%; background: #fff;
+              height: 14px; border-radius: 50%; background: var(--handle);
               border: 2px solid var(--accent); cursor: grab; }
   #timeline::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%;
-              background: #fff; border: 2px solid var(--accent); cursor: grab; }
+              background: var(--handle); border: 2px solid var(--accent); cursor: grab; }
   #tlLabel { color: var(--muted); font-variant-numeric: tabular-nums;
              white-space: nowrap; }
   #gateBanner button { font: inherit; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
   #gateEndAnyway { background: transparent; color: var(--end);
-                   border: 1px solid rgba(229,83,75,.5); }
+                   border: 1px solid color-mix(in srgb, var(--end) 50%, transparent); }
   #gateDismiss { background: transparent; color: var(--muted);
                  border: 1px solid var(--line); }
 
@@ -211,7 +236,7 @@
                       background: var(--line); }
   .panelGrip:hover::after, .panelGrip.drag::after { background: var(--accent); }
   .refRow { display: flex; align-items: center; gap: var(--sp-2); padding: 3px 0; }
-  .refLabel { flex: 0 0 62px; font-size: var(--fs-xs); color: var(--muted, #999); }
+  .refLabel { flex: 0 0 62px; font-size: var(--fs-xs); color: var(--muted); }
   .refRow input[type="range"] { flex: 1; min-width: 0; }
   .refNum { width: 64px; font-size: var(--fs-xs); }
   .refName { font-size: var(--fs-xs); padding: 2px; overflow: hidden;
@@ -232,8 +257,8 @@
   .layerRow { display: flex; align-items: center; gap: var(--sp-2);
               padding: var(--sp-1) var(--row-bleed); margin: 0 calc(-1 * var(--row-bleed));
               border-radius: 6px; font-size: var(--fs-sm); cursor: pointer; }
-  .layerRow:hover { background: rgba(110,168,254,.08); }
-  .layerRow.sel { background: rgba(110,168,254,.16); }
+  .layerRow:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .layerRow.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
   .layerRow.dropTarget { box-shadow: 0 -2px 0 var(--accent); }
   .layerRow .sw { width: 11px; height: 11px; border-radius: 3px;
                   border: 1px solid var(--line); flex: none; }
@@ -241,14 +266,14 @@
                   white-space: nowrap; }
   .layerRow .kd { color: var(--muted); font-size: var(--fs-xs); }
   .layerRow .nmEdit { min-width: 0; font: inherit; color: inherit;
-                      background: var(--bg, #14161a); border: 1px solid var(--accent);
+                      background: var(--field); border: 1px solid var(--accent);
                       border-radius: 3px; padding: 0 4px; margin: -1px 0; outline: none; }
   .cpCard { display: flex; gap: 8px; align-items: center; padding: 5px;
             border: 1px solid var(--line); border-radius: 7px; margin-bottom: 5px;
             cursor: pointer; }
-  .cpCard:hover { background: rgba(110,168,254,.08); }
+  .cpCard:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .cpCard img { width: 42px; height: 42px; border-radius: 5px;
-                background: #18181c; object-fit: cover; flex: none; }
+                background: var(--field); object-fit: cover; flex: none; }
   .cpCard .cpAnno { font-size: var(--fs-xs); color: var(--text);
                     overflow: hidden; text-overflow: ellipsis;
                     display: -webkit-box; -webkit-line-clamp: 2;
@@ -262,7 +287,7 @@
              border-radius: 5px; font-size: var(--fs-xs);
              color: var(--muted); cursor: pointer; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
-  .histRow:hover { background: rgba(110,168,254,.08); color: var(--text); }
+  .histRow:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--text); }
   .histRow.cur { color: var(--accent); }
   .histRow.future { opacity: .45; }
   .sideHead { display: flex; align-items: center; justify-content: flex-end;
@@ -282,7 +307,7 @@
   body.inspectCollapsed #inspectToggleCenter { display: flex; }
   .sideResizer { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 6;
                  cursor: col-resize; }
-  .sideResizer:hover, .sideResizer.active { background: rgba(110,168,254,.25); }
+  .sideResizer:hover, .sideResizer.active { background: color-mix(in srgb, var(--accent) 25%, transparent); }
   #panelResizer { right: -3px; }
   #inspectResizer { left: -3px; }
   .side { position: relative; }
@@ -295,14 +320,14 @@
                margin-left: calc(-1 * (var(--sp-1) + 1px)); }
   .titleEdit:hover { border-color: var(--line); }
   .titleEdit:focus { border-color: var(--accent); outline: none;
-                     background: #14161a; }
+                     background: var(--field); }
   #inspectBody .objKind { color: var(--accent); font-size: var(--fs-sm); margin-bottom: 10px; }
   #inspectBody .prow { display: grid; grid-template-columns: var(--value-col) 1fr;
                        column-gap: var(--sp-2); align-items: center; padding: var(--sp-1) 0;
                        border-bottom: 1px solid var(--line); }
   #inspectBody .pname { color: var(--muted); word-break: normal; }
   #inspectBody .pname.hasTip { cursor: help;
-    text-decoration: underline dotted rgba(154,161,176,.5);
+    text-decoration: underline dotted color-mix(in srgb, var(--muted) 50%, transparent);
     text-underline-offset: 3px; }
   #inspectBody .pname.hasTip:hover { color: var(--text); }
   #inspectBody .pctrl { display: inline-flex; align-items: center; gap: var(--sp-1);
@@ -313,7 +338,7 @@
   .colorRow { display: flex; align-items: center; gap: var(--sp-2);
               padding: var(--sp-1) var(--row-bleed); margin: 0 calc(-1 * var(--row-bleed));
               border-radius: 6px; cursor: pointer; }
-  .colorRow:hover { background: rgba(255,255,255,0.04); }
+  .colorRow:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
   .colorRow .nm { flex: 1; font-family: ui-monospace, monospace; font-size: var(--fs-xs); }
   .colorRow .kd { color: var(--muted); font-size: var(--fs-xs); }
   .colorSw { width: 26px; height: 20px; padding: 0; border: 1px solid var(--line);
@@ -329,13 +354,13 @@
   #palettePop { position: fixed; z-index: 30; width: 264px;
                 background: var(--panel); border: 1px solid var(--line);
                 border-radius: 10px; padding: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.5); }
-  #palettePop select { width: 100%; margin-bottom: 8px; background: #14161a;
+  #palettePop select { width: 100%; margin-bottom: 8px; background: var(--field);
                        color: var(--text); border: 1px solid var(--line);
                        border-radius: 6px; padding: 3px 6px; font: inherit; }
   .palGrid { display: flex; flex-wrap: wrap; gap: 3px; max-height: 240px;
              overflow-y: auto; font-size: var(--fs-xs); color: var(--muted); }
   .palCell { all: unset; width: 17px; height: 17px; border-radius: 4px;
-             border: 1px solid rgba(255,255,255,.18); cursor: pointer; }
+             border: 1px solid color-mix(in srgb, var(--text) 18%, transparent); cursor: pointer; }
   .palCell:hover { outline: 2px solid var(--accent); }
   #ctxMenu { position: fixed; z-index: 40; min-width: 190px; background: var(--panel);
              border: 1px solid var(--line); border-radius: 9px; padding: 4px;
@@ -343,34 +368,34 @@
              flex-direction: column; }
   .ctxItem { all: unset; padding: 6px 10px; border-radius: 6px; cursor: pointer;
              font-size: var(--fs-sm); color: var(--text); }
-  .ctxItem:hover { background: rgba(110,168,254,.12); }
+  .ctxItem:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .ctxItem.danger { color: var(--end); }
   .ctxItem:disabled { opacity: .4; cursor: default; background: none; }
-  .ctxItem.danger:hover { background: rgba(229,83,75,.12); }
+  .ctxItem.danger:hover { background: color-mix(in srgb, var(--end) 12%, transparent); }
   .ctxSep { height: 1px; background: var(--line); margin: 4px 6px; }
   #rulerTop { position: absolute; top: 0; left: 18px; right: 0; height: 18px;
               z-index: 4; display: none; cursor: s-resize; }
   #rulerLeft { position: absolute; top: 18px; left: 0; bottom: 0; width: 18px;
                z-index: 4; display: none; cursor: e-resize; }
   #rulerCorner { position: absolute; top: 0; left: 0; width: 18px; height: 18px;
-                 z-index: 4; display: none; background: rgba(20,22,26,.95);
+                 z-index: 4; display: none; background: color-mix(in srgb, var(--bg) 95%, transparent);
                  border-right: 1px solid var(--line);
                  border-bottom: 1px solid var(--line); }
-  .guideLine { stroke: #46c8cd; stroke-dasharray: 6 4; opacity: .8;
+  .guideLine { stroke: var(--guide); stroke-dasharray: 6 4; opacity: .8;
                vector-effect: non-scaling-stroke; pointer-events: none; }
   .guideHit { stroke: rgba(0,0,0,0); stroke-width: 7;
               vector-effect: non-scaling-stroke; }
   .guideHit.gx { cursor: ew-resize; }
   .guideHit.gy { cursor: ns-resize; }
-  .warnNote { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
-              color: #e0a434; border-radius: 7px; padding: 6px 9px;
+  .warnNote { background: color-mix(in srgb, var(--warn) 12%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+              color: var(--warn); border-radius: 7px; padding: 6px 9px;
               font-size: var(--fs-sm); margin: 2px 0 10px; }
-  .warnBadge { color: #e0a434; font-size: var(--fs-xs); flex: none; cursor: help;
+  .warnBadge { color: var(--warn); font-size: var(--fs-xs); flex: none; cursor: help;
                display: flex; }
-  .ovWarn { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
-            color: #e0a434; border-radius: 7px; padding: 5px 8px; font-size: var(--fs-sm);
+  .ovWarn { background: color-mix(in srgb, var(--warn) 12%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+            color: var(--warn); border-radius: 7px; padding: 5px 8px; font-size: var(--fs-sm);
             margin-top: 6px; cursor: pointer; }
-  .ovWarn:hover { background: rgba(224,164,52,.2); }
+  .ovWarn:hover { background: color-mix(in srgb, var(--warn) 20%, transparent); }
   .layerRow .swInput::-webkit-color-swatch-wrapper { padding: 0; }
   .layerRow .swInput::-webkit-color-swatch { border: 1px solid var(--line);
                                              border-radius: 3px; }
@@ -382,8 +407,8 @@
               border-radius: 4px; padding: 1px var(--sp-1);
               margin-left: calc(-1 * (var(--sp-1) + 1px)); }
   .pvalEdit:hover { border-color: var(--line); }
-  .pvalEdit:focus { border-color: var(--accent); outline: none; background: #14161a; }
-  .pvalSelect { width: auto; max-width: 120px; background: #14161a;
+  .pvalEdit:focus { border-color: var(--accent); outline: none; background: var(--field); }
+  .pvalSelect { width: auto; max-width: 120px; background: var(--field);
                 border-color: var(--line); cursor: pointer; }
   .pvalEdit[type="number"] { appearance: textfield; width: 64px; }   /* unit sits beside it */
   .pvalCheck { accent-color: var(--accent); }
@@ -393,7 +418,7 @@
   /* your messages stay bubbles; agent replies are plain text across the
      panel's full width (Claude-app style) */
   .msg.human { align-self: flex-end; max-width: 85%; padding: 7px 10px;
-               border-radius: 10px; background: #2b3547; }
+               border-radius: 10px; background: color-mix(in srgb, var(--accent) 18%, var(--panel)); }
   .msg.agent { align-self: stretch; }
   .msg .objs { display: block; color: var(--accent); font-size: var(--fs-xs); margin-top: 3px; }
   .msg.working { display: flex; gap: 8px; align-items: center; color: var(--muted);
@@ -407,34 +432,34 @@
   #composer { padding: var(--sp-3) var(--sp-4) var(--sp-4); border-top: 1px solid var(--line); }
   #pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
   #pills .pill { display: inline-flex; gap: 6px; align-items: center; font-size: var(--fs-xs);
-                 color: var(--accent); border: 1px solid rgba(110,168,254,.4);
+                 color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
                  border-radius: 999px; padding: 2px 8px; }
   #pills .pill button { all: unset; cursor: pointer; color: var(--muted); }
   #pills .pillSummary { cursor: pointer; user-select: none; }
   .askRow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .askOpt { font-size: var(--fs-sm); color: var(--accent); background: transparent;
-            border: 1px solid rgba(110,168,254,.5); border-radius: 999px;
+            border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 999px;
             padding: 4px 12px; cursor: pointer; }
-  .askOpt:hover:not(:disabled) { background: rgba(110,168,254,.12); }
+  .askOpt:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .askOpt:disabled { opacity: .45; cursor: default; }
-  .askOpt.picked { background: rgba(110,168,254,.2); opacity: 1;
+  .askOpt.picked { background: color-mix(in srgb, var(--accent) 20%, transparent); opacity: 1;
                    border-color: var(--accent); }
   #pillPopover { position: fixed; z-index: 60; display: flex; flex-wrap: wrap;
                  gap: 4px; max-width: 340px; max-height: 40vh; overflow-y: auto;
-                 background: #14161a; border: 1px solid var(--line);
+                 background: var(--field); border: 1px solid var(--line);
                  border-radius: 10px; padding: 8px;
                  box-shadow: 0 6px 24px rgba(0,0,0,.5); }
   #pillPopover .pill { display: inline-flex; gap: 6px; align-items: center;
                  font-size: var(--fs-xs); color: var(--accent);
-                 border: 1px solid rgba(110,168,254,.4);
+                 border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
                  border-radius: 999px; padding: 2px 8px; }
   #pillPopover .pill button { all: unset; cursor: pointer; color: var(--muted); }
   #inputWrap { position: relative; }
-  #input { width: 100%; min-height: 60px; resize: vertical; background: #14161a;
+  #input { width: 100%; min-height: 60px; resize: vertical; background: var(--field);
            color: var(--text); border: 1px solid var(--line); border-radius: 10px;
            padding: 8px 44px 8px 10px; font: inherit; }
   #send { position: absolute; right: 8px; bottom: 10px; width: 28px; height: 28px;
-          border-radius: 50%; background: var(--accent); color: #0c1523; border: 0;
+          border-radius: 50%; background: var(--accent); color: var(--on-accent); border: 0;
           display: flex; align-items: center; justify-content: center;
           cursor: pointer; padding: 0; }
   #send:hover:not(:disabled) { filter: brightness(1.15); }
@@ -442,7 +467,7 @@
   #send svg { display: block; }
 
   #endedOverlay { position: fixed; inset: 0; display: none; align-items: center;
-                  justify-content: center; background: rgba(10,12,15,.88); z-index: 10; }
+                  justify-content: center; background: color-mix(in srgb, var(--scrim) 88%, transparent); z-index: 10; }
   #endedOverlay.show { display: flex; }
   #endedOverlay .card { background: var(--panel); border: 1px solid var(--line);
                         border-radius: 14px; padding: 28px 34px; text-align: center; }
@@ -469,46 +494,160 @@
   /* A trimmed move leaves nothing behind; a float is thread lying on the
      garment. Drawing both as the same grey dash is why "will this stitch
      out?" could not be answered from the screen. */
-  .jumpLine { stroke: #8a8f9c; stroke-width: 1; stroke-dasharray: 4 3;
+  .jumpLine { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3;
               opacity: .55; vector-effect: non-scaling-stroke;
               pointer-events: none; }
   .floatLine { stroke: var(--end); stroke-width: 2; opacity: .95;
                vector-effect: non-scaling-stroke; pointer-events: none; }
-  .node { fill: var(--rail); stroke: #14161a; stroke-width: 1.5;
+  .node { fill: var(--rail); stroke: var(--field); stroke-width: 1.5;
           vector-effect: non-scaling-stroke; cursor: grab; }
-  .node.nodeActive { fill: var(--accent); stroke: #fff; }
-  .rungNode { fill: var(--rung); stroke: #14161a; stroke-width: 1.5;
+  .node.nodeActive { fill: var(--accent); stroke: var(--handle); }
+  .rungNode { fill: var(--rung); stroke: var(--field); stroke-width: 1.5;
               vector-effect: non-scaling-stroke; cursor: grab; }
-  .handle { stroke: #14161a; stroke-width: 1.5; vector-effect: non-scaling-stroke;
+  .handle { stroke: var(--field); stroke-width: 1.5; vector-effect: non-scaling-stroke;
             cursor: grab; }
   .handle.start { fill: var(--start); }
   .handle.end { fill: var(--end); }
   .angleArrow { stroke: var(--accent); opacity: .8; vector-effect: non-scaling-stroke;
                 pointer-events: none; stroke-dasharray: 5 4; }
-  .angleKnob { fill: var(--accent); stroke: #14161a; stroke-width: 1.5;
+  .angleKnob { fill: var(--accent); stroke: var(--field); stroke-width: 1.5;
                vector-effect: non-scaling-stroke; cursor: grab; }
   .angleLabel { fill: var(--text); pointer-events: none;
                 font-family: ui-monospace, monospace; }
   .bezArm { stroke: var(--accent); opacity: .7; stroke-width: 1;
             vector-effect: non-scaling-stroke; pointer-events: none; }
-  .bezHandle { fill: #fff; stroke: var(--accent); stroke-width: 1.5;
+  .bezHandle { fill: var(--handle); stroke: var(--accent); stroke-width: 1.5;
                vector-effect: non-scaling-stroke; cursor: grab; }
   .penDraft { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
               vector-effect: non-scaling-stroke; pointer-events: none; }
   .node.penFirst { fill: var(--start); }
-  .knifeDraft { fill: none; stroke: #ff5a5a; stroke-width: 1.5;
+  .knifeDraft { fill: none; stroke: var(--end); stroke-width: 1.5;
                 stroke-dasharray: 6 3; vector-effect: non-scaling-stroke;
                 pointer-events: none; }
-  .knifeNode { fill: #ff5a5a; stroke: #fff; stroke-width: 1;
+  .knifeNode { fill: var(--end); stroke: var(--handle); stroke-width: 1;
                vector-effect: non-scaling-stroke; pointer-events: none; }
-  .selMarquee { fill: rgba(110,168,254,.06); stroke: var(--accent);
+  .selMarquee { fill: color-mix(in srgb, var(--accent) 6%, transparent); stroke: var(--accent);
                 stroke-dasharray: 4 3; vector-effect: non-scaling-stroke;
                 pointer-events: none; }
-  .zoomMarquee { fill: rgba(110,168,254,.08); stroke: var(--accent);
+  .zoomMarquee { fill: color-mix(in srgb, var(--accent) 8%, transparent); stroke: var(--accent);
                  stroke-dasharray: 5 4; vector-effect: non-scaling-stroke;
                  pointer-events: none; }
 </style>
 </head>
+<script>
+/* Colour themes. "default" = the tokens in :root above. Catppuccin
+   flavours are generated from @catppuccin/palette@1.7.1 (MIT, (c) 2021
+   Catppuccin; THIRD_PARTY_NOTICES.md), mapped onto our roles per the
+   Catppuccin style guide (docs/style-guide.md, General Usage + Terminals). */
+const THEMES = {
+ "catppuccin-latte": {
+  "label": "Catppuccin Latte",
+  "light": true,
+  "vars": {
+   "--bg": "#eff1f5",
+   "--panel": "#e6e9ef",
+   "--canvas": "#dce0e8",
+   "--field": "#eff1f5",
+   "--line": "#ccd0da",
+   "--text": "#4c4f69",
+   "--muted": "#6c6f85",
+   "--accent": "#1e66f5",
+   "--start": "#40a02b",
+   "--end": "#d20f39",
+   "--warn": "#df8e1d",
+   "--rail": "#fe640b",
+   "--rung": "#8839ef",
+   "--zig": "#dc8a78",
+   "--guide": "#179299",
+   "--on-accent": "#eff1f5",
+   "--handle": "#eff1f5",
+   "--scrim": "#dce0e8"
+  }
+ },
+ "catppuccin-frappe": {
+  "label": "Catppuccin Frappé",
+  "light": false,
+  "vars": {
+   "--bg": "#303446",
+   "--panel": "#292c3c",
+   "--canvas": "#232634",
+   "--field": "#303446",
+   "--line": "#414559",
+   "--text": "#c6d0f5",
+   "--muted": "#a5adce",
+   "--accent": "#8caaee",
+   "--start": "#a6d189",
+   "--end": "#e78284",
+   "--warn": "#e5c890",
+   "--rail": "#ef9f76",
+   "--rung": "#ca9ee6",
+   "--zig": "#f2d5cf",
+   "--guide": "#81c8be",
+   "--on-accent": "#303446",
+   "--handle": "#c6d0f5",
+   "--scrim": "#232634"
+  }
+ },
+ "catppuccin-macchiato": {
+  "label": "Catppuccin Macchiato",
+  "light": false,
+  "vars": {
+   "--bg": "#24273a",
+   "--panel": "#1e2030",
+   "--canvas": "#181926",
+   "--field": "#24273a",
+   "--line": "#363a4f",
+   "--text": "#cad3f5",
+   "--muted": "#a5adcb",
+   "--accent": "#8aadf4",
+   "--start": "#a6da95",
+   "--end": "#ed8796",
+   "--warn": "#eed49f",
+   "--rail": "#f5a97f",
+   "--rung": "#c6a0f6",
+   "--zig": "#f4dbd6",
+   "--guide": "#8bd5ca",
+   "--on-accent": "#24273a",
+   "--handle": "#cad3f5",
+   "--scrim": "#181926"
+  }
+ },
+ "catppuccin-mocha": {
+  "label": "Catppuccin Mocha",
+  "light": false,
+  "vars": {
+   "--bg": "#1e1e2e",
+   "--panel": "#181825",
+   "--canvas": "#11111b",
+   "--field": "#1e1e2e",
+   "--line": "#313244",
+   "--text": "#cdd6f4",
+   "--muted": "#a6adc8",
+   "--accent": "#89b4fa",
+   "--start": "#a6e3a1",
+   "--end": "#f38ba8",
+   "--warn": "#f9e2af",
+   "--rail": "#fab387",
+   "--rung": "#cba6f7",
+   "--zig": "#f5e0dc",
+   "--guide": "#94e2d5",
+   "--on-accent": "#1e1e2e",
+   "--handle": "#cdd6f4",
+   "--scrim": "#11111b"
+  }
+ }
+};
+function applyTheme(id) {
+  const root = document.documentElement;
+  for (const t of Object.values(THEMES))
+    for (const k of Object.keys(t.vars)) root.style.removeProperty(k);
+  const t = THEMES[id];
+  if (t) for (const [k, v] of Object.entries(t.vars)) root.style.setProperty(k, v);
+  root.style.colorScheme = t && t.light ? "light" : "dark";
+  root.dataset.theme = t ? id : "default";
+}
+try { applyTheme(localStorage.getItem("artifact-theme") || "default"); } catch (e) { /* defaults */ }
+</script>
 <body>
 <div id="main">
   <aside id="panel" class="side">
@@ -545,6 +684,8 @@
     <div class="spacer"></div>
     <button class="chip" id="helpBtn" type="button" title="How to use"
             aria-label="How to use">?</button>
+    <button class="collapseBtn centerToggle settingsBtn" id="settingsBtnCenter" type="button"
+            title="Settings" aria-haspopup="menu"></button>
     <button class="collapseBtn centerToggle" id="inspectToggleCenter" type="button"
             title="Expand panels"></button>
     <!-- menu actions; hidden, their handlers are reused by the file menu -->
@@ -687,6 +828,8 @@
   <aside id="inspect" class="side">
     <div class="sideResizer" id="inspectResizer" title="Drag to resize"></div>
     <div class="sideHead">
+      <button class="collapseBtn settingsBtn" id="settingsBtn" type="button"
+              title="Settings" aria-haspopup="menu"></button>
       <button class="collapseBtn" id="inspectToggle" type="button"
               title="Collapse panels">»</button></div>
     <div id="panelStack" class="sideBody">
@@ -717,6 +860,13 @@
       </div>
     </div>
   </aside>
+</div>
+<div id="themeOverlay" role="dialog" aria-modal="true" aria-labelledby="themeTitle">
+  <div id="themeCard">
+    <div class="themeHead"><h1 id="themeTitle">Theme</h1>
+      <button id="themeClose" type="button" class="collapseBtn" title="Close" aria-label="Close"></button></div>
+    <div id="themeList"></div>
+  </div>
 </div>
 <div id="endedOverlay"><div class="card">
   <h1>Session ended</h1><p>Return to your agent to continue.</p>
@@ -1108,10 +1258,20 @@ const ICONS = {
   "eye": '<path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0"/><path d="M21 12c-2.4 4 -5.4 6 -9 6c-3.6 0 -6.6 -2 -9 -6c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6"/>',
   "eye-off": '<path d="M10.585 10.587a2 2 0 0 0 2.829 2.828"/><path d="M16.681 16.673a8.717 8.717 0 0 1 -4.681 1.327c-3.6 0 -6.6 -2 -9 -6c1.272 -2.12 2.712 -3.678 4.32 -4.674m2.86 -1.146a9.055 9.055 0 0 1 1.82 -.18c3.6 0 6.6 2 9 6c-.666 1.11 -1.379 2.067 -2.138 2.87"/><path d="M3 3l18 18"/>',
   "chevron-down": '<path d="M6 9l6 6l6 -6"/>',
+  "x": '<path d="M18 6l-12 12"/><path d="M6 6l12 12"/>',
+  "settings": '<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/>',
   "layout-sidebar": '<path d="M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2l0 -12"/><path d="M9 4l0 16"/>',
   "layout-sidebar-right": '<path d="M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2l0 -12"/><path d="M15 4l0 16"/>',
   "alert-triangle": '<path d="M12 9v4"/><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0"/><path d="M12 16h.01"/>',
 };
+/* a theme token as a canvas colour (canvases can't use CSS vars) */
+function tokenRgba(name, alpha) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const m = /^#([0-9a-f]{6})$/i.exec(v);
+  if (!m) return v || "transparent";
+  const n = parseInt(m[1], 16);
+  return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
 function icon(name, extraClass = "") {
   return `<svg class="ic${extraClass ? " " + extraClass : ""}" viewBox="0 0 24 24" ` +
     `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
@@ -1722,10 +1882,10 @@ function drawRulers() {
     if (cv.height !== Math.round(h * dpr)) cv.height = Math.round(h * dpr);
     const ctx = cv.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "rgba(20,22,26,.95)";
+    ctx.fillStyle = tokenRgba("--bg", 0.95);
     ctx.fillRect(0, 0, w, h);
-    ctx.strokeStyle = "rgba(255,255,255,.25)";
-    ctx.fillStyle = "#9aa1b0";
+    ctx.strokeStyle = tokenRgba("--text", 0.25);
+    ctx.fillStyle = tokenRgba("--muted", 1);
     ctx.font = `${getComputedStyle(document.documentElement).getPropertyValue("--fs-2xs").trim() || "9px"} ui-monospace, monospace`;
     ctx.beginPath();
     // ruler canvases sit 18px in from the wrap origin — offset accordingly
@@ -1761,7 +1921,7 @@ function drawRulers() {
    It used to delete and re-create ~200 SVG <line>s inside the main
    drawing on every pan/zoom event (trackpads send several per frame),
    which also invalidated the whole SVG each time. Same colors as before:
-   minor rgba(255,255,255,.05), major .11, 1 device px. */
+   minor = text colour at 5 %, major 11 %, 1 device px (theme-aware). */
 let gridRaf = null;
 function renderGrid() {
   if (gridRaf) return;
@@ -1797,8 +1957,8 @@ function drawGrid() {
     path.moveTo(0, Y); path.lineTo(pw, Y);
   }
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "rgba(255,255,255,.05)"; ctx.stroke(paths[0]);
-  ctx.strokeStyle = "rgba(255,255,255,.11)"; ctx.stroke(paths[1]);
+  ctx.strokeStyle = tokenRgba("--text", 0.05); ctx.stroke(paths[0]);
+  ctx.strokeStyle = tokenRgba("--text", 0.11); ctx.stroke(paths[1]);
 }
 let guideLayer = null;
 function renderGuides() {
@@ -4000,6 +4160,89 @@ function showGateBanner(gate) {
     list.appendChild(li);
   }
   $("gateBanner").classList.add("show");
+}
+/* ---------- settings menu + theme picker ---------- */
+const THEME_LABEL = { default: "Default dark" };
+const DEFAULT_SWATCH_VARS = ["--bg", "--panel", "--canvas", "--text", "--accent",
+                             "--start", "--end", "--warn", "--rail", "--rung"];
+function themeSwatches(id) {
+  if (THEMES[id]) return DEFAULT_SWATCH_VARS.map(k => THEMES[id].vars[k]);
+  // default = the :root values (read with any override removed)
+  const probe = document.createElement("div");
+  document.body.appendChild(probe);
+  const saved = document.documentElement.getAttribute("style");
+  document.documentElement.removeAttribute("style");
+  const cs = getComputedStyle(document.documentElement);
+  const out = DEFAULT_SWATCH_VARS.map(k => cs.getPropertyValue(k).trim());
+  if (saved) document.documentElement.setAttribute("style", saved);
+  probe.remove();
+  return out;
+}
+function setTheme(id) {
+  applyTheme(id);
+  try { localStorage.setItem("artifact-theme", id); } catch (e) { /* private */ }
+  // canvas-drawn chrome doesn't follow CSS vars on its own
+  if (typeof drawRulers === "function") drawRulers();
+  renderGrid();
+  renderPlanLayer();
+  renderThemeList();
+}
+function renderThemeList() {
+  const list = $("themeList");
+  list.textContent = "";
+  const current = document.documentElement.dataset.theme || "default";
+  for (const id of ["default", ...Object.keys(THEMES)]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "themeTile" + (id === current ? " on" : "");
+    const name = document.createElement("span");
+    name.textContent = THEMES[id] ? THEMES[id].label : THEME_LABEL[id];
+    const sw = document.createElement("span");
+    sw.className = "themeSw";
+    for (const c of themeSwatches(id)) {
+      const i = document.createElement("i");
+      i.style.background = c;
+      sw.appendChild(i);
+    }
+    b.append(name, sw);
+    b.addEventListener("click", () => {
+      setTheme(id);
+      const on = $("themeList").querySelector(".themeTile.on");
+      if (on) on.focus();
+    });
+    list.appendChild(b);
+  }
+}
+function openThemeModal() {
+  renderThemeList();
+  $("themeOverlay").classList.add("show");
+  const on = $("themeList").querySelector(".themeTile.on");
+  if (on) on.focus();
+}
+const closeThemeModal = () => $("themeOverlay").classList.remove("show");
+$("themeClose").innerHTML = icon("x");
+$("themeClose").addEventListener("click", closeThemeModal);
+$("themeOverlay").addEventListener("pointerdown", (ev) => {
+  if (ev.target === $("themeOverlay")) closeThemeModal();
+});
+// page-level: picking a theme rebuilds the tiles, so focus may be on <body>
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && $("themeOverlay").classList.contains("show")) {
+    ev.stopPropagation(); ev.preventDefault(); closeThemeModal();
+  }
+}, true);
+for (const id of ["settingsBtn", "settingsBtnCenter"]) {
+  const btn = $(id);
+  btn.innerHTML = icon("settings");
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const r = btn.getBoundingClientRect();
+    showContextMenu({ clientX: r.right - 190, clientY: r.bottom + 4,
+                      preventDefault() {}, stopPropagation() {} }, [
+      { label: "Theme…", run: openThemeModal },
+      { label: "Keyboard shortcuts", run: helpOpen },
+    ]);
+  });
 }
 /* File menu: the chevron after the file name (Claude-app style) holds
    Export and End session. A second click on the button closes it — the
