@@ -142,6 +142,12 @@ class TestRoot:
         assert status == 200
         assert f"/session/{a['key']}" in body and f"/session/{b['key']}" in body
 
+    def test_sessions_route_lists_even_a_single_session(self, server, project):
+        # the editor's "Change design…" goes here; "/" would bounce back
+        opened = _open_session(server, project)
+        status, _, body = self._raw(server, "/sessions")
+        assert status == 200 and f"/session/{opened['key']}" in body
+
     def test_page_uses_the_shared_design_system(self, server):
         _, _, body = self._raw(server, "/")
         assert "/assets/design-system.css" in body and "/assets/theme.js" in body

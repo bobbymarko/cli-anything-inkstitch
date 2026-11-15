@@ -239,6 +239,8 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/":
                 self._handle_root()
+            elif parsed.path in ("/sessions", "/sessions/"):
+                self._handle_root(always_list=True)   # editor's "Change design…"
             elif len(parts) == 2 and parts[0] == "assets":
                 self._handle_asset(parts[1])
             elif parsed.path == "/health":
@@ -405,14 +407,14 @@ class ArtifactHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _handle_root(self) -> None:
+    def _handle_root(self, always_list: bool = False) -> None:
         """`/` goes straight to the open session, so a person can bookmark the server
         instead of a per-design URL. Several open: newest first, as cards. None: say so.
         Built from the editor's design system (/assets/design-system.css + theme.js),
         so it follows the theme chosen in the editor (same origin, same storage)."""
         import html
         rows = self.state.store.open_sessions()
-        if len(rows) == 1:
+        if len(rows) == 1 and not always_list:
             self.send_response(302)
             self.send_header("Location", f"/session/{rows[0]['key']}")
             self.send_header("Cache-Control", "no-store")
@@ -423,19 +425,16 @@ class ArtifactHandler(BaseHTTPRequestHandler):
             cards = []
             for r in rows:
                 d = self._session_design(r["file"])
+                # Figma-style tile: large thumbnail, name + time underneath;
+                # the folder is in the tooltip
                 cards.append(
-                    f"<a class='card' href='/session/{esc(r['key'])}'>"
+                    f"<a class='card' href='/session/{esc(r['key'])}' "
+                    f"title='{esc(d['folder'])}/{esc(d['name'])}'>"
                     f"<span class='thumb'><img src='/api/{esc(r['key'])}/thumbnail' alt='' loading='lazy'"
                     f" onerror=\"this.remove()\"></span>"
-                    f"<span class='meta'><span class='name'>{esc(d['name'])}</span>"
-                    f"<span class='folder' title='{esc(d['folder'])}'>{esc(d['folder'])}</span>"
-                    f"<span class='when'>{esc(self._ago(r.get('updated_at') or ''))}</span></span>"
-                    f"<span class='chev' aria-hidden='true'>"
-                    f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'"
-                    f" stroke-linecap='round' stroke-linejoin='round'><path d='M9 6l6 6l-6 6'/></svg>"
-                    f"</span></a>")
-            body = ("<header><h1>Open designs</h1>"
-                    "<p>Pick a design to keep editing.</p></header>"
+                    f"<span class='name'>{esc(d['name'])}</span>"
+                    f"<span class='when'>{esc(self._ago(r.get('updated_at') or ''))}</span></a>")
+            body = ("<header><h1>Open designs</h1></header>"
                     f"<nav class='list'>{''.join(cards)}</nav>")
         else:
             body = ("<div class='empty'><h1>No open designs</h1>"
@@ -904,27 +903,24 @@ _SESSIONS_CSS = """
 body { min-height: 100vh; background: var(--bg); color: var(--text);
        font: var(--fs-md)/1.45 "Inter", -apple-system, "Segoe UI", sans-serif;
        -webkit-font-smoothing: antialiased; }
-main { max-width: 640px; margin: 0 auto; padding: 72px var(--sp-4) var(--sp-4); }
+main { max-width: 1040px; margin: 0 auto; padding: 72px var(--sp-4) var(--sp-4); }
 header { margin-bottom: var(--sp-4); }
 h1 { font-size: var(--fs-xl); font-weight: 600; }
-header p, .empty p { color: var(--muted); margin-top: var(--sp-1); }
+.empty p { color: var(--muted); margin-top: var(--sp-1); }
 code { font: var(--fs-sm) ui-monospace, Menlo, monospace; }
-.list { display: grid; gap: var(--sp-2); }
-.card { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2);
-        background: var(--panel); border-radius: var(--r-md); corner-shape: squircle;
-        color: inherit; text-decoration: none; transition: background .12s; }
-.card:hover { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
-.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.thumb { flex: none; width: 88px; height: 64px; display: grid; place-items: center;
-         background: var(--canvas); border-radius: var(--r-sm); corner-shape: squircle;
-         overflow: hidden; }
-.thumb img { max-width: 80%; max-height: 80%; }
-.meta { flex: 1; min-width: 0; display: grid; gap: 2px; }
+/* Figma-style grid: big thumbnail, text underneath, no card chrome */
+.list { display: grid; gap: var(--sp-4) var(--sp-4);
+        grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); }
+.card { display: grid; gap: 2px; color: inherit; text-decoration: none; min-width: 0; }
+.card:focus-visible { outline: none; }
+.thumb { aspect-ratio: 4 / 3; display: grid; place-items: center; margin-bottom: var(--sp-2);
+         background: var(--panel); border-radius: var(--r-md); corner-shape: squircle;
+         overflow: hidden; transition: background .12s; }
+.card:hover .thumb { background: var(--raised); }
+.card:focus-visible .thumb { outline: 2px solid var(--accent); outline-offset: 2px; }
+.thumb img { max-width: 78%; max-height: 78%; }
 .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.folder, .when { font-size: var(--fs-xs); color: var(--muted); white-space: nowrap;
-                 overflow: hidden; text-overflow: ellipsis; }
-.chev { flex: none; width: 16px; height: 16px; color: var(--muted); margin-right: var(--sp-2); }
-.card:hover .chev { color: var(--text); }
+.when { font-size: var(--fs-xs); color: var(--muted); }
 .empty { margin-top: 18vh; padding: var(--sp-4); text-align: center;
          background: var(--panel); border-radius: var(--r-lg); corner-shape: squircle; }
 """

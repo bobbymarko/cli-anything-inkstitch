@@ -4144,6 +4144,8 @@ $("fileMenuBtn").addEventListener("click", () => {
   const r = btn.getBoundingClientRect();
   showContextMenu({ clientX: r.left, clientY: r.bottom + 4,
                     preventDefault() {}, stopPropagation() {} }, [
+    { label: "Change design…", run: () => { window.location.href = "/sessions"; } },
+    "-",
     { label: "Export machine file", run: () => $("exportBtn").click() },
     "-",
     { label: "End session", danger: true, run: () => $("endBtn").click() },
