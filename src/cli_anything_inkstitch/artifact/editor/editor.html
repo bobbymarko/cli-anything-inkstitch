@@ -163,10 +163,11 @@
   .refNum { width: 64px; font-size: 11px; }
   .refName { font-size: 11px; padding: 2px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
+  .ic { width: 14px; height: 14px; display: block; flex: none; }
   .eyeBtn { background: none; border: none; cursor: pointer; padding: 0 2px;
-            font-size: 11px; line-height: 1; opacity: .75;
-            width: 18px; flex: none; text-align: center; }   /* first column */
-  .eyeBtn:hover { opacity: 1; }
+            color: var(--muted); line-height: 1; opacity: .85;
+            width: 18px; flex: none; display: flex; justify-content: center; }   /* first column */
+  .eyeBtn:hover { opacity: 1; color: inherit; }
   .eyeBtn.off { opacity: .35; }
   .layerRow.hiddenRow .nm { opacity: .4; text-decoration: line-through; }
   .ovRow { display: flex; justify-content: space-between; gap: 8px;
@@ -304,7 +305,8 @@
   .warnNote { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
               color: #e0a434; border-radius: 7px; padding: 6px 9px;
               font-size: 11.5px; margin: 2px 0 10px; }
-  .warnBadge { color: #e0a434; font-size: 11px; flex: none; cursor: help; }
+  .warnBadge { color: #e0a434; font-size: 11px; flex: none; cursor: help;
+               display: flex; }
   .ovWarn { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
             color: #e0a434; border-radius: 7px; padding: 5px 8px; font-size: 11.5px;
             margin-top: 6px; cursor: pointer; }
@@ -1022,6 +1024,21 @@ function nearestOnPoly(pts, x, y) {
   return best;
 }
 
+/* ---------- icons ----------
+   Icons: Tabler Icons 3.50.0 (MIT, (c) 2020-2026 Paweł Kuna) —
+   https://tabler.io/icons — outline set, inlined (no network at runtime).
+   License text: THIRD_PARTY_NOTICES.md. Path data copied verbatim from
+   @tabler/icons@3.50.0/icons/outline/<name>.svg, bounding box dropped. */
+const ICONS = {
+  "eye": '<path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0"/><path d="M21 12c-2.4 4 -5.4 6 -9 6c-3.6 0 -6.6 -2 -9 -6c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6"/>',
+  "eye-off": '<path d="M10.585 10.587a2 2 0 0 0 2.829 2.828"/><path d="M16.681 16.673a8.717 8.717 0 0 1 -4.681 1.327c-3.6 0 -6.6 -2 -9 -6c1.272 -2.12 2.712 -3.678 4.32 -4.674m2.86 -1.146a9.055 9.055 0 0 1 1.82 -.18c3.6 0 6.6 2 9 6c-.666 1.11 -1.379 2.067 -2.138 2.87"/><path d="M3 3l18 18"/>',
+  "alert-triangle": '<path d="M12 9v4"/><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0"/><path d="M12 16h.01"/>',
+};
+function icon(name, extraClass = "") {
+  return `<svg class="ic${extraClass ? " " + extraClass : ""}" viewBox="0 0 24 24" ` +
+    `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
+    `stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+}
 /* ---------- api ---------- */
 /* Edit ordering. Every drag paints its result locally first and then
    posts it; the server answers when it can, and while a stitch plan is
@@ -3984,7 +4001,8 @@ function renderLayers() {
     const eye = document.createElement("button");
     eye.type = "button";
     eye.className = "eyeBtn" + (hiddenIds.has(o.id) ? " off" : "");
-    eye.textContent = hiddenIds.has(o.id) ? "◡" : "👁";
+    eye.innerHTML = icon(hiddenIds.has(o.id) ? "eye-off" : "eye");
+    eye.setAttribute("aria-label", hiddenIds.has(o.id) ? "Show" : "Hide");
     eye.title = hiddenIds.has(o.id)
       ? "Show on canvas" : "Hide on canvas (view only — still stitches)";
     eye.addEventListener("click", (ev) => {
@@ -3999,7 +4017,7 @@ function renderLayers() {
     if (usesIgnoredMethod(o)) {
       const warn = document.createElement("span");
       warn.className = "warnBadge";
-      warn.textContent = "⚠";
+      warn.innerHTML = icon("alert-triangle");
       warn.title = ignoredMethodNote();
       r.append(eye, num, sw, nm, warn, kd);
     } else r.append(eye, num, sw, nm, kd);   // visibility first, as in Illustrator
