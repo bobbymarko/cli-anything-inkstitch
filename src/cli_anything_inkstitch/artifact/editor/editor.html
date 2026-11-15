@@ -51,9 +51,13 @@
   #main { display: flex; flex: 1; min-height: 0; }
   #canvasWrap { position: relative; flex: 1; min-width: 0; overflow: hidden;
                 background: var(--canvas); }
-  #canvas, #realCanvas, #gridCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #canvas, #realCanvas, #glCanvas, #gridCanvas { position: absolute; inset: 0;
+                                                 width: 100%; height: 100%; }
+  /* stacking (DOM order): #gridCanvas, then #glCanvas (WebGL realistic) /
+     #realCanvas (Canvas2D fallback) -- at most one of those is shown -- then
+     the #canvas SVG on top */
   #gridCanvas { pointer-events: none; }
-  #realCanvas { pointer-events: none; display: none; }  /* under #canvas in DOM order */
+  #realCanvas, #glCanvas { pointer-events: none; display: none; }
   #canvasWrap.showPlan .artwork { opacity: .12; } /* plan is the truth while shown */
   .planLayer { pointer-events: none; }
   #toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 60px;
@@ -580,6 +584,7 @@
   </div>
   <div id="canvasWrap">
     <canvas id="gridCanvas"></canvas>
+    <canvas id="glCanvas"></canvas>
     <canvas id="realCanvas"></canvas>
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
     <canvas id="rulerTop" title="Drag down to pull out a horizontal guide"></canvas>
@@ -1244,6 +1249,7 @@ function planDiag(extra) {
           `stitchData=${stitchData ? stitchData.total_stitches + " stitches" : "null"}`,
           `wrap=${Math.round(wrap.width)}x${Math.round(wrap.height)}`,
           `canvas=${rc.width}x${rc.height}`, `dpr=${window.devicePixelRatio || 1}`,
+          `gl=${glR ? "on" : glLost ? "lost" : glFailed ? "off:" + glFailed : "idle"}`,
           extra].filter(Boolean).join("  ");
 }
 
@@ -1330,16 +1336,17 @@ function shade(hex, f) {                      // f<0 darken, f>0 lighten toward 
    outline   — no plan layer, just the artwork + edit handles
    stitches  — hairline SVG strokes (constant 1.25px at any zoom) so stitch
                directions stay readable instead of blobbing into fills
-   realistic — 2D-canvas render, one stroke set PER STITCH SEGMENT: shadow
-               pass, thread body, sheen highlight, with round caps at every
-               needle penetration and later stitches layering over earlier
-               ones. Per-stitch depth needs ~13k draw ops per frame — canvas
-               handles that; SVG would crawl. */
+   realistic — lit thread per stitch segment (shadow, body, sheen, round
+               caps, later stitches layering over earlier ones). WebGL2
+               (glDrawRealistic: one instanced draw, pan/zoom = uniforms)
+               with the Canvas2D sprite renderer (drawRealistic2D) as the
+               fallback when WebGL is unavailable, off (?gl=0) or lost. */
 function renderPlanLayer() {
   if (!planLayer) return;
   planLayer.textContent = "";
   const realOn = planOn && viewMode === "realistic" && !!stitchData;
   $("realCanvas").style.display = realOn ? "block" : "none";
+  if (!realOn) $("glCanvas").style.display = "none";
   // Asking for stitches or realistic while the plan is missing is the state
   // that reads as "the editor is frozen": the artwork dims and nothing
   // replaces it. fetchTier2 reports its own failures; reaching here with no
@@ -1529,6 +1536,11 @@ function beanRepeats(data) {
 }
 /* pan/zoom entry point: cheap bitmap move now, full render once settled */
 function drawRealisticView() {
+  // WebGL: pan/zoom is a uniform change, so a full sharp frame every time
+  if (glR && planOn && viewMode === "realistic" && stitchData) {
+    drawRealistic();
+    return;
+  }
   const rc = $("realCanvas");
   const rect = $("canvasWrap").getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -1550,9 +1562,21 @@ function drawRealisticView() {
   ctx.drawImage(c.canvas, dpr * (ox - c.ox * k), dpr * (oy - c.oy * k),
                 c.canvas.width * k, c.canvas.height * k);
   clearTimeout(realSettleTimer);
-  realSettleTimer = setTimeout(drawRealistic, REAL_SETTLE_MS);
+  realSettleTimer = setTimeout(drawRealistic2D, REAL_SETTLE_MS);
 }
 function drawRealistic() {
+  if (planOn && viewMode === "realistic" && stitchData && glDrawRealistic()) {
+    $("realCanvas").style.display = "none";
+    return;
+  }
+  $("glCanvas").style.display = "none";
+  if (planOn && viewMode === "realistic" && stitchData)
+    $("realCanvas").style.display = "block";
+  drawRealistic2D();
+}
+/* Canvas2D realistic renderer: the fallback when WebGL2 is unavailable,
+   switched off (?gl=0), or its context was lost. */
+function drawRealistic2D() {
   clearTimeout(realSettleTimer);
   realCache = null;
   const rc = $("realCanvas");
@@ -1659,6 +1683,567 @@ function drawRealistic() {
                 pw, ph, s, ox, oy, dpr };
 }
 window.addEventListener("resize", () => drawRealistic());
+/* ---------- realistic view: WebGL2 renderer ----------
+   One instanced draw paints every stitch. Each stitch is one instance of a
+   12-vertex template: a soft offset shadow quad, then the thread quad. GL
+   rasterizes primitives in instance order, so stitch i's shadow lands on
+   stitches < i and under stitch i -- the same per-stitch layering as the
+   Canvas2D renderer, in one call.
+   - Geometry lives in design units and is expanded to screen px in the
+     vertex shader, so pan/zoom is a uniform update (no rebuild).
+   - Instances are written in stitch order, so the timeline is a draw range:
+     the first K needle points are the first N instances.
+   - Buffers are rebuilt only when stitchData (or the mm scale) changes.
+   Look (technique after the TrueView-style viewers, written from scratch):
+   rounded lit cross-section, round end caps shaded as hemispheres,
+   procedural two-ply twist normal map + fiber brightness (generated below,
+   mipmapped so it fades out cleanly when a thread is a pixel wide), satin
+   vs fill told apart by stitch length, two fixed directional lights,
+   Kajiya-Kay fiber highlight tinted toward the thread color, needle pinch
+   at both ends, faint Fresnel rim. Bean/lock retraces fan sideways exactly
+   like the 2D renderer (beanRepeats, 0.05 mm grid). */
+let glR = null;          // live renderer state; null = use Canvas2D
+let glFailed = "";       // why WebGL is off for this page ("" = not tried)
+let glLost = false;      // context lost; waiting for webglcontextrestored
+const GL_DPR_CAP = 2;
+function glWanted() {
+  try {
+    if (/[?&]gl=0\b/.test(location.search)) return false;
+    if (localStorage.getItem("artifact-webgl") === "0") return false;
+  } catch (e) { /* private mode */ }
+  return true;
+}
+const GL_THREAD_VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 aCorner;   // x: 0=start 1=end, y: -1/+1 side, z: 1=shadow
+layout(location=1) in vec4 aSeg;      // x1 y1 x2 y2, design units
+layout(location=2) in vec3 aColor;
+layout(location=3) in vec3 aMisc;     // bean offset (thread widths), seed, length mm
+uniform float uS;        // device px per design unit
+uniform vec2 uOff;       // device px offset
+uniform vec2 uRes;       // backing store px
+uniform float uR;        // thread radius, device px
+uniform vec2 uShadow;    // shadow offset, device px
+out vec2 vLocal;         // (px along from start needle point, px across)
+out float vLen;          // stitch length px
+out vec2 vDir;           // unit tangent, screen y-down
+out vec3 vColor;
+out vec3 vMisc;
+flat out float vShadow;
+void main() {
+  vec2 a = aSeg.xy * uS + uOff, b = aSeg.zw * uS + uOff;
+  vec2 d = b - a;
+  float L = length(d);
+  vec2 t = L > 1e-4 ? d / L : vec2(1.0, 0.0);
+  vec2 n = vec2(-t.y, t.x);
+  a += n * (aMisc.x * 2.0 * uR);                   // bean/lock fan-out
+  float m = uR + 1.5 + aCorner.z * uR * 0.7;       // cap + AA (+ blur) margin
+  float al = aCorner.x < 0.5 ? -m : L + m;
+  float ac = aCorner.y * m;
+  vec2 p = a + t * al + n * ac + aCorner.z * uShadow;
+  gl_Position = vec4(p.x / uRes.x * 2.0 - 1.0, 1.0 - p.y / uRes.y * 2.0, 0.0, 1.0);
+  vLocal = vec2(al, ac);
+  vLen = L;
+  vDir = t;
+  vColor = aColor;
+  vMisc = aMisc;
+  vShadow = aCorner.z;
+}`;
+const GL_THREAD_FS = `#version 300 es
+precision highp float;
+in vec2 vLocal;
+in float vLen;
+in vec2 vDir;
+in vec3 vColor;
+in vec3 vMisc;
+flat in float vShadow;
+uniform float uR;
+uniform float uPxPerMm;
+uniform sampler2D uPly;    // rgb = ply normal (tangent space), a = fiber brightness
+out vec4 outColor;
+uniform vec3 uL1;        // key light (unit vector, screen y-up, z toward viewer)
+uniform vec3 uL2;        // fill light
+uniform vec3 uLightK;    // (ambient, key, fill) diffuse weights
+uniform float uSpecK;    // highlight strength multiplier
+void main() {
+  float along = vLocal.x, across = vLocal.y;
+  float ca = clamp(along, 0.0, vLen);
+  vec2 q = vec2(along - ca, across);               // from the stitch spine, px
+  float dist = length(q);
+  if (vShadow > 0.5) {
+    float a = (1.0 - smoothstep(uR * 0.35, uR * 1.45, dist)) * 0.30;
+    if (a <= 0.002) discard;
+    outColor = vec4(0.0, 0.0, 0.0, a);
+    return;
+  }
+  float cov = clamp(uR - dist + 0.5, 0.0, 1.0);    // 1 px analytic edge AA
+  if (cov <= 0.0) discard;
+  float lenMm = vMisc.z;
+  float isSatin = smoothstep(3.6, 6.0, lenMm);
+  // cross-section: a cylinder along the stitch, a hemisphere at each cap
+  vec2 r2 = q / uR;                                 // (along, across), |r2| <= 1
+  float rr = min(dot(r2, r2), 1.0);
+  float edge = sqrt(rr);
+  float z = sqrt(1.0 - rr) * mix(0.55, 0.90, isSatin);
+  // needle pinch: thread is pulled into the fabric at both needle holes
+  float distToEnd = clamp(min(along, vLen - along) / max(vLen, 1e-3), 0.0, 0.5);
+  float pinch = smoothstep(0.0, 0.10, distToEnd);
+  float widthAO = mix(0.88 + 0.12 * smoothstep(1.0, 0.20, edge),
+                      0.76 + 0.24 * smoothstep(1.0, 0.30, edge), isSatin);
+  float punctAO = mix(0.82 + 0.18 * pinch, 0.90 + 0.10 * pinch, isSatin);
+  // two-ply twist relief, tiled at a fixed physical scale (3 twists / mm)
+  vec2 plyUv = vec2(across / uR + 1.0, along / uPxPerMm * 3.0 + vMisc.y * 7.0);
+  vec4 ply = texture(uPly, plyUv);
+  vec3 tn = ply.xyz * 2.0 - 1.0;
+  float fiberMod = (ply.a - 0.5) * 0.16 + (fract(vMisc.y * 7.13) - 0.5) * 0.05;
+  vec3 ln = normalize(vec3(r2.y * 0.65 + tn.x * 0.35,
+                           r2.x * 0.65 + tn.y * 0.35,
+                           z * 0.88 + 0.12));
+  // local (across, along, up) -> screen y-up frame
+  vec2 T = vec2(vDir.x, -vDir.y);                   // along, y-up
+  vec2 B = vec2(-vDir.y, -vDir.x);                  // +across (VS's n), y-up
+  vec3 N = normalize(vec3(B * ln.x + T * ln.y, ln.z));
+  vec3 L1 = uL1, L2 = uL2;
+  float d1 = max(dot(N, L1), 0.0), d2 = max(dot(N, L2), 0.0);
+  float diffuse = uLightK.x + uLightK.y * d1 + uLightK.z * d2;
+  // Kajiya-Kay: fiber highlight from the thread direction, not the normal
+  vec3 Tw = vec3(T, 0.0);
+  vec3 H1 = normalize(L1 + vec3(0.0, 0.0, 1.0));
+  vec3 H2 = normalize(L2 + vec3(0.0, 0.0, 1.0));
+  float th1 = dot(Tw, H1), th2 = dot(Tw, H2);
+  float s1 = pow(sqrt(max(0.0, 1.0 - th1 * th1)), mix(10.0, 26.0, isSatin));
+  float s2 = pow(sqrt(max(0.0, 1.0 - th2 * th2)), mix(6.0, 14.0, isSatin));
+  float spine = mix(1.0 - smoothstep(0.0, 0.50, edge),
+                    (1.0 - smoothstep(0.0, 0.42, edge)) * pinch, isSatin);
+  float spec = (s1 * 0.42 + s2 * 0.14) * spine * (0.85 + 0.30 * max(0.0, tn.z)) * uSpecK;
+  vec3 specColor = mix(vec3(1.0), vColor, 0.45);
+  float fresnel = pow(1.0 - max(N.z, 0.0), 3.0) * 0.05;
+  vec3 col = vColor * (1.0 + fiberMod) * (diffuse * widthAO * punctAO + fresnel)
+           + specColor * spec;
+  outColor = vec4(min(col, vec3(1.0)) * cov, cov);
+}`;
+const GL_JUMP_VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 aCorner;
+layout(location=1) in vec4 aSeg;
+layout(location=2) in float aCut;
+uniform float uS;
+uniform vec2 uOff;
+uniform vec2 uRes;
+uniform float uDpr;
+out vec2 vLocal;
+flat out float vCut;
+void main() {
+  vec2 a = aSeg.xy * uS + uOff, b = aSeg.zw * uS + uOff;
+  vec2 d = b - a;
+  float L = length(d);
+  vec2 t = L > 1e-4 ? d / L : vec2(1.0, 0.0);
+  vec2 n = vec2(-t.y, t.x);
+  float hw = (aCut > 0.5 ? 0.5 : 1.0) * uDpr + 1.0;
+  float al = aCorner.x < 0.5 ? 0.0 : L;
+  vec2 p = a + t * al + n * aCorner.y * hw;
+  gl_Position = vec4(p.x / uRes.x * 2.0 - 1.0, 1.0 - p.y / uRes.y * 2.0, 0.0, 1.0);
+  vLocal = vec2(al, aCorner.y * hw);
+  vCut = aCut;
+}`;
+const GL_JUMP_FS = `#version 300 es
+precision highp float;
+in vec2 vLocal;
+flat in float vCut;
+uniform float uDpr;
+out vec4 outColor;
+void main() {
+  // matches the 2D renderer: cut = 1px dashed grey (4 on / 4 off) at 55%,
+  // float (uncut) = 2px solid red at 95%
+  bool cut = vCut > 0.5;
+  float hw = (cut ? 0.5 : 1.0) * uDpr;
+  float cov = clamp(hw - abs(vLocal.y) + 0.5, 0.0, 1.0);
+  if (cut && mod(vLocal.x / uDpr, 8.0) >= 4.0) discard;
+  float a = cov * (cut ? 0.55 : 0.95);
+  vec3 c = cut ? vec3(0.541, 0.561, 0.612) : vec3(0.898, 0.325, 0.294);
+  if (a <= 0.0) discard;
+  outColor = vec4(c * a, a);
+}`;
+/* Two-ply twisted thread, one tile = one ply across x one twist period
+   along. Periodic in both axes (integer frequencies along w = v - u), so it
+   tiles seamlessly; mipmaps average the relief away when a thread is only a
+   pixel or two wide, instead of aliasing into moire. */
+function glPlyTexture(gl) {
+  const W = 32, H = 64;
+  const h = new Float32Array(W * H), lum = new Uint8Array(W * H);
+  const TAU = Math.PI * 2;
+  for (let j = 0; j < H; j++)
+    for (let i = 0; i < W; i++) {
+      const u = (i + 0.5) / W, v = (j + 0.5) / H, w = v - u;
+      const x = 2 * u - 1;
+      const ply = Math.sqrt(Math.max(0, 1 - x * x));
+      const twist = 0.5 + 0.5 * Math.cos(TAU * w);
+      const fib = 0.5 * Math.sin(TAU * 7 * w + 1.3) + 0.3 * Math.sin(TAU * 13 * w + 0.4)
+                + 0.2 * Math.sin(TAU * 23 * w + 2.1);
+      h[j * W + i] = ply * (0.6 + 0.4 * twist) + 0.05 * fib;
+      const l = 0.5 + 0.22 * Math.sin(TAU * 11 * w + 0.7)
+              + 0.14 * Math.sin(TAU * 29 * w + 1.9) + 0.1 * Math.sin(TAU * 3 * v + 0.2 * x);
+      lum[j * W + i] = Math.max(0, Math.min(255, Math.round(l * 255)));
+    }
+  const px = new Uint8Array(W * H * 4);
+  // height 1 = ply radius ~0.1 mm; the tile is 0.2 mm across, 1/3 mm along,
+  // so true slopes are 0.5 dh/du and 0.3 dh/dv -- exaggerated x1.8 so the
+  // twist reads at the zooms people actually use
+  for (let j = 0; j < H; j++)
+    for (let i = 0; i < W; i++) {
+      const at = (ii, jj) => h[((jj + H) % H) * W + ((ii + W) % W)];
+      const dhdu = (at(i + 1, j) - at(i - 1, j)) / 2 * W;
+      const dhdv = (at(i, j + 1) - at(i, j - 1)) / 2 * H;
+      let nx = -0.9 * dhdu, ny = -0.54 * dhdv, nz = 1;
+      const l = Math.hypot(nx, ny, nz);
+      nx /= l; ny /= l; nz /= l;
+      const o = (j * W + i) * 4;
+      px[o] = Math.round((nx * 0.5 + 0.5) * 255);
+      px[o + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+      px[o + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+      px[o + 3] = lum[j * W + i];
+    }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  const aniso = gl.getExtension("EXT_texture_filter_anisotropic");
+  if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT,
+                              Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+  return tex;
+}
+function glProgram(gl, vs, fs) {
+  const sh = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost())
+      throw new Error("shader: " + gl.getShaderInfoLog(s));
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost())
+    throw new Error("link: " + gl.getProgramInfoLog(p));
+  // uniform locations by name, looked up once (null if compiled out)
+  const u = new Proxy({}, { get: (o, k) => k in o ? o[k]
+                                         : (o[k] = gl.getUniformLocation(p, k)) });
+  return { p, u };
+}
+let glListening = false;
+function glInit() {
+  if (glR) return glR;
+  if (glLost || glFailed) return null;
+  if (!glWanted()) { glFailed = "disabled"; return null; }
+  const cv = $("glCanvas");
+  if (!glListening) {
+    glListening = true;
+    cv.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();                 // ask the browser to restore it
+      glR = null;
+      glLost = true;
+      console.warn("[realistic] WebGL context lost; using Canvas2D");
+      renderPlanLayer();
+    });
+    cv.addEventListener("webglcontextrestored", () => {
+      glLost = false;
+      renderPlanLayer();                  // glInit rebuilds every resource
+    });
+  }
+  try {
+    const gl = cv.getContext("webgl2", { alpha: true, premultipliedAlpha: true,
+                                         antialias: false, depth: false,
+                                         stencil: false });
+    if (!gl) { glFailed = "no-webgl2"; return null; }
+    const thread = glProgram(gl, GL_THREAD_VS, GL_THREAD_FS);
+    const jump = glProgram(gl, GL_JUMP_VS, GL_JUMP_FS);
+    // 12-vertex template: shadow quad (z=1) then thread quad (z=0)
+    const quad = [[0, -1], [1, -1], [1, 1], [0, -1], [1, 1], [0, 1]];
+    const tpl = new Float32Array([...quad.map(([a, b]) => [a, b, 1]),
+                                  ...quad.map(([a, b]) => [a, b, 0])].flat());
+    const tplBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, tplBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, tpl, gl.STATIC_DRAW);
+    const mkVao = (instBuf, layout, stride) => {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, tplBuf);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+      for (const [loc, size, off] of layout) {
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, off);
+        gl.vertexAttribDivisor(loc, 1);
+      }
+      gl.bindVertexArray(null);
+      return vao;
+    };
+    const instBuf = gl.createBuffer(), jumpBuf = gl.createBuffer();
+    glR = {
+      gl, thread, jump, tplBuf, instBuf, jumpBuf,
+      threadVao: mkVao(instBuf, [[1, 4, 0], [2, 3, 16], [3, 3, 28]], 40),
+      // jump quads use only the first 6 template vertices (z=1 is ignored)
+      jumpVao: mkVao(jumpBuf, [[1, 4, 0], [2, 1, 16]], 20),
+      ply: glPlyTexture(gl),
+      data: null, upm: 0, nInst: 0, nJump: 0, paths: null, buildMs: 0,
+    };
+    return glR;
+  } catch (e) {
+    glFailed = "init: " + (e && e.message || e);
+    console.error("[realistic] WebGL init failed; using Canvas2D", e);
+    glR = null;
+    return null;
+  }
+}
+function glHexRgb(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || "").trim());
+  const n = m ? parseInt(m[1], 16) : 0x808080;
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+/* stitchData -> instance buffers, in stitch order. paths[] remembers where
+   each path starts so a timeline position maps to an instance prefix. */
+function glBuild(R, data) {
+  const t0 = performance.now();
+  const gl = R.gl, upm = unitsPerMm();
+  const beanN = beanRepeats(data);
+  let nSeg = 0, nJump = 0;
+  for (const b of data.blocks) {
+    for (const pts of b.paths) nSeg += Math.max(0, pts.length - 1);
+    if (b.jumps) nJump += b.jumps.length;
+  }
+  const inst = new Float32Array(nSeg * 10), jb = new Float32Array(nJump * 5);
+  const paths = [];
+  let gi = 0, nj = 0;
+  for (const block of data.blocks) {
+    const [cr, cg, cb] = glHexRgb(block.color);
+    for (let pi = 0; pi < block.paths.length; pi++) {
+      if (pi > 0 && block.jumps && block.jumps[pi - 1]) {
+        const j = block.jumps[pi - 1], o = nj * 5;
+        jb[o] = j[0]; jb[o + 1] = j[1]; jb[o + 2] = j[2]; jb[o + 3] = j[3];
+        jb[o + 4] = (!block.jumps_cut || block.jumps_cut[pi - 1] !== false) ? 1 : 0;
+        nj++;
+      }
+      const pts = block.paths[pi];
+      paths.push([pts.length, gi, nj]);   // points, first instance, jumps so far
+      for (let i = 1; i < pts.length; i++, gi++) {
+        const [x1, y1] = pts[i - 1], [x2, y2] = pts[i];
+        const n = beanN[gi] || 0;
+        const o = gi * 10;
+        inst[o] = x1; inst[o + 1] = y1; inst[o + 2] = x2; inst[o + 3] = y2;
+        inst[o + 4] = cr; inst[o + 5] = cg; inst[o + 6] = cb;
+        inst[o + 7] = n ? 0.38 * Math.ceil(n / 2) * (n % 2 ? 1 : -1) : 0;
+        inst[o + 8] = (gi * 0.6180339887) % 1;
+        inst[o + 9] = Math.hypot(x2 - x1, y2 - y1) / upm;
+      }
+    }
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.instBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, inst, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.jumpBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, jb.subarray(0, nj * 5), gl.STATIC_DRAW);
+  Object.assign(R, { data, upm, nInst: gi, nJump: nj, paths,
+                     buildMs: performance.now() - t0 });
+}
+/* timeline position (needle points, as the 2D renderer counts them) ->
+   [thread instances, jump instances] to draw */
+function glDrawCounts(R, pos) {
+  if (pos == null || pos >= R.data.total_stitches) return [R.nInst, R.nJump];
+  let remaining = pos, nInst = 0, nJump = 0;
+  for (const [n, first, jumps] of R.paths) {
+    if (remaining <= 0) break;
+    nJump = jumps;
+    const take = Math.min(n, remaining);
+    remaining -= take;
+    if (take >= 2) nInst = first + take - 1;
+  }
+  return [nInst, nJump];
+}
+/* draw one frame; returns false when WebGL can't be used (caller falls back) */
+/* ---------- lighting debug (Shift+L, or ?lightdebug=1) ----------
+   Live controls for the WebGL realistic shader's two lights so a setting
+   can be picked by eye. Defaults reproduce the shipped constants: key
+   light upper-right (az 61°, el 54°), fill lower-left (az 232°, el 60°),
+   diffuse 0.48 + 0.42·key + 0.10·fill. "Overhead" points both lights
+   straight down — the direction-free look (no banding between fill
+   areas sewn at different angles). Settings persist per browser. */
+const LIGHT_DEFAULTS = { keyAz: 61, keyEl: 54, fillAz: 232, fillEl: 60,
+                         ambient: 0.48, key: 0.42, fill: 0.10, spec: 1.0,
+                         overhead: false, shadowFollows: false };
+let lightSettings = { ...LIGHT_DEFAULTS };
+try {
+  Object.assign(lightSettings,
+                JSON.parse(localStorage.getItem("artifact-light") || "{}"));
+} catch (e) { /* defaults */ }
+function saveLight() {
+  try { localStorage.setItem("artifact-light", JSON.stringify(lightSettings)); }
+  catch (e) { /* private mode */ }
+}
+function lightDebugPanel() {
+  let el = document.getElementById("lightDebug");
+  if (el) return el;
+  el = document.createElement("div");
+  el.id = "lightDebug";
+  el.style.cssText = "position:absolute;right:var(--sp-3);top:var(--sp-3);z-index:30;" +
+    "background:var(--raised);color:var(--text);border-radius:var(--r-md);" +
+    "corner-shape:squircle;padding:var(--sp-3);font-size:var(--fs-sm);line-height:1.4;" +
+    "width:250px;box-shadow:var(--shadow-pop);animation:ds-pop var(--dur-2) var(--ease-spring)";
+  const sliders = [
+    ["keyAz", "Key azimuth °", 0, 360, 1], ["keyEl", "Key elevation °", 5, 90, 1],
+    ["fillAz", "Fill azimuth °", 0, 360, 1], ["fillEl", "Fill elevation °", 5, 90, 1],
+    ["ambient", "Ambient", 0, 1, 0.01], ["key", "Key strength", 0, 1, 0.01],
+    ["fill", "Fill strength", 0, 1, 0.01], ["spec", "Highlight ×", 0, 3, 0.05],
+  ];
+  el.innerHTML = '<div style="display:flex;justify-content:space-between;' +
+    'align-items:center;margin-bottom:var(--sp-2)"><b>Lighting debug</b>' +
+    '<span style="opacity:.6">Shift+L</span></div>' +
+    sliders.map(([k, label, lo, hi, st]) =>
+      `<label style="display:block;margin:var(--sp-1) 0">${label} ` +
+      `<span data-v="${k}" style="float:right;font-variant-numeric:tabular-nums"></span>` +
+      `<input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${st}" ` +
+      `style="width:100%"></label>`).join("") +
+    '<label style="display:block;margin-top:var(--sp-2)"><input type="checkbox" data-c="overhead"> ' +
+    'Overhead (direction-free)</label>' +
+    '<label style="display:block"><input type="checkbox" data-c="shadowFollows"> ' +
+    'Shadow follows key light</label>' +
+    '<div style="display:flex;gap:var(--sp-2);margin-top:var(--sp-2)">' +
+    '<button data-a="reset" style="flex:1">Reset</button>' +
+    '<button data-a="copy" style="flex:1">Copy values</button></div>' +
+    '<pre data-out style="margin:var(--sp-2) 0 0;white-space:pre-wrap;word-break:break-all;font-size:var(--fs-xs);' +
+    'opacity:.8"></pre>';
+  const sync = () => {
+    for (const inp of el.querySelectorAll("[data-k]")) {
+      inp.value = lightSettings[inp.dataset.k];
+      el.querySelector(`[data-v="${inp.dataset.k}"]`).textContent =
+        (+lightSettings[inp.dataset.k]).toFixed(inp.step < 1 ? 2 : 0);
+    }
+    for (const c of el.querySelectorAll("[data-c]")) c.checked = !!lightSettings[c.dataset.c];
+    el.querySelector("[data-out]").textContent = JSON.stringify(lightSettings);
+  };
+  const apply = () => { saveLight(); sync(); renderPlanLayer(); };
+  el.addEventListener("input", (ev) => {
+    const t = ev.target;
+    if (t.dataset.k) lightSettings[t.dataset.k] = +t.value;
+    if (t.dataset.c) lightSettings[t.dataset.c] = t.checked;
+    apply();
+  });
+  el.addEventListener("click", (ev) => {
+    const a = ev.target.dataset && ev.target.dataset.a;
+    if (a === "reset") { lightSettings = { ...LIGHT_DEFAULTS }; apply(); }
+    if (a === "copy") {
+      navigator.clipboard && navigator.clipboard.writeText(JSON.stringify(lightSettings))
+        .then(() => showToast("lighting values copied"), () => {});
+    }
+  });
+  // keep wheel/keys inside the panel from panning or zooming the canvas
+  el.addEventListener("wheel", (ev) => ev.stopPropagation());
+  el.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+  $("canvasWrap").appendChild(el);
+  sync();
+  return el;
+}
+function toggleLightDebug(show) {
+  const el = lightDebugPanel();
+  el.hidden = show === undefined ? !el.hidden : !show;
+}
+document.addEventListener("keydown", (ev) => {
+  const inText = ev.target.tagName === "TEXTAREA" || ev.target.tagName === "INPUT";
+  if (!inText && ev.shiftKey && ev.key.toLowerCase() === "l") {
+    ev.preventDefault();
+    toggleLightDebug();
+  }
+});
+if (new URLSearchParams(location.search).has("lightdebug"))
+  window.addEventListener("load", () => toggleLightDebug(true));
+function glDrawRealistic() {
+  const R = glInit();
+  if (!R || R.gl.isContextLost()) return false;
+  const gl = R.gl, cv = $("glCanvas");
+  const rect = $("canvasWrap").getBoundingClientRect();
+  const dpr = Math.min(GL_DPR_CAP, window.devicePixelRatio || 1);
+  const pw = Math.round(rect.width * dpr), ph = Math.round(rect.height * dpr);
+  cv.style.display = "block";
+  if (pw < 1 || ph < 1) {
+    setPlanError("The canvas has no size, so the realistic view cannot draw.",
+                 "This is a layout problem rather than a stitch problem — the "
+                 + "drawing area measured zero pixels.",
+                 planDiag());
+    return true;
+  }
+  clearPlanError();
+  try {
+    if (R.data !== stitchData || R.upm !== unitsPerMm()) glBuild(R, stitchData);
+  } catch (e) {
+    glFailed = "build: " + (e && e.message || e);
+    console.error("[realistic] WebGL buffer build failed; using Canvas2D", e);
+    glR = null;
+    cv.style.display = "none";
+    return false;
+  }
+  if (cv.width !== pw) cv.width = pw;
+  if (cv.height !== ph) cv.height = ph;
+  gl.viewport(0, 0, pw, ph);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // premultiplied
+  // svg viewBox (preserveAspectRatio meet, centered) -> device px
+  const s = Math.min(rect.width / vb.w, rect.height / vb.h);
+  const ox = (rect.width - vb.w * s) / 2 - vb.x * s;
+  const oy = (rect.height - vb.h * s) / 2 - vb.y * s;
+  const twCss = Math.max(1.4, threadWidth() * s);   // same floor as Canvas2D
+  const [nInst, nJump] = glDrawCounts(R, timelinePos);
+  if (nInst > 0) {
+    const { p, u } = R.thread;
+    gl.useProgram(p);
+    gl.uniform1f(u.uS, s * dpr);
+    gl.uniform2f(u.uOff, ox * dpr, oy * dpr);
+    gl.uniform2f(u.uRes, pw, ph);
+    gl.uniform1f(u.uR, twCss * dpr / 2);
+    const Lt = lightSettings;
+    const lv = (az, el) => {                    // degrees → unit vector, y-up
+      const a = az * Math.PI / 180, e = el * Math.PI / 180;
+      return [Math.cos(e) * Math.cos(a), Math.cos(e) * Math.sin(a), Math.sin(e)];
+    };
+    const k1 = Lt.overhead ? [0, 0, 1] : lv(Lt.keyAz, Lt.keyEl);
+    const k2 = Lt.overhead ? [0, 0, 1] : lv(Lt.fillAz, Lt.fillEl);
+    gl.uniform3f(u.uL1, ...k1);
+    gl.uniform3f(u.uL2, ...k2);
+    gl.uniform3f(u.uLightK, Lt.ambient, Lt.key, Lt.fill);
+    gl.uniform1f(u.uSpecK, Lt.spec);
+    if (Lt.shadowFollows && !Lt.overhead) {
+      // shadow falls away from the key light; screen y points down
+      const len = 0.278 * twCss * dpr, a = Lt.keyAz * Math.PI / 180;
+      gl.uniform2f(u.uShadow, -Math.cos(a) * len, Math.sin(a) * len);
+    } else {
+      gl.uniform2f(u.uShadow, twCss * dpr * 0.14, twCss * dpr * 0.24);
+    }
+    gl.uniform1f(u.uPxPerMm, s * dpr * R.upm);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, R.ply);
+    gl.uniform1i(u.uPly, 0);
+    gl.bindVertexArray(R.threadVao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 12, nInst);
+  }
+  if (nJump > 0) {                         // machine moves on top of thread
+    const { p, u } = R.jump;
+    gl.useProgram(p);
+    gl.uniform1f(u.uS, s * dpr);
+    gl.uniform2f(u.uOff, ox * dpr, oy * dpr);
+    gl.uniform2f(u.uRes, pw, ph);
+    gl.uniform1f(u.uDpr, dpr);
+    gl.bindVertexArray(R.jumpVao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, nJump);
+  }
+  gl.bindVertexArray(null);
+  return true;
+}
 /* ---------- stitch-out timeline ---------- */
 /* hard-stop gradient: each color block's share of total stitches */
 function timelineGradient() {
