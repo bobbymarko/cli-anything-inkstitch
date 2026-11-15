@@ -43,12 +43,20 @@ class DensityGrid:
         return m / (self.cell_mm * self.cell_mm)
 
 
-def density_grid(points_px, *, cell_mm: float = 0.5) -> DensityGrid | None:
-    """Bin needle penetrations (px coords) into cell_mm × cell_mm cells."""
+def density_grid(points_px, *, cell_mm: float = 0.5,
+                 uu_per_mm: float = PX_PER_MM) -> DensityGrid | None:
+    """Bin needle penetrations into cell_mm × cell_mm cells.
+
+    The points come from the engine's stitch_sequence in the document's USER
+    UNITS, not CSS px, so they must be divided by this document's uu-per-mm
+    (design_model._uu_per_mm) to land in real millimetres. A doc at 1.88 uu/mm
+    divided by the old fixed 96/25.4 measured the design at half size and
+    reported ~2x the true density. uu_per_mm defaults to CSS px (96/25.4) for a
+    unitless document, matching _uu_per_mm's own fallback."""
     if not points_px:
         return None
-    xs = [p[0] / PX_PER_MM for p in points_px]
-    ys = [p[1] / PX_PER_MM for p in points_px]
+    xs = [p[0] / uu_per_mm for p in points_px]
+    ys = [p[1] / uu_per_mm for p in points_px]
     x0, y0 = min(xs), min(ys)
     cols = int((max(xs) - x0) / cell_mm) + 1
     rows = int((max(ys) - y0) / cell_mm) + 1

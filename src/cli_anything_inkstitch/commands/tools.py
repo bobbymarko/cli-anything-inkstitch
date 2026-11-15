@@ -699,19 +699,23 @@ def density_map(ctx, project_path, cell_mm, warn, error_, out_path):
     """
     from pathlib import Path as _Path
 
-    from cli_anything_inkstitch.artifact.design_model import stitch_sequence
+    from cli_anything_inkstitch.artifact.design_model import stitch_sequence, _uu_per_mm
     from cli_anything_inkstitch.embroidery.density import (
         density_grid,
         hotspots,
         render_heatmap,
     )
     from cli_anything_inkstitch.commands._helpers import get_project_path
+    from cli_anything_inkstitch.project import ProjectFile as _PF
     proj_file = get_project_path(ctx, project_path)
+    # Points below are in the document's USER UNITS; bin by this doc's real
+    # uu-per-mm so densities are per real mm² (not the old fixed 96/25.4 px).
+    _uu = _uu_per_mm(etree.parse(_PF.load(proj_file).svg_path).getroot())
     seq = stitch_sequence(proj_file,
                           binary_override=ctx.obj.get("binary_override"))
     points = [p for block in seq["blocks"] for path in block["paths"]
               for p in path]
-    grid = density_grid(points, cell_mm=cell_mm)
+    grid = density_grid(points, cell_mm=cell_mm, uu_per_mm=_uu)
     if grid is None:
         emit(ctx, {"error": "no stitches in plan"})
         return
