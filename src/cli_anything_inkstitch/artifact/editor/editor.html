@@ -79,13 +79,13 @@
           background: transparent; font: inherit; cursor: pointer; }
   .chip.on { color: var(--accent); border-color: var(--accent); }
   #viewModes { display: flex; gap: 2px; }
-  #presence { display: flex; align-items: center; gap: 6px; margin-top: 8px;
-              color: var(--muted); font-size: var(--fs-sm); flex-wrap: wrap; }
-  #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-  #presenceHint { flex-basis: 100%; padding-left: 14px; font-size: var(--fs-xs); opacity: .8; }
-  #presence:not(.waiting) #presenceHint { display: none; }
-  #presence.listening .dot { background: var(--start); }
-  #presence.working .dot { background: var(--rail); }
+  /* small centred banner above the prompt, only while no agent listens */
+  #presence { display: flex; align-items: center; gap: var(--sp-2); width: fit-content;
+              margin: 0 auto var(--sp-2); padding: var(--sp-1) var(--sp-3);
+              border-radius: 999px; background: var(--raised); color: var(--muted);
+              font-size: var(--fs-xs); cursor: help; }
+  #presence:not(.waiting) { display: none; }
+  #presence .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
 
   #main { display: flex; flex: 1; min-height: 0; }
   #canvasWrap { position: relative; flex: 1; min-width: 0; overflow: hidden;
@@ -673,18 +673,19 @@ try { applyTheme(localStorage.getItem("artifact-theme") || "default"); } catch (
     <div id="chat" class="sideBody"></div>
     <div id="composer">
       <div id="pills"></div>
+      <!-- agent connection (server ArtifactState.presence). Shown only when no
+           agent is listening; connected needs no badge, and working already
+           shows the thinking bubble in the chat. -->
+      <div id="presence" class="waiting"
+           title="Ask your agent to run artifact poll to start listening">
+        <span class="dot"></span><span id="presenceText">Agent not connected</span>
+      </div>
       <div id="inputWrap">
         <textarea id="input" placeholder="Tell the agent what to change…"></textarea>
         <button id="send" type="button" title="Send to agent" aria-label="Send to agent">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"
                aria-hidden="true"><path d="M8 1.5 2.2 7.3l1.06 1.06L7 4.62V14.5h2V4.62l3.74 3.74 1.06-1.06L8 1.5z"/></svg>
         </button>
-      </div>
-      <!-- agent connection (server ArtifactState.presence): an open poll =
-           connected; a delivered message not yet answered = working -->
-      <div id="presence" class="waiting">
-        <span class="dot"></span><span id="presenceText">Agent not connected</span>
-        <span id="presenceHint">Ask it to run <code>artifact poll</code> to start listening.</span>
       </div>
     </div>
   </aside>
