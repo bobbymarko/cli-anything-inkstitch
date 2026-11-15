@@ -11,6 +11,7 @@
     --rail: #ffb347; --rung: #9d7bff; --zig: #ffd9a0;
     /* roles added for theming; defaults are the colours they replaced */
     --canvas: #0e1013; --field: #14161a; --on-accent: #0c1523; --handle: #ffffff;
+    --raised: #262a33;   /* floating surfaces (menus, popovers): a step off the panels */
     --warn: #e0a434; --guide: #46c8cd; --scrim: #0a0c0f;
     /* spacing scale — use these, not ad-hoc px, for padding/gaps */
     --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
@@ -20,7 +21,11 @@
     --border: transparent;
     /* corner radii, drawn as squircles (corner-shape) where supported —
        a squircle needs a larger radius than a circle arc to read as soft */
-    --r-xs: 6px; --r-sm: 9px; --r-md: 12px; --r-lg: 18px;
+    --r-xs: 7px; --r-sm: 12px; --r-md: 16px; --r-lg: 24px;
+    /* elevation: soft, layered shadows (a tight contact shadow + a wide
+       ambient one) — floating menus vs. modals */
+    --shadow-pop: 0 1px 2px rgb(0 0 0 / .06), 0 6px 20px rgb(0 0 0 / .10);
+    --shadow-modal: 0 2px 6px rgb(0 0 0 / .08), 0 18px 48px rgb(0 0 0 / .14);
     /* type scale — every font-size in the editor is one of these */
     --fs-2xs: 9px;    /* tiny overlay labels: toolbar shortcut hints, ruler numbers */
     --fs-xs: 11px;    /* secondary: kind tags, timestamps, units, captions */
@@ -91,7 +96,7 @@
   #canvasWrap.showPlan .artwork { opacity: .12; } /* plan is the truth while shown */
   .planLayer { pointer-events: none; }
   #toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 60px;
-           background: color-mix(in srgb, var(--bg) 95%, transparent); border: 1px solid var(--border);
+           background: var(--raised); border: 1px solid var(--border); box-shadow: var(--shadow-pop);
            border-radius: var(--r-md); corner-shape: squircle; padding: 6px 14px; color: var(--text); display: none;
            max-width: 60ch; z-index: 3; }
   #toast.show { display: block; }
@@ -154,9 +159,9 @@
                   justify-content: center; z-index: 30;
                   background: color-mix(in srgb, var(--scrim) 70%, transparent); }
   #themeOverlay.show { display: flex; }
-  #themeCard { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); corner-shape: squircle;
+  #themeCard { background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-lg); corner-shape: squircle;
                padding: var(--sp-4); width: min(440px, calc(100vw - 32px));
-               box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+               box-shadow: var(--shadow-modal); }
   .themeHead { display: flex; align-items: center; justify-content: space-between;
                margin-bottom: var(--sp-3); }
   .themeHead h1 { font-size: var(--fs-lg); font-weight: 600; }
@@ -173,7 +178,7 @@
   #helpOverlay { position: fixed; inset: 0; display: none; align-items: center;
                  justify-content: center; background: color-mix(in srgb, var(--scrim) 70%, transparent); z-index: 20; }
   #helpOverlay.show { display: flex; }
-  #helpCard { background: var(--panel); border: 1px solid var(--border);
+  #helpCard { background: var(--raised); border: 1px solid var(--border);
               border-radius: var(--r-lg); corner-shape: squircle; padding: 22px 26px; width: min(560px, 92vw);
               max-height: 84vh; overflow-y: auto; }
   #helpCard h1 { font-size: var(--fs-lg); margin-bottom: 4px; }
@@ -358,8 +363,8 @@
             padding: 0 2px; }
   .palBtn:hover { color: var(--accent); }
   #palettePop { position: fixed; z-index: 30; width: 264px;
-                background: var(--panel); border: 1px solid var(--border);
-                border-radius: var(--r-md); corner-shape: squircle; padding: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+                background: var(--raised); border: 1px solid var(--border);
+                border-radius: var(--r-md); corner-shape: squircle; padding: 10px; box-shadow: var(--shadow-pop); }
   #palettePop select { width: 100%; margin-bottom: 8px; background: var(--field);
                        color: var(--text); border: 1px solid var(--border);
                        border-radius: var(--r-sm); corner-shape: squircle; padding: 3px 6px; font: inherit; }
@@ -368,9 +373,9 @@
   .palCell { all: unset; width: 17px; height: 17px; border-radius: var(--r-xs); corner-shape: squircle;
              border: 1px solid color-mix(in srgb, var(--text) 18%, transparent); cursor: pointer; }
   .palCell:hover { outline: 2px solid var(--accent); }
-  #ctxMenu { position: fixed; z-index: 40; min-width: 190px; background: var(--panel);
+  #ctxMenu { position: fixed; z-index: 40; min-width: 190px; background: var(--raised);
              border: 1px solid var(--border); border-radius: var(--r-md); corner-shape: squircle; padding: 4px;
-             box-shadow: 0 8px 28px rgba(0,0,0,.5); display: flex;
+             box-shadow: var(--shadow-pop); display: flex;
              flex-direction: column; }
   .ctxItem { all: unset; padding: 6px 10px; border-radius: var(--r-sm); corner-shape: squircle; cursor: pointer;
              font-size: var(--fs-sm); color: var(--text); }
@@ -452,9 +457,9 @@
                    border-color: var(--accent); }
   #pillPopover { position: fixed; z-index: 60; display: flex; flex-wrap: wrap;
                  gap: 4px; max-width: 340px; max-height: 40vh; overflow-y: auto;
-                 background: var(--field); border: 1px solid var(--border);
+                 background: var(--raised); border: 1px solid var(--border);
                  border-radius: var(--r-md); corner-shape: squircle; padding: 8px;
-                 box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+                 box-shadow: var(--shadow-pop); }
   #pillPopover .pill { display: inline-flex; gap: 6px; align-items: center;
                  font-size: var(--fs-xs); color: var(--accent);
                  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
@@ -567,7 +572,8 @@ const THEMES = {
    "--guide": "#179299",
    "--on-accent": "#eff1f5",
    "--handle": "#eff1f5",
-   "--scrim": "#dce0e8"
+   "--scrim": "#dce0e8",
+   "--raised": "#eff1f5"
   }
  },
  "catppuccin-frappe": {
@@ -591,7 +597,8 @@ const THEMES = {
    "--guide": "#81c8be",
    "--on-accent": "#303446",
    "--handle": "#c6d0f5",
-   "--scrim": "#232634"
+   "--scrim": "#232634",
+   "--raised": "#414559"
   }
  },
  "catppuccin-macchiato": {
@@ -615,7 +622,8 @@ const THEMES = {
    "--guide": "#8bd5ca",
    "--on-accent": "#24273a",
    "--handle": "#cad3f5",
-   "--scrim": "#181926"
+   "--scrim": "#181926",
+   "--raised": "#363a4f"
   }
  },
  "catppuccin-mocha": {
@@ -639,7 +647,8 @@ const THEMES = {
    "--guide": "#94e2d5",
    "--on-accent": "#1e1e2e",
    "--handle": "#cdd6f4",
-   "--scrim": "#11111b"
+   "--scrim": "#11111b",
+   "--raised": "#313244"
   }
  }
 };
