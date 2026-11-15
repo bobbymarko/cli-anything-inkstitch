@@ -50,8 +50,11 @@
           background: transparent; font: inherit; cursor: pointer; }
   .chip.on { color: var(--accent); border-color: var(--accent); }
   #viewModes { display: flex; gap: 2px; }
-  #presence { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
-  #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+  #presence { display: flex; align-items: center; gap: 6px; margin-top: 8px;
+              color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+  #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; flex: none; }
+  #presenceHint { flex-basis: 100%; padding-left: 14px; font-size: 11px; opacity: .8; }
+  #presence:not(.waiting) #presenceHint { display: none; }
   #presence.listening .dot { background: var(--start); }
   #presence.working .dot { background: var(--rail); }
 
@@ -415,8 +418,6 @@
   #send:hover:not(:disabled) { filter: brightness(1.15); }
   #send:disabled { opacity: .35; cursor: default; }
   #send svg { display: block; }
-  #presenceBanner { display: none; margin-top: 8px; color: var(--rail); font-size: 12px; }
-  #presenceBanner.show { display: block; }
 
   #endedOverlay { position: fixed; inset: 0; display: none; align-items: center;
                   justify-content: center; background: rgba(10,12,15,.88); z-index: 10; }
@@ -503,8 +504,12 @@
                aria-hidden="true"><path d="M8 1.5 2.2 7.3l1.06 1.06L7 4.62V14.5h2V4.62l3.74 3.74 1.06-1.06L8 1.5z"/></svg>
         </button>
       </div>
-      <div id="presenceBanner">Agent is not listening — ask it to run
-        <code>artifact poll</code>.</div>
+      <!-- agent connection (server ArtifactState.presence): an open poll =
+           connected; a delivered message not yet answered = working -->
+      <div id="presence" class="waiting">
+        <span class="dot"></span><span id="presenceText">Agent not connected</span>
+        <span id="presenceHint">Ask it to run <code>artifact poll</code> to start listening.</span>
+      </div>
     </div>
   </aside>
   <div id="center">
@@ -516,7 +521,6 @@
       <span class="fileChev"></span>
     </button>
     <div class="spacer"></div>
-    <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
     <button class="chip" id="helpBtn" type="button" title="How to use"
             aria-label="How to use">?</button>
     <button class="collapseBtn centerToggle" id="inspectToggleCenter" type="button"
@@ -4133,8 +4137,9 @@ function connectSSE() {
     const state = JSON.parse(ev.data).state;
     lastPresence = state;
     $("presence").className = state;
-    $("presenceText").textContent = state;
-    $("presenceBanner").classList.toggle("show", state === "waiting");
+    $("presenceText").textContent = {
+      listening: "Agent connected", working: "Agent working…",
+      waiting: "Agent not connected" }[state] || state;
     setWorking(state === "working");
   });
   es.addEventListener("reload", requestReload);   // deferred, never dropped
