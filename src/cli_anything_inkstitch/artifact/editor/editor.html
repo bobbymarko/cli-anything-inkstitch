@@ -4,66 +4,86 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Digitizing Artifact</title>
+<link rel="stylesheet" href="/assets/design-system.css">
+<script src="/assets/theme.js"></script>
 <style>
-  :root {
-    --bg: #14161a; --panel: #1c1f26; --line: #2a2e38; --text: #e6e8ee;
-    --muted: #9aa1b0; --accent: #6ea8fe; --start: #37c46f; --end: #e5534b;
-    --rail: #ffb347; --rung: #9d7bff; --zig: #ffd9a0;
-  }
   * { box-sizing: border-box; margin: 0; }
-  html, body { height: 100%; }
+  button, input, textarea, select { font-family: inherit; }
+  /* a two-finger horizontal swipe that isn't consumed (rulers, a panel at
+     its scroll edge) is Chrome's back/forward gesture — opt the whole
+     page out; the editor has no history to navigate */
+  html, body { height: 100%; overscroll-behavior: none; }
   body { display: flex; flex-direction: column; background: var(--bg); color: var(--text);
-         font: 13px/1.45 -apple-system, "Segoe UI", sans-serif; }
+         font: var(--fs-md)/1.45 "Inter", -apple-system, "Segoe UI", sans-serif;
+         -webkit-font-smoothing: antialiased; }
 
-  #bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
-         background: var(--panel); border-bottom: 1px solid var(--line); }
-  #bar .brand { font-weight: 700; }
-  #bar #helpBtn { margin-left: 8px; }
-  #bar .spacer { flex: 1; }
+  /* every column starts with a header row of the same height, so the
+     three tops line up (the Claude-app layout: no full-width bar) */
+  :root { --head-h: 42px; }
+  #center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #center > #canvasWrap { flex: 1; }
+  .colHead { height: var(--head-h); flex: none; display: flex; align-items: center;
+             gap: var(--sp-1); padding: 0 var(--sp-2); border-bottom: 1px solid var(--border); }
+  #centerBar { background: var(--canvas); }
+  #centerBar .spacer { flex: 1; }
+  #fileMenuBtn { all: unset; display: inline-flex; align-items: center; gap: var(--sp-1);
+                 padding: 5px var(--sp-2) 5px var(--sp-3); border-radius: var(--r-sm);
+                 corner-shape: squircle; background: var(--panel); cursor: pointer; max-width: 60%; }
+  #fileMenuBtn:hover, #fileMenuBtn.open {
+    background: color-mix(in srgb, var(--text) 8%, var(--panel)); }
+  #fileMenuBtn .brand { font-weight: 600; white-space: nowrap; overflow: hidden;
+                        text-overflow: ellipsis; }
+  #fileMenuBtn .fileChev { color: var(--muted); display: flex; }
+  #fileMenuBtn .fileChev .ic { width: 14px; height: 14px; }
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
-          border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+          border: 1px solid var(--border); border-radius: 999px; color: var(--muted);
           background: transparent; font: inherit; cursor: pointer; }
   .chip.on { color: var(--accent); border-color: var(--accent); }
   #viewModes { display: flex; gap: 2px; }
-  #presence { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
-  #presence .dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
-  #presence.listening .dot { background: var(--start); }
-  #presence.working .dot { background: var(--rail); }
-  #endBtn { color: var(--end); border-color: rgba(229,83,75,.4); }
+  /* small centred banner above the prompt, only while no agent listens */
+  #presence { display: flex; align-items: center; gap: var(--sp-2); width: fit-content;
+              margin: 0 auto var(--sp-2); padding: var(--sp-1) var(--sp-3);
+              border-radius: 999px; background: var(--raised); color: var(--muted);
+              font-size: var(--fs-xs); cursor: help; }
+  #presence:not(.waiting) { display: none; }
+  #presence .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
 
   #main { display: flex; flex: 1; min-height: 0; }
   #canvasWrap { position: relative; flex: 1; min-width: 0; overflow: hidden;
-                background: #0e1013; }
-  #canvas, #realCanvas, #glCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-  /* under #canvas in DOM order; #glCanvas is the WebGL realistic view,
-     #realCanvas the Canvas2D fallback -- at most one is shown */
+                background: var(--canvas); }
+  #canvas, #realCanvas, #glCanvas, #gridCanvas { position: absolute; inset: 0;
+                                                 width: 100%; height: 100%; }
+  /* stacking (DOM order): #gridCanvas, then #glCanvas (WebGL realistic) /
+     #realCanvas (Canvas2D fallback) -- at most one of those is shown -- then
+     the #canvas SVG on top */
+  #gridCanvas { pointer-events: none; }
   #realCanvas, #glCanvas { pointer-events: none; display: none; }
   #canvasWrap.showPlan .artwork { opacity: .12; } /* plan is the truth while shown */
   .planLayer { pointer-events: none; }
   #toast { position: absolute; left: 50%; transform: translateX(-50%); bottom: 60px;
-           background: rgba(20,22,26,.95); border: 1px solid var(--line);
-           border-radius: 8px; padding: 6px 14px; color: var(--text); display: none;
+           background: var(--raised); border: 1px solid var(--border); box-shadow: var(--shadow-pop);
+           border-radius: var(--r-md); corner-shape: squircle; padding: 6px 14px; color: var(--text); display: none;
            max-width: 60ch; z-index: 3; }
   #toast.show { display: block; }
-  #toast.error { border-color: rgba(229,83,75,.5); color: var(--end); }
+  #toast.error { border-color: color-mix(in srgb, var(--end) 50%, transparent); color: var(--end); }
   /* The stitch plan failing used to be a 4-second toast over artwork dimmed to
      12% -- miss it and the canvas just looks broken for ever, with no way to
      tell a failed plan from an empty one. This says so, and stays said. */
   #planError { position: absolute; left: 50%; top: 24px; transform: translateX(-50%);
-               max-width: 560px; z-index: 20; padding: 10px 13px; border-radius: 8px;
-               background: rgba(38,16,16,.96); border: 1px solid rgba(229,83,75,.55);
-               color: #f4d7d4; font-size: 12px; line-height: 1.5; }
+               max-width: 560px; z-index: 20; padding: 10px 13px; border-radius: var(--r-md); corner-shape: squircle;
+               background: color-mix(in srgb, var(--end) 14%, var(--panel)); border: 1px solid color-mix(in srgb, var(--end) 55%, transparent);
+               color: color-mix(in srgb, var(--end) 35%, var(--text)); font-size: var(--fs-sm); line-height: 1.5; }
   #planError[hidden] { display: none; }
   #planError .pe-head { font-weight: 600; color: var(--end); }
   #planError .pe-detail { margin-top: 3px; }
   #planError .pe-diag { margin-top: 6px; font-family: ui-monospace, Menlo, monospace;
-                        font-size: 11px; opacity: .75; word-break: break-all; }
+                        font-size: var(--fs-xs); opacity: .75; word-break: break-all; }
   #viewModes.loading button.on { animation: pulse 1.2s infinite; }
   #gateBanner { position: absolute; left: 10px; right: 10px; top: 10px; display: none;
-                background: rgba(46,22,24,.95); border: 1px solid rgba(229,83,75,.5);
-                border-radius: 8px; padding: 10px 12px; z-index: 2; }
+                background: color-mix(in srgb, var(--end) 14%, var(--panel)); border: 1px solid color-mix(in srgb, var(--end) 50%, transparent);
+                border-radius: var(--r-md); corner-shape: squircle; padding: 10px 12px; z-index: 2; }
   #gateBanner.show { display: block; }
-  #gateBanner h3 { font-size: 12px; color: var(--end); margin-bottom: 6px; }
+  #gateBanner h3 { font-size: var(--fs-sm); color: var(--end); margin-bottom: 6px; }
   #gateBanner ul { margin: 0 0 8px 16px; }
   #gateBanner li { margin-bottom: 3px; }
   #gateBanner li a { color: var(--accent); cursor: pointer; text-decoration: underline; }
@@ -72,282 +92,315 @@
      shift when a stitch view toggles it on and off */
   #timelineBar { position: absolute; left: 50%; transform: translateX(-50%);
                  bottom: 60px; display: none; align-items: center; gap: 10px;
-                 background: rgba(28,31,38,.95); border: 1px solid var(--line);
-                 border-radius: 10px; padding: 6px 12px; z-index: 3; }
+                 background: color-mix(in srgb, var(--panel) 95%, transparent); border: 1px solid var(--border);
+                 border-radius: var(--r-md); corner-shape: squircle; padding: 6px 12px; z-index: 3; }
   #timelineBar #timeline { width: 230px; }
   #toolbar { position: absolute; left: 50%; transform: translateX(-50%);
              bottom: 12px; display: flex; gap: 2px; align-items: center;
-             background: rgba(28,31,38,.95);
-             border: 1px solid var(--line); border-radius: 10px; padding: 4px 8px;
+             background: color-mix(in srgb, var(--panel) 95%, transparent);
+             border: 1px solid var(--border); border-radius: var(--r-md); corner-shape: squircle; padding: 4px 8px;
              z-index: 3; }
   .tbSep { width: 1px; height: 22px; background: var(--line); margin: 0 6px;
            flex: none; }
-  #toolbar .tool { all: unset; width: 34px; height: 34px; border-radius: 7px;
+  #toolbar .tool { all: unset; width: 34px; height: 34px; border-radius: var(--r-sm); corner-shape: squircle;
                    display: flex; align-items: center; justify-content: center;
                    color: var(--muted); cursor: pointer; position: relative; }
-  #toolbar .tool:hover { color: var(--text); background: rgba(110,168,254,.10); }
-  #toolbar .tool.on { color: #0c1523; background: var(--accent); }
-  #toolbar .tool .kbd { position: absolute; bottom: 1px; right: 3px;
-                        font-size: 8px; opacity: .7; }
+  #toolbar .tool:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  #toolbar .tool.on { color: var(--on-accent); background: var(--accent); }
   .gizmoBox { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
               vector-effect: non-scaling-stroke; cursor: move; }
-  .gizmoFill { fill: rgba(110,168,254,.05); cursor: move; }
-  .gizmoHandle { fill: #fff; stroke: var(--accent); stroke-width: 1.5;
+  .gizmoFill { fill: color-mix(in srgb, var(--accent) 5%, transparent); cursor: move; }
+  .gizmoHandle { fill: var(--handle); stroke: var(--accent); stroke-width: 1.5;
                  vector-effect: non-scaling-stroke; cursor: nwse-resize; }
   .gizmoHandle.gizmoMid-x { cursor: ew-resize; }
   .gizmoHandle.gizmoMid-y { cursor: ns-resize; }
   /* invisible hit zones outside the corners; curved-arrow rotate cursor */
   .gizmoRotZone { fill: rgba(0,0,0,0); pointer-events: all;
     cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><path d="M4.5 9a4.5 4.5 0 1 1 1.3 3.2" fill="none" stroke="black" stroke-width="4"/><path d="M4.5 9a4.5 4.5 0 1 1 1.3 3.2" fill="none" stroke="white" stroke-width="2"/><path d="M2.8 8.2 l1.7 4.4 3.8-2.4z" fill="white" stroke="black" stroke-width="0.8"/></svg>') 9 9, crosshair; }
+  body.inspectCollapsed #settingsBtnCenter { display: flex; }
+  #themeOverlay { position: fixed; inset: 0; display: none; align-items: center;
+                  justify-content: center; z-index: 30;
+                  background: color-mix(in srgb, var(--scrim) 70%, transparent); }
+  #themeOverlay.show { display: flex; }
+  #themeCard { background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-lg); corner-shape: squircle;
+               padding: var(--sp-4); width: min(440px, calc(100vw - 32px));
+               box-shadow: var(--shadow-modal); }
+  .themeHead { display: flex; align-items: center; justify-content: space-between;
+               margin-bottom: var(--sp-3); }
+  .themeHead h1 { font-size: var(--fs-lg); font-weight: 600; }
+  #themeList { display: grid; gap: var(--sp-2); }
+  .themeTile { all: unset; display: flex; align-items: center; justify-content: space-between;
+               gap: var(--sp-3); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md); corner-shape: squircle;
+               border: 1px solid var(--border); cursor: pointer; font-size: var(--fs-md); }
+  .themeTile:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .themeTile.on { border-color: var(--accent);
+                  background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .themeSw { display: flex; gap: 3px; }
+  .themeSw i { width: 14px; height: 14px; border-radius: var(--r-xs); corner-shape: squircle;
+               box-shadow: inset 0 0 0 1px rgba(0,0,0,.25); }
   #helpOverlay { position: fixed; inset: 0; display: none; align-items: center;
-                 justify-content: center; background: rgba(10,12,15,.7); z-index: 20; }
+                 justify-content: center; background: color-mix(in srgb, var(--scrim) 70%, transparent); z-index: 20; }
   #helpOverlay.show { display: flex; }
-  #helpCard { background: var(--panel); border: 1px solid var(--line);
-              border-radius: 14px; padding: 22px 26px; width: min(560px, 92vw);
+  #helpCard { background: var(--raised); border: 1px solid var(--border);
+              border-radius: var(--r-lg); corner-shape: squircle; padding: 22px 26px; width: min(560px, 92vw);
               max-height: 84vh; overflow-y: auto; }
-  #helpCard h1 { font-size: 15px; margin-bottom: 4px; }
+  #helpCard h1 { font-size: var(--fs-lg); margin-bottom: 4px; }
   #helpCard .sub { color: var(--muted); margin-bottom: 14px; }
-  #helpCard h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  #helpCard h2 { font-size: var(--fs-sm); font-weight: 600;
                  color: var(--accent); margin: 14px 0 6px; }
   #helpCard table { width: 100%; border-collapse: collapse; }
-  #helpCard td { padding: 4px 0; border-bottom: 1px solid var(--line);
+  #helpCard td { padding: 4px 0; border-bottom: 1px solid var(--border);
                  vertical-align: top; }
   #helpCard td:first-child { color: var(--muted); width: 46%; }
-  #helpCard kbd { background: #14161a; border: 1px solid var(--line);
-                  border-radius: 4px; padding: 1px 6px; font: 11px ui-monospace,
+  #helpCard kbd { background: var(--field); border: 1px solid var(--border);
+                  border-radius: var(--r-xs); corner-shape: squircle; padding: 1px 6px; font: var(--fs-xs) ui-monospace,
                   monospace; white-space: nowrap; }
   #helpClose { float: right; all: unset; cursor: pointer; color: var(--muted);
-               font-size: 16px; padding: 0 4px; }
+               font-size: var(--fs-lg); padding: 0 4px; }
   #helpClose:hover { color: var(--text); }
   #timelineBar.show { display: flex; }
-  #tlPlay { all: unset; cursor: pointer; color: var(--accent); font-size: 13px;
+  #tlPlay { all: unset; cursor: pointer; color: var(--accent); font-size: var(--fs-md);
             width: 18px; text-align: center; }
-  #tlSpeed { all: unset; cursor: pointer; color: var(--muted); font-size: 11px;
-             width: 26px; text-align: center; border: 1px solid var(--line);
-             border-radius: 4px; padding: 1px 0; }
+  #tlSpeed { all: unset; cursor: pointer; color: var(--muted); font-size: var(--fs-xs);
+             width: 26px; text-align: center; border: 1px solid var(--border);
+             border-radius: var(--r-xs); corner-shape: squircle; padding: 1px 0; }
   #tlSpeed:hover { color: var(--text); }
   /* the track is a color-block map: each thread color occupies its share of
      the stitch count, so you can see what color stitches at any point */
   #timeline { flex: 1; -webkit-appearance: none; appearance: none; height: 8px;
-              border-radius: 4px; background: var(--line); outline: none;
+              border-radius: var(--r-xs); corner-shape: squircle; background: var(--line); outline: none;
               cursor: pointer; }
   #timeline::-webkit-slider-thumb { -webkit-appearance: none; width: 14px;
-              height: 14px; border-radius: 50%; background: #fff;
+              height: 14px; border-radius: 50%; background: var(--handle);
               border: 2px solid var(--accent); cursor: grab; }
   #timeline::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%;
-              background: #fff; border: 2px solid var(--accent); cursor: grab; }
+              background: var(--handle); border: 2px solid var(--accent); cursor: grab; }
   #tlLabel { color: var(--muted); font-variant-numeric: tabular-nums;
              white-space: nowrap; }
-  #gateBanner button { font: inherit; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  #gateBanner button { font: inherit; border-radius: var(--r-sm); corner-shape: squircle; padding: 4px 10px; cursor: pointer; }
   #gateEndAnyway { background: transparent; color: var(--end);
-                   border: 1px solid rgba(229,83,75,.5); }
+                   border: 1px solid color-mix(in srgb, var(--end) 50%, transparent); }
   #gateDismiss { background: transparent; color: var(--muted);
-                 border: 1px solid var(--line); }
+                 border: 1px solid var(--border); }
 
   .side { display: flex; flex-direction: column; background: var(--panel);
           overflow: hidden; }
-  #panel { width: 320px; border-right: 1px solid var(--line); }   /* left side */
-  #inspect { width: 260px; border-left: 1px solid var(--line); }  /* right side */
-  #panelStack { flex: 1; overflow-y: auto; padding: 0 10px 12px; }
-  .panel { border-bottom: 1px solid var(--line); }
-  .panelHead { padding: 8px 4px; font-size: 11px; text-transform: uppercase;
-               letter-spacing: .07em; color: var(--text); cursor: pointer;
+  #panel { width: 320px; border-right: 1px solid var(--border); }   /* left side */
+  #inspect { width: 260px; border-left: 1px solid var(--border); }  /* right side */
+  /* All panels stay in view: closed ones are just their header, open ones
+     share the column's height by weight (--pw) and scroll inside. The stack
+     only scrolls as a last resort, when even minimum heights don't fit. */
+  #panelStack { flex: 1; min-height: 0; overflow-y: auto; display: flex;
+                flex-direction: column; }
+  /* the inset lives on the panel so its divider runs the full column width */
+  .panel { border-bottom: 1px solid var(--border); padding: 0 var(--sp-4);
+           display: flex; flex-direction: column; flex: none; min-height: 0; }
+  .panel:not(.closed) { flex: var(--pw, 1) 1 0px; min-height: 96px; }
+  .panelHead { flex: none; }
+  .panelHead { padding: var(--sp-2) 0; font-size: var(--fs-sm); font-weight: 600; color: var(--text); cursor: pointer;
                user-select: none; display: flex; justify-content: space-between;
                align-items: center; }
-  .panelHead::after { content: "▾"; color: var(--muted); font-size: 9px; }
+  .panelChev { color: var(--muted); display: flex; }
+  .panelChev .ic { width: 13px; height: 13px; transition: transform .12s ease; }
+  .panel.closed .panelChev .ic { transform: rotate(-90deg); }
   .panel.closed .panelHead { color: var(--muted); }
-  .panel.closed .panelHead::after { content: "▸"; }
   .panel.closed .panelBody, .panel.closed .panelGrip { display: none; }
-  /* fixed, user-adjustable height per panel (drag the grip under it):
-     content scrolls inside, so selecting something can't change a panel's
-     size and shove the panels below it around */
-  .panelBody { padding: 2px 4px 10px; height: var(--ph, auto);
+  .panelBody { padding: 2px 0 var(--sp-2); flex: 1; min-height: 0;
                overflow-y: auto; overscroll-behavior: contain; }
-  .panelGrip { height: 7px; margin: 0 -4px; cursor: ns-resize; position: relative;
+  /* grip between this panel and the next open one */
+  .panelGrip { flex: none; height: 7px; margin: 0 -4px; cursor: ns-resize; position: relative;
                touch-action: none; }
+  .panel:not(.hasNext) .panelGrip { display: none; }
   .panelGrip::after { content: ""; position: absolute; left: 50%; top: 2px;
-                      width: 28px; height: 3px; margin-left: -14px; border-radius: 2px;
+                      width: 28px; height: 3px; margin-left: -14px; border-radius: var(--r-xs); corner-shape: squircle;
                       background: var(--line); }
   .panelGrip:hover::after, .panelGrip.drag::after { background: var(--accent); }
-  .refRow { display: flex; align-items: center; gap: 8px; padding: 3px 2px; }
-  .refLabel { flex: 0 0 62px; font-size: 11px; color: var(--muted, #999); }
+  .refRow { display: flex; align-items: center; gap: var(--sp-2); padding: 3px 0; }
+  .refLabel { flex: 0 0 62px; font-size: var(--fs-xs); color: var(--muted); }
   .refRow input[type="range"] { flex: 1; min-width: 0; }
-  .refNum { width: 64px; font-size: 11px; }
-  .refName { font-size: 11px; padding: 2px; overflow: hidden;
+  .refNum { width: 64px; font-size: var(--fs-xs); }
+  .refName { font-size: var(--fs-xs); padding: 2px; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
   .ic { width: 14px; height: 14px; display: block; flex: none; }
-  .eyeBtn { background: none; border: none; cursor: pointer; padding: 0 2px;
+  .eyeBtn { background: none; border: none; cursor: pointer; padding: 0;
             color: var(--muted); line-height: 1; opacity: .85;
-            width: 18px; flex: none; display: flex; justify-content: center; }   /* first column */
+            flex: none; display: flex; }   /* first column, on the content edge */
   .eyeBtn:hover { opacity: 1; color: inherit; }
   .eyeBtn.off { opacity: .35; }
   .layerRow.hiddenRow .nm { opacity: .4; text-decoration: line-through; }
-  .ovRow { display: flex; justify-content: space-between; gap: 8px;
-           padding: 2px 0; font-size: 12px; }
+  .ovRow { display: grid; grid-template-columns: var(--value-col) 1fr;
+           column-gap: var(--sp-2); padding: 2px 0; font-size: var(--fs-sm); }
   .ovRow .k { color: var(--muted); }
-  .ovSwatches { display: flex; gap: 5px; padding: 4px 0; }
-  .ovSwatches i { width: 16px; height: 16px; border-radius: 4px;
-                  border: 1px solid var(--line); display: inline-block; }
-  .layerRow { display: flex; align-items: center; gap: 7px; padding: 4px 5px;
-              border-radius: 6px; font-size: 12px; cursor: pointer; }
-  .layerRow:hover { background: rgba(110,168,254,.08); }
-  .layerRow.sel { background: rgba(110,168,254,.16); }
+  .ovSwatches { display: flex; gap: var(--sp-1); padding: var(--sp-1) 0; }
+  .ovSwatches i { width: 16px; height: 16px; border-radius: var(--r-xs); corner-shape: squircle;
+                  border: 1px solid var(--border); display: inline-block; }
+  .layerRow { display: flex; align-items: center; gap: var(--sp-2);
+              padding: var(--sp-1) var(--row-bleed); margin: 0 calc(-1 * var(--row-bleed));
+              border-radius: var(--r-sm); corner-shape: squircle; font-size: var(--fs-sm); cursor: pointer; }
+  .layerRow:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .layerRow.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
   .layerRow.dropTarget { box-shadow: 0 -2px 0 var(--accent); }
-  .layerRow .num { color: var(--muted); width: 16px; text-align: right;
-                   font-size: 10px; }
-  .layerRow .sw { width: 11px; height: 11px; border-radius: 3px;
-                  border: 1px solid var(--line); flex: none; }
+  .layerRow .sw { width: 11px; height: 11px; border-radius: var(--r-xs); corner-shape: squircle;
+                  border: 1px solid var(--border); flex: none; }
   .layerRow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis;
                   white-space: nowrap; }
-  .layerRow .kd { color: var(--muted); font-size: 10px; }
+  .layerRow .kd { color: var(--muted); font-size: var(--fs-xs); }
   .layerRow .nmEdit { min-width: 0; font: inherit; color: inherit;
-                      background: var(--bg, #14161a); border: 1px solid var(--accent);
-                      border-radius: 3px; padding: 0 4px; margin: -1px 0; outline: none; }
+                      background: var(--field); border: 1px solid var(--accent);
+                      border-radius: var(--r-xs); corner-shape: squircle; padding: 0 4px; margin: -1px 0; outline: none; }
   .cpCard { display: flex; gap: 8px; align-items: center; padding: 5px;
-            border: 1px solid var(--line); border-radius: 7px; margin-bottom: 5px;
+            border: 1px solid var(--border); border-radius: var(--r-sm); corner-shape: squircle; margin-bottom: 5px;
             cursor: pointer; }
-  .cpCard:hover { background: rgba(110,168,254,.08); }
-  .cpCard img { width: 42px; height: 42px; border-radius: 5px;
-                background: #18181c; object-fit: cover; flex: none; }
-  .cpCard .cpAnno { font-size: 11px; color: var(--text);
+  .cpCard:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .cpCard img { width: 42px; height: 42px; border-radius: var(--r-sm); corner-shape: squircle;
+                background: var(--field); object-fit: cover; flex: none; }
+  .cpCard .cpAnno { font-size: var(--fs-xs); color: var(--text);
                     overflow: hidden; text-overflow: ellipsis;
                     display: -webkit-box; -webkit-line-clamp: 2;
                     -webkit-box-orient: vertical; }
-  .cpCard .cpTime { font-size: 10px; color: var(--muted); }
+  .cpCard .cpTime { font-size: var(--fs-xs); color: var(--muted); }
   .cpCard.auto { opacity: .6; }
-  .cpHead { font-size: 10px; letter-spacing: .06em; color: var(--muted);
-            margin: 2px 0 5px; text-transform: uppercase; }
+  .cpHead { font-size: var(--fs-xs); font-weight: 600; color: var(--muted);
+            margin: 2px 0 5px; }
   .histRow .flagged { color: var(--accent); margin-right: 3px; }
-  .histRow { padding: 3px 5px; border-radius: 5px; font-size: 11px;
+  .histRow { padding: 3px var(--row-bleed); margin: 0 calc(-1 * var(--row-bleed));
+             border-radius: var(--r-sm); corner-shape: squircle; font-size: var(--fs-xs);
              color: var(--muted); cursor: pointer; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
-  .histRow:hover { background: rgba(110,168,254,.08); color: var(--text); }
+  .histRow:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--text); }
   .histRow.cur { color: var(--accent); }
   .histRow.future { opacity: .45; }
   .sideHead { display: flex; align-items: center; justify-content: flex-end;
-              padding: 6px 10px 0 14px; }
-  .collapseBtn { all: unset; cursor: pointer; color: var(--muted); padding: 0 4px;
-                 font-size: 14px; line-height: 1; }
+              height: var(--head-h); flex: none; padding: 0 var(--sp-2);
+              gap: var(--sp-1); border-bottom: 1px solid var(--border); }
+  #panel .sideHead { justify-content: flex-start; }   /* toggle at left */
+  .collapseBtn { all: unset; cursor: pointer; color: var(--muted); padding: 2px 4px;
+                 line-height: 1; display: flex; border-radius: var(--r-xs); corner-shape: squircle; }
+  .collapseBtn .ic { width: 15px; height: 15px; }
   .collapseBtn:hover { color: var(--text); }
   /* id-qualified: must outrank the #inspect/#panel width rules above */
-  #inspect.collapsed, #panel.collapsed { width: 26px; cursor: pointer; }
+  /* collapsed = gone (Claude-app style); the middle header shows a toggle
+     to bring it back: chat's left of the file name, panels' at the far right */
+  #inspect.collapsed, #panel.collapsed { display: none; }
+  .centerToggle { display: none; }
+  body.panelCollapsed #panelToggleCenter,
+  body.inspectCollapsed #inspectToggleCenter { display: flex; }
   .sideResizer { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 6;
                  cursor: col-resize; }
-  .sideResizer:hover, .sideResizer.active { background: rgba(110,168,254,.25); }
+  .sideResizer:hover, .sideResizer.active { background: color-mix(in srgb, var(--accent) 25%, transparent); }
   #panelResizer { right: -3px; }
   #inspectResizer { left: -3px; }
   .side { position: relative; }
-  .side.collapsed .sideResizer { display: none; }
-  .side.collapsed .sideHead { padding: 10px 0 0; justify-content: center; }
-  .side.collapsed .sideBody, .side.collapsed #composer,
-  .side.collapsed #inspectBody { display: none; }
-  #inspectBody { flex: 1; overflow-y: auto; padding: 4px 14px 14px; }
+  #inspectBody { flex: 1; overflow-y: auto; padding: 2px 0 var(--sp-3); }
   #inspectBody .noSel { color: var(--muted); }
   #inspectBody .objTitle { font-weight: 700; margin-bottom: 2px; word-break: break-all; }
   .titleEdit { background: transparent; border: 1px solid transparent;
-               border-radius: 4px; color: var(--text); font: inherit;
-               font-weight: 700; width: 100%; padding: 1px 4px; }
-  .titleEdit:hover { border-color: var(--line); }
+               border-radius: var(--r-xs); corner-shape: squircle; color: var(--text); font: inherit;
+               font-weight: 700; width: calc(100% + var(--sp-1) + 1px); padding: 1px var(--sp-1);
+               margin-left: calc(-1 * (var(--sp-1) + 1px)); }
+  .titleEdit:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
   .titleEdit:focus { border-color: var(--accent); outline: none;
-                     background: #14161a; }
-  #inspectBody .objKind { color: var(--accent); font-size: 11px; text-transform: uppercase;
-                          letter-spacing: .06em; margin-bottom: 10px; }
-  #inspectBody .prow { display: flex; justify-content: space-between; gap: 8px;
-                       align-items: center; padding: 3px 0;
-                       border-bottom: 1px solid var(--line); }
+                     background: var(--field); }
+  #inspectBody .objKind { color: var(--accent); font-size: var(--fs-sm); margin-bottom: 10px; }
+  #inspectBody .prow { display: grid; grid-template-columns: var(--value-col) 1fr;
+                       column-gap: var(--sp-2); align-items: center; padding: var(--sp-1) 0;
+                       border-bottom: 1px solid var(--border); }
   #inspectBody .pname { color: var(--muted); word-break: normal; }
   #inspectBody .pname.hasTip { cursor: help;
-    text-decoration: underline dotted rgba(154,161,176,.5);
+    text-decoration: underline dotted color-mix(in srgb, var(--muted) 50%, transparent);
     text-underline-offset: 3px; }
   #inspectBody .pname.hasTip:hover { color: var(--text); }
-  #inspectBody .pctrl { display: inline-flex; align-items: center; gap: 5px; }
-  #inspectBody .punit { color: var(--muted); font-size: 11px; }
-  #inspectBody .moreHead { margin: 8px 0 2px; font-size: 11px; color: var(--muted);
+  #inspectBody .pctrl { display: inline-flex; align-items: center; gap: var(--sp-1);
+                        justify-self: start; }
+  #inspectBody .punit { color: var(--muted); font-size: var(--fs-xs); }
+  #inspectBody .moreHead { margin: 8px 0 2px; font-size: var(--fs-xs); color: var(--muted);
           cursor: pointer; user-select: none; }
-  .colorRow { display: flex; align-items: center; gap: 8px; padding: 4px 2px;
-              border-radius: 6px; cursor: pointer; }
-  .colorRow:hover { background: rgba(255,255,255,0.04); }
-  .colorRow .nm { flex: 1; font-family: ui-monospace, monospace; font-size: 11px; }
-  .colorRow .kd { color: var(--muted); font-size: 11px; }
-  .colorSw { width: 26px; height: 20px; padding: 0; border: 1px solid var(--line);
-             border-radius: 5px; background: none; cursor: pointer; }
+  .colorRow { display: flex; align-items: center; gap: var(--sp-2);
+              padding: var(--sp-1) var(--row-bleed); margin: 0 calc(-1 * var(--row-bleed));
+              border-radius: var(--r-sm); corner-shape: squircle; cursor: pointer; }
+  .colorRow:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+  .colorRow .nm { flex: 1; font-family: ui-monospace, monospace; font-size: var(--fs-xs); }
+  .colorRow .kd { color: var(--muted); font-size: var(--fs-xs); }
+  .colorSw { width: 26px; height: 20px; padding: 0; border: 1px solid var(--border);
+             border-radius: var(--r-sm); corner-shape: squircle; background: none; cursor: pointer; }
   .colorSw::-webkit-color-swatch-wrapper { padding: 1px; }
-  .colorSw::-webkit-color-swatch { border: none; border-radius: 4px; }
+  .colorSw::-webkit-color-swatch { border: none; border-radius: var(--r-xs); corner-shape: squircle; }
   .layerRow .swInput { width: 13px; height: 13px; padding: 0; border: none;
-                       border-radius: 3px; background: none; cursor: pointer;
+                       border-radius: var(--r-xs); corner-shape: squircle; background: none; cursor: pointer;
                        flex: none; }
-  .palBtn { all: unset; color: var(--muted); cursor: pointer; font-size: 13px;
+  .palBtn { all: unset; color: var(--muted); cursor: pointer; font-size: var(--fs-md);
             padding: 0 2px; }
   .palBtn:hover { color: var(--accent); }
   #palettePop { position: fixed; z-index: 30; width: 264px;
-                background: var(--panel); border: 1px solid var(--line);
-                border-radius: 10px; padding: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.5); }
-  #palettePop select { width: 100%; margin-bottom: 8px; background: #14161a;
-                       color: var(--text); border: 1px solid var(--line);
-                       border-radius: 6px; padding: 3px 6px; font: inherit; }
+                background: var(--raised); border: 1px solid var(--border);
+                border-radius: var(--r-md); corner-shape: squircle; padding: 10px; box-shadow: var(--shadow-pop); }
+  #palettePop select { width: 100%; margin-bottom: 8px; background: var(--field);
+                       color: var(--text); border: 1px solid var(--border);
+                       border-radius: var(--r-sm); corner-shape: squircle; padding: 3px 6px; font: inherit; }
   .palGrid { display: flex; flex-wrap: wrap; gap: 3px; max-height: 240px;
-             overflow-y: auto; font-size: 11px; color: var(--muted); }
-  .palCell { all: unset; width: 17px; height: 17px; border-radius: 4px;
-             border: 1px solid rgba(255,255,255,.18); cursor: pointer; }
+             overflow-y: auto; font-size: var(--fs-xs); color: var(--muted); }
+  .palCell { all: unset; width: 17px; height: 17px; border-radius: var(--r-xs); corner-shape: squircle;
+             border: 1px solid color-mix(in srgb, var(--text) 18%, transparent); cursor: pointer; }
   .palCell:hover { outline: 2px solid var(--accent); }
-  #ctxMenu { position: fixed; z-index: 40; min-width: 190px; background: var(--panel);
-             border: 1px solid var(--line); border-radius: 9px; padding: 4px;
-             box-shadow: 0 8px 28px rgba(0,0,0,.5); display: flex;
+  #ctxMenu { position: fixed; z-index: 40; min-width: 190px; background: var(--raised);
+             border: 1px solid var(--border); border-radius: var(--r-md); corner-shape: squircle; padding: 4px;
+             box-shadow: var(--shadow-pop); display: flex;
              flex-direction: column; }
-  .ctxItem { all: unset; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-             font-size: 12px; color: var(--text); }
-  .ctxItem:hover { background: rgba(110,168,254,.12); }
+  .ctxItem { all: unset; padding: 6px 10px; border-radius: var(--r-sm); corner-shape: squircle; cursor: pointer;
+             font-size: var(--fs-sm); color: var(--text); }
+  .ctxItem:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .ctxItem.danger { color: var(--end); }
   .ctxItem:disabled { opacity: .4; cursor: default; background: none; }
-  .ctxItem.danger:hover { background: rgba(229,83,75,.12); }
+  .ctxItem.danger:hover { background: color-mix(in srgb, var(--end) 12%, transparent); }
   .ctxSep { height: 1px; background: var(--line); margin: 4px 6px; }
   #rulerTop { position: absolute; top: 0; left: 18px; right: 0; height: 18px;
               z-index: 4; display: none; cursor: s-resize; }
   #rulerLeft { position: absolute; top: 18px; left: 0; bottom: 0; width: 18px;
                z-index: 4; display: none; cursor: e-resize; }
   #rulerCorner { position: absolute; top: 0; left: 0; width: 18px; height: 18px;
-                 z-index: 4; display: none; background: rgba(20,22,26,.95);
-                 border-right: 1px solid var(--line);
-                 border-bottom: 1px solid var(--line); }
-  .guideLine { stroke: #46c8cd; stroke-dasharray: 6 4; opacity: .8;
+                 z-index: 4; display: none; background: color-mix(in srgb, var(--bg) 95%, transparent);
+                 border-right: 1px solid var(--border);
+                 border-bottom: 1px solid var(--border); }
+  .guideLine { stroke: var(--guide); stroke-dasharray: 6 4; opacity: .8;
                vector-effect: non-scaling-stroke; pointer-events: none; }
   .guideHit { stroke: rgba(0,0,0,0); stroke-width: 7;
               vector-effect: non-scaling-stroke; }
   .guideHit.gx { cursor: ew-resize; }
   .guideHit.gy { cursor: ns-resize; }
-  .gridLine { stroke: rgba(255,255,255,.05); vector-effect: non-scaling-stroke;
-              pointer-events: none; }
-  .gridLine.major { stroke: rgba(255,255,255,.11); }
-  .warnNote { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
-              color: #e0a434; border-radius: 7px; padding: 6px 9px;
-              font-size: 11.5px; margin: 2px 0 10px; }
-  .warnBadge { color: #e0a434; font-size: 11px; flex: none; cursor: help;
+  .warnNote { background: color-mix(in srgb, var(--warn) 12%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+              color: var(--warn); border-radius: var(--r-sm); corner-shape: squircle; padding: 6px 9px;
+              font-size: var(--fs-sm); margin: 2px 0 10px; }
+  .warnBadge { color: var(--warn); font-size: var(--fs-xs); flex: none; cursor: help;
                display: flex; }
-  .ovWarn { background: rgba(224,164,52,.12); border: 1px solid rgba(224,164,52,.45);
-            color: #e0a434; border-radius: 7px; padding: 5px 8px; font-size: 11.5px;
+  .ovWarn { background: color-mix(in srgb, var(--warn) 12%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+            color: var(--warn); border-radius: var(--r-sm); corner-shape: squircle; padding: 5px 8px; font-size: var(--fs-sm);
             margin-top: 6px; cursor: pointer; }
-  .ovWarn:hover { background: rgba(224,164,52,.2); }
+  .ovWarn:hover { background: color-mix(in srgb, var(--warn) 20%, transparent); }
   .layerRow .swInput::-webkit-color-swatch-wrapper { padding: 0; }
-  .layerRow .swInput::-webkit-color-swatch { border: 1px solid var(--line);
-                                             border-radius: 3px; }
+  .layerRow .swInput::-webkit-color-swatch { border: 1px solid var(--border);
+                                             border-radius: var(--r-xs); corner-shape: squircle; }
   #inspectBody .moreHead::before { content: "▸ "; }
   #inspectBody .moreHead.open::before { content: "▾ "; }
-  #inspectBody .pval { text-align: right; word-break: break-all; }
+  #inspectBody .pval { text-align: left; word-break: break-all; }
   .pvalEdit { background: transparent; border: 1px solid transparent;
-              color: var(--text); text-align: right; width: 90px; font: inherit;
-              border-radius: 4px; padding: 1px 5px; }
-  .pvalEdit:hover { border-color: var(--line); }
-  .pvalEdit:focus { border-color: var(--accent); outline: none; background: #14161a; }
-  .pvalSelect { width: auto; max-width: 120px; background: #14161a;
-                border-color: var(--line); cursor: pointer; }
-  .pvalEdit[type="number"] { appearance: textfield; }
+              color: var(--text); text-align: left; width: 90px; font: inherit;
+              border-radius: var(--r-xs); corner-shape: squircle; padding: 1px var(--sp-1);
+              margin-left: calc(-1 * (var(--sp-1) + 1px)); }
+  .pvalEdit:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+  .pvalEdit:focus { border-color: var(--accent); outline: none; background: var(--field); }
+  .pvalSelect { width: auto; max-width: 120px; background: var(--field);
+                border-color: var(--border); cursor: pointer; }
+  .pvalEdit[type="number"] { appearance: textfield; width: 64px; }   /* unit sits beside it */
   .pvalCheck { accent-color: var(--accent); }
-  #chat { flex: 1; overflow-y: auto; padding: 4px 14px; display: flex;
-          flex-direction: column; gap: 8px; }
-  .msg { padding: 7px 10px; border-radius: 10px; max-width: 92%; white-space: pre-wrap; }
-  .msg.human { align-self: flex-end; background: #2b3547; }
-  .msg.agent { align-self: flex-start; background: #23262e; border: 1px solid var(--line); }
-  .msg .objs { display: block; color: var(--accent); font-size: 11px; margin-top: 3px; }
+  #chat { flex: 1; overflow-y: auto; padding: var(--sp-3) var(--sp-4); display: flex;
+          flex-direction: column; gap: var(--sp-3); }
+  .msg { white-space: pre-wrap; }
+  /* your messages stay bubbles; agent replies are plain text across the
+     panel's full width (Claude-app style) */
+  .msg.human { align-self: flex-end; max-width: 85%; padding: 7px 10px;
+               border-radius: var(--r-md); corner-shape: squircle; background: color-mix(in srgb, var(--accent) 18%, var(--panel)); }
+  .msg.agent { align-self: stretch; }
+  .msg .objs { display: block; color: var(--accent); font-size: var(--fs-xs); margin-top: 3px; }
   .msg.working { display: flex; gap: 8px; align-items: center; color: var(--muted);
                  font-style: italic; }
   .dots { display: inline-flex; gap: 3px; }
@@ -356,51 +409,49 @@
   .dots i:nth-child(2) { animation-delay: .2s; }
   .dots i:nth-child(3) { animation-delay: .4s; }
   @keyframes pulse { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
-  #composer { padding: 10px 14px 14px; border-top: 1px solid var(--line); }
+  #composer { padding: var(--sp-3) var(--sp-4) var(--sp-4); border-top: 1px solid var(--border); }
   #pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-  #pills .pill { display: inline-flex; gap: 6px; align-items: center; font-size: 11px;
-                 color: var(--accent); border: 1px solid rgba(110,168,254,.4);
+  #pills .pill { display: inline-flex; gap: 6px; align-items: center; font-size: var(--fs-xs);
+                 color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
                  border-radius: 999px; padding: 2px 8px; }
   #pills .pill button { all: unset; cursor: pointer; color: var(--muted); }
   #pills .pillSummary { cursor: pointer; user-select: none; }
   .askRow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .askOpt { font-size: 12px; color: var(--accent); background: transparent;
-            border: 1px solid rgba(110,168,254,.5); border-radius: 999px;
+  .askOpt { font-size: var(--fs-sm); color: var(--accent); background: transparent;
+            border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 999px;
             padding: 4px 12px; cursor: pointer; }
-  .askOpt:hover:not(:disabled) { background: rgba(110,168,254,.12); }
+  .askOpt:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .askOpt:disabled { opacity: .45; cursor: default; }
-  .askOpt.picked { background: rgba(110,168,254,.2); opacity: 1;
+  .askOpt.picked { background: color-mix(in srgb, var(--accent) 20%, transparent); opacity: 1;
                    border-color: var(--accent); }
   #pillPopover { position: fixed; z-index: 60; display: flex; flex-wrap: wrap;
                  gap: 4px; max-width: 340px; max-height: 40vh; overflow-y: auto;
-                 background: #14161a; border: 1px solid var(--line);
-                 border-radius: 10px; padding: 8px;
-                 box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+                 background: var(--raised); border: 1px solid var(--border);
+                 border-radius: var(--r-md); corner-shape: squircle; padding: 8px;
+                 box-shadow: var(--shadow-pop); }
   #pillPopover .pill { display: inline-flex; gap: 6px; align-items: center;
-                 font-size: 11px; color: var(--accent);
-                 border: 1px solid rgba(110,168,254,.4);
+                 font-size: var(--fs-xs); color: var(--accent);
+                 border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
                  border-radius: 999px; padding: 2px 8px; }
   #pillPopover .pill button { all: unset; cursor: pointer; color: var(--muted); }
   #inputWrap { position: relative; }
-  #input { width: 100%; min-height: 60px; resize: vertical; background: #14161a;
-           color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+  #input { width: 100%; min-height: 60px; resize: vertical; background: var(--field);
+           color: var(--text); border: 1px solid var(--border); border-radius: var(--r-md); corner-shape: squircle;
            padding: 8px 44px 8px 10px; font: inherit; }
   #send { position: absolute; right: 8px; bottom: 10px; width: 28px; height: 28px;
-          border-radius: 50%; background: var(--accent); color: #0c1523; border: 0;
+          border-radius: 50%; background: var(--accent); color: var(--on-accent); border: 0;
           display: flex; align-items: center; justify-content: center;
           cursor: pointer; padding: 0; }
   #send:hover:not(:disabled) { filter: brightness(1.15); }
   #send:disabled { opacity: .35; cursor: default; }
   #send svg { display: block; }
-  #presenceBanner { display: none; margin-top: 8px; color: var(--rail); font-size: 12px; }
-  #presenceBanner.show { display: block; }
 
   #endedOverlay { position: fixed; inset: 0; display: none; align-items: center;
-                  justify-content: center; background: rgba(10,12,15,.88); z-index: 10; }
+                  justify-content: center; background: color-mix(in srgb, var(--scrim) 88%, transparent); z-index: 10; }
   #endedOverlay.show { display: flex; }
-  #endedOverlay .card { background: var(--panel); border: 1px solid var(--line);
-                        border-radius: 14px; padding: 28px 34px; text-align: center; }
-  #endedOverlay h1 { font-size: 18px; margin-bottom: 8px; }
+  #endedOverlay .card { background: var(--panel); border: 1px solid var(--border);
+                        border-radius: var(--r-lg); corner-shape: squircle; padding: 28px 34px; text-align: center; }
+  #endedOverlay h1 { font-size: var(--fs-xl); margin-bottom: 8px; }
   #endedOverlay p { color: var(--muted); }
 
   /* canvas object styling */
@@ -423,57 +474,72 @@
   /* A trimmed move leaves nothing behind; a float is thread lying on the
      garment. Drawing both as the same grey dash is why "will this stitch
      out?" could not be answered from the screen. */
-  .jumpLine { stroke: #8a8f9c; stroke-width: 1; stroke-dasharray: 4 3;
+  .jumpLine { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3;
               opacity: .55; vector-effect: non-scaling-stroke;
               pointer-events: none; }
   .floatLine { stroke: var(--end); stroke-width: 2; opacity: .95;
                vector-effect: non-scaling-stroke; pointer-events: none; }
-  .node { fill: var(--rail); stroke: #14161a; stroke-width: 1.5;
+  .node { fill: var(--rail); stroke: var(--field); stroke-width: 1.5;
           vector-effect: non-scaling-stroke; cursor: grab; }
-  .node.nodeActive { fill: var(--accent); stroke: #fff; }
-  .rungNode { fill: var(--rung); stroke: #14161a; stroke-width: 1.5;
+  .node.nodeActive { fill: var(--accent); stroke: var(--handle); }
+  .rungNode { fill: var(--rung); stroke: var(--field); stroke-width: 1.5;
               vector-effect: non-scaling-stroke; cursor: grab; }
-  .handle { stroke: #14161a; stroke-width: 1.5; vector-effect: non-scaling-stroke;
+  .handle { stroke: var(--field); stroke-width: 1.5; vector-effect: non-scaling-stroke;
             cursor: grab; }
   .handle.start { fill: var(--start); }
   .handle.end { fill: var(--end); }
   .angleArrow { stroke: var(--accent); opacity: .8; vector-effect: non-scaling-stroke;
                 pointer-events: none; stroke-dasharray: 5 4; }
-  .angleKnob { fill: var(--accent); stroke: #14161a; stroke-width: 1.5;
+  .angleKnob { fill: var(--accent); stroke: var(--field); stroke-width: 1.5;
                vector-effect: non-scaling-stroke; cursor: grab; }
   .angleLabel { fill: var(--text); pointer-events: none;
                 font-family: ui-monospace, monospace; }
   .bezArm { stroke: var(--accent); opacity: .7; stroke-width: 1;
             vector-effect: non-scaling-stroke; pointer-events: none; }
-  .bezHandle { fill: #fff; stroke: var(--accent); stroke-width: 1.5;
+  .bezHandle { fill: var(--handle); stroke: var(--accent); stroke-width: 1.5;
                vector-effect: non-scaling-stroke; cursor: grab; }
   .penDraft { fill: none; stroke: var(--accent); stroke-dasharray: 5 4;
               vector-effect: non-scaling-stroke; pointer-events: none; }
   .node.penFirst { fill: var(--start); }
-  .knifeDraft { fill: none; stroke: #ff5a5a; stroke-width: 1.5;
+  .knifeDraft { fill: none; stroke: var(--end); stroke-width: 1.5;
                 stroke-dasharray: 6 3; vector-effect: non-scaling-stroke;
                 pointer-events: none; }
-  .knifeNode { fill: #ff5a5a; stroke: #fff; stroke-width: 1;
+  .knifeNode { fill: var(--end); stroke: var(--handle); stroke-width: 1;
                vector-effect: non-scaling-stroke; pointer-events: none; }
-  .selMarquee { fill: rgba(110,168,254,.06); stroke: var(--accent);
+  .selMarquee { fill: color-mix(in srgb, var(--accent) 6%, transparent); stroke: var(--accent);
                 stroke-dasharray: 4 3; vector-effect: non-scaling-stroke;
                 pointer-events: none; }
-  .zoomMarquee { fill: rgba(110,168,254,.08); stroke: var(--accent);
+  .zoomMarquee { fill: color-mix(in srgb, var(--accent) 8%, transparent); stroke: var(--accent);
                  stroke-dasharray: 5 4; vector-effect: non-scaling-stroke;
                  pointer-events: none; }
+  /* ---------- motion ----------
+     Every animation here is transform/opacity on a small element and runs
+     once (no idle animation), so the canvas never pays for it. */
+  #ctxMenu, #palettePop, #pillPopover { animation: ds-pop var(--dur-2) var(--ease-spring); }
+  #themeOverlay.show, #helpOverlay.show { animation: ds-fade var(--dur-2) var(--ease-out); }
+  #themeOverlay.show #themeCard, #helpOverlay.show #helpCard {
+    animation: ds-pop var(--dur-3) var(--ease-spring); }
+  @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px) scale(.97); } }
+  #toast.show { animation: toast-in var(--dur-2) var(--ease-spring); }
+  #presence.waiting { animation: ds-rise var(--dur-2) var(--ease-out); }
+  #chat.live .msg { animation: ds-rise var(--dur-2) var(--ease-out); }
+  @keyframes bubble-pop { from { opacity: 0; transform: translateY(10px) scale(.85); } }
+  #chat.live .msg.human { transform-origin: 100% 100%;
+                          animation: bubble-pop var(--dur-3) var(--ease-spring); }
+  /* press feedback */
+  #toolbar .tool, .collapseBtn, #fileMenuBtn, .ctxItem, .themeTile, #send, .askOpt {
+    transition: transform var(--dur-1) var(--ease-out), background-color var(--dur-1) var(--ease-out),
+                color var(--dur-1) var(--ease-out); }
+  #toolbar .tool:active, .collapseBtn:active, #fileMenuBtn:active, .themeTile:active,
+  #send:active, .askOpt:active:not(:disabled) { transform: scale(.92); }
+  .ctxItem:active { transform: scale(.98); }
+  .layerRow, .colorRow, .histRow { transition: background-color var(--dur-1) var(--ease-out); }
+  .panelGrip::after { transition: background-color var(--dur-1) var(--ease-out),
+                                  transform var(--dur-1) var(--ease-spring); }
+  .panelGrip:hover::after, .panelGrip.drag::after { transform: scaleX(1.4); }
 </style>
 </head>
 <body>
-<div id="bar">
-  <div class="brand" id="brand">Digitizing Artifact</div>
-  <button class="chip" id="helpBtn" type="button" title="How to use"
-          aria-label="How to use">?</button>
-  <div class="spacer"></div>
-  <span id="presence"><span class="dot"></span><span id="presenceText">waiting</span></span>
-  <button class="chip" id="exportBtn" type="button"
-          title="Download the machine file (project's target format)">Export</button>
-  <button class="chip" id="endBtn" type="button">End session</button>
-</div>
 <div id="main">
   <aside id="panel" class="side">
     <div class="sideResizer" id="panelResizer" title="Drag to resize"></div>
@@ -483,6 +549,13 @@
     <div id="chat" class="sideBody"></div>
     <div id="composer">
       <div id="pills"></div>
+      <!-- agent connection (server ArtifactState.presence). Shown only when no
+           agent is listening; connected needs no badge, and working already
+           shows the thinking bubble in the chat. -->
+      <div id="presence" class="waiting"
+           title="Ask your agent to run artifact poll to start listening">
+        <span class="dot"></span><span id="presenceText">Agent not connected</span>
+      </div>
       <div id="inputWrap">
         <textarea id="input" placeholder="Tell the agent what to change…"></textarea>
         <button id="send" type="button" title="Send to agent" aria-label="Send to agent">
@@ -490,11 +563,27 @@
                aria-hidden="true"><path d="M8 1.5 2.2 7.3l1.06 1.06L7 4.62V14.5h2V4.62l3.74 3.74 1.06-1.06L8 1.5z"/></svg>
         </button>
       </div>
-      <div id="presenceBanner">Agent is not listening — ask it to run
-        <code>artifact poll</code>.</div>
     </div>
   </aside>
+  <div id="center">
+  <div id="centerBar" class="colHead">
+    <button class="collapseBtn centerToggle" id="panelToggleCenter" type="button"
+            title="Expand conversation"></button>
+    <button id="fileMenuBtn" type="button" title="File" aria-haspopup="menu">
+      <span class="brand" id="brand">Digitizing Artifact</span>
+      <span class="fileChev"></span>
+    </button>
+    <div class="spacer"></div>
+    <button class="collapseBtn centerToggle settingsBtn" id="settingsBtnCenter" type="button"
+            title="Settings" aria-haspopup="menu"></button>
+    <button class="collapseBtn centerToggle" id="inspectToggleCenter" type="button"
+            title="Expand panels"></button>
+    <!-- menu actions; hidden, their handlers are reused by the file menu -->
+    <button id="exportBtn" type="button" hidden>Export</button>
+    <button id="endBtn" type="button" hidden>End session</button>
+  </div>
   <div id="canvasWrap">
+    <canvas id="gridCanvas"></canvas>
     <canvas id="glCanvas"></canvas>
     <canvas id="realCanvas"></canvas>
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -512,7 +601,6 @@
               title="Select and transform (V) — drag to move, corners to scale">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"
              aria-hidden="true"><path d="M3 1.5 L12.5 8.6 L8.2 9.3 L10.6 14 L8.8 14.9 L6.4 10.2 L3 13 Z"/></svg>
-        <span class="kbd">V</span>
       </button>
       <button class="tool" id="toolNode" type="button"
               title="Edit nodes, rungs, and handles (A)">
@@ -523,7 +611,6 @@
           <rect x="12" y="10.5" width="3" height="3" fill="currentColor" stroke="none"/>
           <rect x="6.6" y="4.6" width="2.8" height="2.8" fill="currentColor" stroke="none"/>
         </svg>
-        <span class="kbd">A</span>
       </button>
       <button class="tool" id="toolPen" type="button"
               title="Pen (P) — click to place points; click the first point to close as a fill, Enter finishes a running stitch, Esc cancels">
@@ -532,7 +619,6 @@
           <path d="M10.8 1.6 L14.4 5.2 L5.6 14 L1.5 14.5 L2 10.4 Z"/>
           <path d="M8.9 3.5 L12.5 7.1"/>
         </svg>
-        <span class="kbd">P</span>
       </button>
       <button class="tool" id="toolKnife" type="button"
               title="Knife (K) — drag across shapes to cut them apart; or click points for a multi-segment cut, then Enter (or click the last point again). Shift snaps to 45°, Esc cancels. Cuts the selection, or everything visible under the line when nothing is selected">
@@ -541,7 +627,6 @@
           <path d="M2 14 L9.2 6.8 L13.6 2.4 C14.6 4.6 13.4 7.6 10.6 8.2 L4 14.4 Z"/>
           <path d="M9.2 6.8 L10.6 8.2"/>
         </svg>
-        <span class="kbd">K</span>
       </button>
       <button class="tool" id="toolPan" type="button"
               title="Pan (H) — drag to move the view; hold Space for a temporary pan with any tool">
@@ -552,7 +637,6 @@
                    V9.4 c0 3-1.8 5-4.4 5 -2.2 0 -3.4-1.2-4.6-3.6
                    l-1-2 a1 1 0 0 1 1.7-1 l1.3 1.6"/>
         </svg>
-        <span class="kbd">H</span>
       </button>
       <span class="tbSep"></span>
       <div id="viewModes" role="group" aria-label="View mode">
@@ -626,9 +710,12 @@
       </div>
     </div>
   </div>
+  </div><!-- #center -->
   <aside id="inspect" class="side">
     <div class="sideResizer" id="inspectResizer" title="Drag to resize"></div>
     <div class="sideHead">
+      <button class="collapseBtn settingsBtn" id="settingsBtn" type="button"
+              title="Settings" aria-haspopup="menu"></button>
       <button class="collapseBtn" id="inspectToggle" type="button"
               title="Collapse panels">»</button></div>
     <div id="panelStack" class="sideBody">
@@ -659,6 +746,13 @@
       </div>
     </div>
   </aside>
+</div>
+<div id="themeOverlay" role="dialog" aria-modal="true" aria-labelledby="themeTitle">
+  <div id="themeCard">
+    <div class="themeHead"><h1 id="themeTitle">Theme</h1>
+      <button id="themeClose" type="button" class="collapseBtn" title="Close" aria-label="Close"></button></div>
+    <div id="themeList"></div>
+  </div>
 </div>
 <div id="endedOverlay"><div class="card">
   <h1>Session ended</h1><p>Return to your agent to continue.</p>
@@ -1049,8 +1143,21 @@ function nearestOnPoly(pts, x, y) {
 const ICONS = {
   "eye": '<path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0"/><path d="M21 12c-2.4 4 -5.4 6 -9 6c-3.6 0 -6.6 -2 -9 -6c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6"/>',
   "eye-off": '<path d="M10.585 10.587a2 2 0 0 0 2.829 2.828"/><path d="M16.681 16.673a8.717 8.717 0 0 1 -4.681 1.327c-3.6 0 -6.6 -2 -9 -6c1.272 -2.12 2.712 -3.678 4.32 -4.674m2.86 -1.146a9.055 9.055 0 0 1 1.82 -.18c3.6 0 6.6 2 9 6c-.666 1.11 -1.379 2.067 -2.138 2.87"/><path d="M3 3l18 18"/>',
+  "chevron-down": '<path d="M6 9l6 6l6 -6"/>',
+  "x": '<path d="M18 6l-12 12"/><path d="M6 6l12 12"/>',
+  "settings": '<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/>',
+  "layout-sidebar": '<path d="M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2l0 -12"/><path d="M9 4l0 16"/>',
+  "layout-sidebar-right": '<path d="M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2l0 -12"/><path d="M15 4l0 16"/>',
   "alert-triangle": '<path d="M12 9v4"/><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0"/><path d="M12 16h.01"/>',
 };
+/* a theme token as a canvas colour (canvases can't use CSS vars) */
+function tokenRgba(name, alpha) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const m = /^#([0-9a-f]{6})$/i.exec(v);
+  if (!m) return v || "transparent";
+  const n = parseInt(m[1], 16);
+  return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
 function icon(name, extraClass = "") {
   return `<svg class="ic${extraClass ? " " + extraClass : ""}" viewBox="0 0 24 24" ` +
     `fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ` +
@@ -1199,6 +1306,7 @@ async function fetchTier2() {
     renderPlanLayer();
     renderDensity();                   // heat overlay tracks the fresh plan
     renderOverview();                  // stitch count + block colors just landed
+    drawRulers();                      // ruler 0,0 follows the stitch bounds
   } catch (e) {
     if (gen === tier2Gen) {
       setPlanError("Could not reach the artifact server.",
@@ -1982,10 +2090,10 @@ function lightDebugPanel() {
   if (el) return el;
   el = document.createElement("div");
   el.id = "lightDebug";
-  el.style.cssText = "position:absolute;right:12px;top:12px;z-index:30;" +
-    "background:rgba(20,22,27,.94);color:#e6e8ee;border:1px solid #3a3f4b;" +
-    "border-radius:8px;padding:10px 12px;font:12px/1.4 system-ui,sans-serif;" +
-    "width:250px;box-shadow:0 6px 24px rgba(0,0,0,.4)";
+  el.style.cssText = "position:absolute;right:var(--sp-3);top:var(--sp-3);z-index:30;" +
+    "background:var(--raised);color:var(--text);border-radius:var(--r-md);" +
+    "corner-shape:squircle;padding:var(--sp-3);font-size:var(--fs-sm);line-height:1.4;" +
+    "width:250px;box-shadow:var(--shadow-pop);animation:ds-pop var(--dur-2) var(--ease-spring)";
   const sliders = [
     ["keyAz", "Key azimuth °", 0, 360, 1], ["keyEl", "Key elevation °", 5, 90, 1],
     ["fillAz", "Fill azimuth °", 0, 360, 1], ["fillEl", "Fill elevation °", 5, 90, 1],
@@ -1993,21 +2101,21 @@ function lightDebugPanel() {
     ["fill", "Fill strength", 0, 1, 0.01], ["spec", "Highlight ×", 0, 3, 0.05],
   ];
   el.innerHTML = '<div style="display:flex;justify-content:space-between;' +
-    'align-items:center;margin-bottom:6px"><b>Lighting debug</b>' +
+    'align-items:center;margin-bottom:var(--sp-2)"><b>Lighting debug</b>' +
     '<span style="opacity:.6">Shift+L</span></div>' +
     sliders.map(([k, label, lo, hi, st]) =>
-      `<label style="display:block;margin:4px 0">${label} ` +
+      `<label style="display:block;margin:var(--sp-1) 0">${label} ` +
       `<span data-v="${k}" style="float:right;font-variant-numeric:tabular-nums"></span>` +
       `<input type="range" data-k="${k}" min="${lo}" max="${hi}" step="${st}" ` +
       `style="width:100%"></label>`).join("") +
-    '<label style="display:block;margin-top:6px"><input type="checkbox" data-c="overhead"> ' +
+    '<label style="display:block;margin-top:var(--sp-2)"><input type="checkbox" data-c="overhead"> ' +
     'Overhead (direction-free)</label>' +
     '<label style="display:block"><input type="checkbox" data-c="shadowFollows"> ' +
     'Shadow follows key light</label>' +
-    '<div style="display:flex;gap:6px;margin-top:8px">' +
+    '<div style="display:flex;gap:var(--sp-2);margin-top:var(--sp-2)">' +
     '<button data-a="reset" style="flex:1">Reset</button>' +
     '<button data-a="copy" style="flex:1">Copy values</button></div>' +
-    '<pre data-out style="margin:8px 0 0;white-space:pre-wrap;word-break:break-all;font-size:11px;' +
+    '<pre data-out style="margin:var(--sp-2) 0 0;white-space:pre-wrap;word-break:break-all;font-size:var(--fs-xs);' +
     'opacity:.8"></pre>';
   const sync = () => {
     for (const inp of el.querySelectorAll("[data-k]")) {
@@ -2225,8 +2333,34 @@ function rulerStepMm(pxPerMm) {
     if (pxPerMm * minor >= 5) return [minor, major];
   return [100, 500];
 }
+/* Ruler 0,0 = the machine file's origin, so ruler readings match the
+   exported coordinates. Engine rule (lib/output.py get_origin): a global
+   "origin" command if the design has one (design.origin, read server-side),
+   else the centre of the bounding box of ALL stitches (StitchPlan /
+   ColorBlock.bounding_box). The stitch plan is used only when it is the
+   whole design (no layers hidden); before it loads, the artwork's bounding
+   box centre stands in. */
+function rulerOrigin() {
+  if (design && design.origin) return { x: design.origin[0], y: design.origin[1], src: "origin command" };
+  if (stitchData && !hiddenIds.size && stitchData.blocks.length) {
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    for (const b of stitchData.blocks)
+      for (const path of b.paths)
+        for (const [x, y] of path) {
+          if (x < minx) minx = x; if (x > maxx) maxx = x;
+          if (y < miny) miny = y; if (y > maxy) maxy = y;
+        }
+    return { x: (minx + maxx) / 2, y: (miny + maxy) / 2, src: "stitch bounds" };
+  }
+  if (design && design.objects.length) {
+    const bb = selectionBBox(design.objects);
+    if (isFinite(bb.minx)) return { x: (bb.minx + bb.maxx) / 2, y: (bb.miny + bb.maxy) / 2, src: "artwork bounds" };
+  }
+  return { x: 0, y: 0, src: "page" };
+}
 function drawRulers() {
   const rt = $("rulerTop"), rl = $("rulerLeft"), rc = $("rulerCorner");
+  rc.title = `Rulers: 0,0 = export origin (${rulerOrigin().src})`;
   const on = rulersOn && !!design && !!baseVb;
   rt.style.display = rl.style.display = rc.style.display = on ? "block" : "none";
   if (!on) return;
@@ -2241,14 +2375,15 @@ function drawRulers() {
     if (cv.height !== Math.round(h * dpr)) cv.height = Math.round(h * dpr);
     const ctx = cv.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "rgba(20,22,26,.95)";
+    ctx.fillStyle = tokenRgba("--bg", 0.95);
     ctx.fillRect(0, 0, w, h);
-    ctx.strokeStyle = "rgba(255,255,255,.25)";
-    ctx.fillStyle = "#9aa1b0";
-    ctx.font = "9px ui-monospace, monospace";
+    ctx.strokeStyle = tokenRgba("--text", 0.25);
+    ctx.fillStyle = tokenRgba("--muted", 1);
+    ctx.font = `${getComputedStyle(document.documentElement).getPropertyValue("--fs-2xs").trim() || "9px"} ui-monospace, monospace`;
     ctx.beginPath();
     // ruler canvases sit 18px in from the wrap origin — offset accordingly
-    const off = horiz ? ox - 18 : oy - 18;
+    const o = rulerOrigin();                // 0,0 = the export origin
+    const off = (horiz ? ox + o.x * s : oy + o.y * s) - 18;
     const span = horiz ? w : h;
     const mm0 = Math.floor((0 - off) / pxPerMm / minor) * minor;
     const mm1 = (span - off) / pxPerMm;
@@ -2276,24 +2411,48 @@ function drawRulers() {
   draw(rt, true);
   draw(rl, false);
 }
-let gridLayer = null;
+/* Grid: drawn on its own canvas under the drawing, at most once per frame.
+   It used to delete and re-create ~200 SVG <line>s inside the main
+   drawing on every pan/zoom event (trackpads send several per frame),
+   which also invalidated the whole SVG each time. Same colors as before:
+   minor = text colour at 5 %, major 11 %, 1 device px (theme-aware). */
+let gridRaf = null;
 function renderGrid() {
-  if (!gridLayer) return;
-  gridLayer.textContent = "";
+  if (gridRaf) return;
+  gridRaf = requestAnimationFrame(() => { gridRaf = null; drawGrid(); });
+}
+function drawGrid() {
+  const gc = $("gridCanvas");
+  const rect = $("canvasWrap").getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const pw = Math.round(rect.width * dpr), ph = Math.round(rect.height * dpr);
+  if (gc.width !== pw) gc.width = pw;
+  if (gc.height !== ph) gc.height = ph;
+  const ctx = gc.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, pw, ph);
   if (!gridOn || !design || !baseVb) return;
-  const { s } = viewTransform();
+  const { s, ox, oy } = viewTransform();
   const upm = unitsPerMm();
   const [minor, major] = rulerStepMm(s * upm);
   const step = minor * upm;
+  const majEvery = Math.round(major / minor);
   const x0 = Math.floor(vb.x / step) * step, x1 = vb.x + vb.w;
   const y0 = Math.floor(vb.y / step) * step, y1 = vb.y + vb.h;
-  const majEvery = Math.round(major / minor);
-  for (let x = x0, i = Math.round(x0 / step); x <= x1; x += step, i++)
-    el("line", { x1: x, y1: vb.y, x2: x, y2: y1,
-                 class: "gridLine" + (i % majEvery === 0 ? " major" : "") }, gridLayer);
-  for (let y = y0, i = Math.round(y0 / step); y <= y1; y += step, i++)
-    el("line", { x1: vb.x, y1: y, x2: x1, y2: y,
-                 class: "gridLine" + (i % majEvery === 0 ? " major" : "") }, gridLayer);
+  const paths = [new Path2D(), new Path2D()];       // [minor, major]
+  for (let x = x0, i = Math.round(x0 / step); x <= x1; x += step, i++) {
+    const X = Math.round((x * s + ox) * dpr) + 0.5;
+    const path = paths[i % majEvery === 0 ? 1 : 0];
+    path.moveTo(X, 0); path.lineTo(X, ph);
+  }
+  for (let y = y0, i = Math.round(y0 / step); y <= y1; y += step, i++) {
+    const Y = Math.round((y * s + oy) * dpr) + 0.5;
+    const path = paths[i % majEvery === 0 ? 1 : 0];
+    path.moveTo(0, Y); path.lineTo(pw, Y);
+  }
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = tokenRgba("--text", 0.05); ctx.stroke(paths[0]);
+  ctx.strokeStyle = tokenRgba("--text", 0.11); ctx.stroke(paths[1]);
 }
 let guideLayer = null;
 function renderGuides() {
@@ -2563,7 +2722,10 @@ function px(units) {                          // screen px → svg units at curr
 /* Illustrator wheel semantics: plain scroll pans, shift+scroll pans
    horizontally, option/alt+scroll zooms at the cursor. ctrl+wheel is kept as
    zoom too so trackpad pinch (which browsers report as ctrl+wheel) works. */
-canvas.addEventListener("wheel", (ev) => {
+// on the whole canvas area (rulers, toolbar gaps included), not just the
+// drawing surface: a swipe starting over a ruler used to fall through to
+// the browser and navigate back
+$("canvasWrap").addEventListener("wheel", (ev) => {
   ev.preventDefault();
   const rect = canvas.getBoundingClientRect();
   if (ev.altKey || ev.ctrlKey || ev.metaKey) {
@@ -2962,7 +3124,6 @@ function renderAll() {
     items.push({ label: "Fit to window", run: () => { vb = { ...baseVb }; setViewBox(); } });
     showContextMenu(ev, items);
   });
-  gridLayer = el("g", {}, canvas);
   refLayer = el("g", {}, canvas);   // reference art under the design, over grid
   artworkLayer = el("g", { class: "artwork" }, canvas);
   planLayer = el("g", { class: "planLayer" }, canvas);
@@ -3224,7 +3385,7 @@ function renderInspect(objs) {
   });
   const kind = document.createElement("div");
   kind.className = "objKind";
-  kind.textContent = `${o.kind} · ${humanizeType(o.stitch_type)}`;
+  kind.textContent = `${sentenceCase(o.kind)} · ${humanizeType(o.stitch_type)}`;
   body.append(title, kind);
   if (usesIgnoredMethod(o)) {
     const warn = document.createElement("div");
@@ -3786,8 +3947,11 @@ function showContextMenu(ev, items) {
     m.appendChild(row);
   }
   document.body.appendChild(m);
-  m.style.left = Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8) + "px";
-  m.style.top = Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8) + "px";
+  const left = Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8);
+  const top = Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8);
+  m.style.left = left + "px";
+  m.style.top = top + "px";
+  m.style.transformOrigin = `${ev.clientX - left}px ${ev.clientY - top}px`;   // grow from the click
   ctxMenu = m;
   setTimeout(() => document.addEventListener("pointerdown", _ctxOutside, true), 0);
 }
@@ -4494,6 +4658,130 @@ function showGateBanner(gate) {
   }
   $("gateBanner").classList.add("show");
 }
+/* ---------- settings menu + theme picker ---------- */
+const THEME_LABEL = { default: "Default dark" };
+const DEFAULT_SWATCH_VARS = ["--bg", "--panel", "--canvas", "--text", "--accent",
+                             "--start", "--end", "--warn", "--rail", "--rung"];
+function themeSwatches(id) {
+  if (THEMES[id]) return DEFAULT_SWATCH_VARS.map(k => THEMES[id].vars[k]);
+  // default = the :root values (read with any override removed)
+  const probe = document.createElement("div");
+  document.body.appendChild(probe);
+  const saved = document.documentElement.getAttribute("style");
+  document.documentElement.removeAttribute("style");
+  const cs = getComputedStyle(document.documentElement);
+  const out = DEFAULT_SWATCH_VARS.map(k => cs.getPropertyValue(k).trim());
+  if (saved) document.documentElement.setAttribute("style", saved);
+  probe.remove();
+  return out;
+}
+function setTheme(id) {
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (document.startViewTransition && !reduce &&
+      (document.documentElement.dataset.theme || "default") !== id) {
+    document.startViewTransition(() => setThemeNow(id));
+    return;
+  }
+  setThemeNow(id);
+}
+function setThemeNow(id) {
+  applyTheme(id);
+  try { localStorage.setItem("artifact-theme", id); } catch (e) { /* private */ }
+  // canvas-drawn chrome doesn't follow CSS vars on its own
+  if (typeof drawRulers === "function") drawRulers();
+  renderGrid();
+  renderPlanLayer();
+  renderThemeList();
+}
+function renderThemeList() {
+  const list = $("themeList");
+  list.textContent = "";
+  const current = document.documentElement.dataset.theme || "default";
+  for (const id of ["default", ...Object.keys(THEMES)]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "themeTile" + (id === current ? " on" : "");
+    const name = document.createElement("span");
+    name.textContent = THEMES[id] ? THEMES[id].label : THEME_LABEL[id];
+    const sw = document.createElement("span");
+    sw.className = "themeSw";
+    for (const c of themeSwatches(id)) {
+      const i = document.createElement("i");
+      i.style.background = c;
+      sw.appendChild(i);
+    }
+    b.append(name, sw);
+    b.addEventListener("click", () => {
+      setTheme(id);
+      const on = $("themeList").querySelector(".themeTile.on");
+      if (on) on.focus();
+    });
+    list.appendChild(b);
+  }
+}
+function openThemeModal() {
+  renderThemeList();
+  $("themeOverlay").classList.add("show");
+  const on = $("themeList").querySelector(".themeTile.on");
+  if (on) on.focus();
+}
+const closeThemeModal = () => $("themeOverlay").classList.remove("show");
+$("themeClose").innerHTML = icon("x");
+$("themeClose").addEventListener("click", closeThemeModal);
+$("themeOverlay").addEventListener("pointerdown", (ev) => {
+  if (ev.target === $("themeOverlay")) closeThemeModal();
+});
+// page-level: picking a theme rebuilds the tiles, so focus may be on <body>
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && $("themeOverlay").classList.contains("show")) {
+    ev.stopPropagation(); ev.preventDefault(); closeThemeModal();
+  }
+}, true);
+for (const id of ["settingsBtn", "settingsBtnCenter"]) {
+  const btn = $(id);
+  btn.innerHTML = icon("settings");
+  btn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const r = btn.getBoundingClientRect();
+    showContextMenu({ clientX: r.right - 190, clientY: r.bottom + 4,
+                      preventDefault() {}, stopPropagation() {} }, [
+      { label: "Theme…", run: openThemeModal },
+      { label: "Keyboard shortcuts", run: helpOpen },
+    ]);
+    ctxMenu.style.transformOrigin = "top right";   // grow from the gear
+  });
+}
+/* File menu: the chevron after the file name (Claude-app style) holds
+   Export and End session. A second click on the button closes it — the
+   menu's outside-click handler would otherwise close it on pointerdown and
+   the click would reopen it, so remember whether it was open first. */
+$("fileMenuBtn").querySelector(".fileChev").innerHTML = icon("chevron-down");
+let fileMenuWasOpen = false;
+window.addEventListener("pointerdown", (ev) => {
+  if ($("fileMenuBtn").contains(ev.target))
+    fileMenuWasOpen = !!(ctxMenu && ctxMenu.dataset.owner === "file");
+}, true);
+$("fileMenuBtn").addEventListener("click", () => {
+  const btn = $("fileMenuBtn");
+  if (fileMenuWasOpen) { closeContextMenu(); fileMenuWasOpen = false; return; }
+  const r = btn.getBoundingClientRect();
+  showContextMenu({ clientX: r.left, clientY: r.bottom + 4,
+                    preventDefault() {}, stopPropagation() {} }, [
+    { label: "Change design…", run: () => { window.location.href = "/sessions"; } },
+    "-",
+    { label: "Export machine file", run: () => $("exportBtn").click() },
+    "-",
+    { label: "End session", danger: true, run: () => $("endBtn").click() },
+  ]);
+  ctxMenu.dataset.owner = "file";
+  btn.classList.add("open");
+  const obs = new MutationObserver(() => {
+    if (!document.body.contains(ctxMenu) || ctxMenu.dataset.owner !== "file") {
+      btn.classList.remove("open"); obs.disconnect();
+    }
+  });
+  obs.observe(document.body, { childList: true });
+});
 $("exportBtn").onclick = () => {
   // navigation (not fetch) so the browser handles it as a download
   window.location.href = api("/export");
@@ -4515,11 +4803,39 @@ $("endBtn").onclick = async () => {
 $("gateEndAnyway").onclick = endSession;
 $("gateDismiss").onclick = () => $("gateBanner").classList.remove("show");
 /* ---------- collapsible sidebars ---------- */
-const CHEVRONS = { panel: ["«", "»"], inspect: ["»", "«"] };  // [expanded, collapsed]
+/* dock-panel icons (a box with a bar on the panel's side), the same in
+   both states — as in most current apps; the tooltip names the action */
+const CHEVRONS = { panel: ["layout-sidebar", "layout-sidebar"],           // [expanded, collapsed]
+                   inspect: ["layout-sidebar-right", "layout-sidebar-right"] };
+/* motion helper: Web Animations on transform/opacity/flex only */
+const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const EASE_OUT = "cubic-bezier(.2, .8, .2, 1)", EASE_SPRING = "cubic-bezier(.34, 1.4, .64, 1)";
+/* Sidebar toggle with motion. The column slides toward its edge and fades
+   out, THEN collapses; expanding shows it first, then slides it in. The
+   canvas therefore resizes once (start or end) instead of every frame —
+   animating width would re-layout and redraw the canvas, rulers and plan
+   on every frame. */
+function toggleSidebar(id, collapsed) {
+  const side = $(id);
+  if (reducedMotion() || !side.animate) { setCollapsed(id, collapsed); return; }
+  const dx = id === "panel" ? -16 : 16;
+  if (collapsed) {
+    side.animate([{ opacity: 1, transform: "none" },
+                  { opacity: 0, transform: `translateX(${dx}px)` }],
+                 { duration: 140, easing: EASE_OUT })
+      .finished.then(() => setCollapsed(id, true), () => setCollapsed(id, true));
+  } else {
+    setCollapsed(id, false);
+    side.animate([{ opacity: 0, transform: `translateX(${dx}px)` },
+                  { opacity: 1, transform: "none" }],
+                 { duration: 260, easing: EASE_SPRING });
+  }
+}
 function setCollapsed(id, collapsed) {
   const side = $(id);
   if (!_lastCanvasRect) preserveScaleOnResize();   // baseline before the jump
   side.classList.toggle("collapsed", collapsed);
+  document.body.classList.toggle(id + "Collapsed", collapsed);
   // a resized sidebar carries an inline width that would beat the
   // .collapsed CSS rule — park it while collapsed, restore on expand
   if (collapsed && side.style.width) {
@@ -4530,7 +4846,7 @@ function setCollapsed(id, collapsed) {
     delete side.dataset.width;
   }
   const btn = $(id + "Toggle");
-  btn.textContent = CHEVRONS[id][collapsed ? 1 : 0];
+  btn.innerHTML = icon(CHEVRONS[id][collapsed ? 1 : 0]);
   btn.title = (collapsed ? "Expand " : "Collapse ") +
               (id === "inspect" ? "inspector" : "conversation");
   try { localStorage.setItem("artifact-collapse-" + id, collapsed ? "1" : ""); }
@@ -4540,13 +4856,14 @@ function setCollapsed(id, collapsed) {
   if (typeof drawRulers === "function") { drawRulers(); renderGrid(); }
 }
 for (const id of ["inspect", "panel"]) {
+  $(id + "Toggle").innerHTML = icon(CHEVRONS[id][0]);   // replaced on collapse
   $(id + "Toggle").addEventListener("click", (ev) => {
     ev.stopPropagation();
-    setCollapsed(id, !$(id).classList.contains("collapsed"));
+    toggleSidebar(id, !$(id).classList.contains("collapsed"));
   });
-  $(id).addEventListener("click", () => {   // collapsed rail is one big reopen target
-    if ($(id).classList.contains("collapsed")) setCollapsed(id, false);
-  });
+  const reopen = $(id + "ToggleCenter");      // shown in the middle header while collapsed
+  reopen.innerHTML = icon(CHEVRONS[id][0]);
+  reopen.addEventListener("click", (ev) => { ev.stopPropagation(); toggleSidebar(id, false); });
   try {
     if (localStorage.getItem("artifact-collapse-" + id) === "1") setCollapsed(id, true);
   } catch (e) { /* private mode */ }
@@ -4595,6 +4912,10 @@ for (const b of document.querySelectorAll("#viewModes button"))
 function connectSSE() {
   const es = new EventSource(`/events/${KEY}`);
   es.addEventListener("chat-sync", (ev) => {
+    // a full rebuild (connect/reconnect) shouldn't replay every message's
+    // entrance; only messages that arrive afterwards animate
+    $("chat").classList.remove("live");
+    requestAnimationFrame(() => requestAnimationFrame(() => $("chat").classList.add("live")));
     $("chat").textContent = "";
     workingBubble = null;      // chat rebuild orphans the bubble node
     const chat = JSON.parse(ev.data).chat;
@@ -4618,8 +4939,9 @@ function connectSSE() {
     const state = JSON.parse(ev.data).state;
     lastPresence = state;
     $("presence").className = state;
-    $("presenceText").textContent = state;
-    $("presenceBanner").classList.toggle("show", state === "waiting");
+    $("presenceText").textContent = {
+      listening: "Agent connected", working: "Agent working…",
+      waiting: "Agent not connected" }[state] || state;
     setWorking(state === "working");
   });
   es.addEventListener("reload", requestReload);   // deferred, never dropped
@@ -4631,58 +4953,142 @@ function connectSSE() {
 for (const pnl of ["overview", "inspect", "layers", "colors", "reference", "history"]) {
   const root = document.querySelector(`[data-panel="${pnl}"]`);
   root.querySelector(".panelHead").addEventListener("click", () => {
-    root.classList.toggle("closed");
-    try {
-      localStorage.setItem("artifact-panel-" + pnl,
-                           root.classList.contains("closed") ? "1" : "0");
-    } catch (e) { /* private mode */ }
-    if (pnl === "history" && !root.classList.contains("closed")) renderHistory();
+    animatePanelLayout(() => {
+      root.classList.toggle("closed");
+      try {
+        localStorage.setItem("artifact-panel-" + pnl,
+                             root.classList.contains("closed") ? "1" : "0");
+      } catch (e) { /* private mode */ }
+      if (pnl === "history" && !root.classList.contains("closed")) renderHistory();
+      layoutPanels();
+    }, root);
   });
   try {
     const saved = localStorage.getItem("artifact-panel-" + pnl);
     if (saved === "1") root.classList.add("closed");
     else if (saved === "0") root.classList.remove("closed");
   } catch (e) { /* private mode */ }
-  setupPanelHeight(pnl, root);
+  setupPanelGrip(pnl, root);
+  const chev = document.createElement("span");
+  chev.className = "panelChev";
+  chev.innerHTML = icon("chevron-down");
+  root.querySelector(".panelHead").appendChild(chev);
 }
-/* Panel heights: each open panel has a fixed body height (content scrolls
-   inside) set by dragging the grip below it; double-click the grip to
-   reset. Remembered per panel in this browser. */
-function setupPanelHeight(pnl, root) {
-  const DEFAULT_H = { overview: 190, inspect: 300, layers: 300, colors: 160,
-                      reference: 170, history: 240 };
-  const MIN_H = 60, MAX_H = 1200;
-  const body = root.querySelector(".panelBody");
-  const key = "artifact-panel-h-" + pnl;
-  const apply = (h) => body.style.setProperty("--ph", Math.round(h) + "px");
-  let h = DEFAULT_H[pnl] || 200;
-  try { const v = +localStorage.getItem(key); if (v >= MIN_H) h = v; } catch (e) { /* defaults */ }
-  apply(h);
+/* Panel layout: every panel stays in view. Open panels share the column's
+   height in proportion to a weight (--pw); each grip moves the boundary
+   with the next open panel (VS Code split panes), double-click evens the
+   pair. Weights persist per panel in this browser. Replaces fixed per-panel
+   heights, which pushed panels below the fold of a scrolling stack. */
+const PANEL_IDS = ["overview", "inspect", "layers", "colors", "reference", "history"];
+const PANEL_DEFAULT_W = { overview: 0.7, inspect: 1.3, layers: 1.6, colors: 0.7,
+                          reference: 0.7, history: 1 };
+const PANEL_MIN_PX = 96;          // matches .panel:not(.closed) min-height
+const panelRoot = (id) => document.querySelector(`[data-panel="${id}"]`);
+function panelWeight(id) {
+  try {
+    const v = parseFloat(localStorage.getItem("artifact-panel-w-" + id));
+    if (v > 0) return v;
+  } catch (e) { /* defaults */ }
+  return PANEL_DEFAULT_W[id] || 1;
+}
+function setPanelWeight(id, w) {
+  panelRoot(id).style.setProperty("--pw", w);
+  try { localStorage.setItem("artifact-panel-w-" + id, String(+w.toFixed(4))); }
+  catch (e) { /* private */ }
+}
+function nextOpenPanel(root) {
+  for (let n = root.nextElementSibling; n; n = n.nextElementSibling)
+    if (n.classList.contains("panel") && !n.classList.contains("closed")) return n;
+  return null;
+}
+/* Accordion motion (FLIP on flex-basis): measure every panel, apply the
+   change, then animate each panel from its old to its new height with the
+   same easing, so the heights always sum to the column (nothing jumps or
+   overflows mid-animation). Only the sidebar re-lays out; the canvas is
+   untouched. The opened panel's content fades in. */
+function animatePanelLayout(mutate, toggled) {
+  const roots = PANEL_IDS.map(panelRoot);
+  const before = roots.map(r => r.getBoundingClientRect().height);
+  mutate();
+  if (reducedMotion() || !document.body.animate) return;
+  const after = roots.map(r => r.getBoundingClientRect().height);
+  roots.forEach((r, i) => {
+    if (Math.abs(before[i] - after[i]) < 1) return;
+    r.animate([{ flexGrow: 0, flexBasis: before[i] + "px", minHeight: "0px" },
+               { flexGrow: 0, flexBasis: after[i] + "px", minHeight: "0px" }],
+              { duration: 240, easing: EASE_OUT });
+  });
+  if (toggled && !toggled.classList.contains("closed"))
+    toggled.querySelector(".panelBody").animate(
+      [{ opacity: 0, transform: "translateY(-4px)" }, { opacity: 1, transform: "none" }],
+      { duration: 240, easing: EASE_OUT });
+}
+function layoutPanels() {
+  // flex-grow values that sum to < 1 only claim that FRACTION of the free
+  // space (CSS flexbox) — a lone open panel with a saved weight of 0.85 left
+  // a 91 px gap. Scale the open panels' weights to a mean of 1 (sum >= 1).
+  const openIds = PANEL_IDS.filter(id => !panelRoot(id).classList.contains("closed"));
+  const mean = openIds.reduce((a, id) => a + panelWeight(id), 0) / (openIds.length || 1) || 1;
+  for (const id of PANEL_IDS) {
+    const r = panelRoot(id);
+    r.style.setProperty("--pw", panelWeight(id) / mean);
+    r.classList.toggle("hasNext", !r.classList.contains("closed") && !!nextOpenPanel(r));
+  }
+}
+/* Make the weights describe what's on screen: a panel held at its minimum
+   height renders taller than its weight says, so re-weighting a pair
+   against stale weights shifted every other panel too (measured: a 30 px
+   drag moved Layers 36 px, Colors 25 px and two other panels). Weights are
+   normalised to a mean of 1 so a panel opened later (default ~1) gets a
+   fair share. */
+function snapshotPanelWeights() {
+  const open = PANEL_IDS.map(panelRoot).filter(r => !r.classList.contains("closed"));
+  const hs = open.map(r => r.getBoundingClientRect().height);
+  const mean = hs.reduce((a, b) => a + b, 0) / (hs.length || 1) || 1;
+  open.forEach((r, i) => setPanelWeight(r.dataset.panel, hs[i] / mean));
+  return mean;
+}
+function setupPanelGrip(pnl, root) {
   const grip = document.createElement("div");
   grip.className = "panelGrip";
-  grip.title = "Drag to resize · double-click to reset";
-  body.after(grip);
-  const save = (v) => { try { localStorage.setItem(key, String(Math.round(v))); } catch (e) { /* private */ } };
+  grip.title = "Drag to resize · double-click to even out";
+  root.querySelector(".panelBody").after(grip);
   grip.addEventListener("pointerdown", (ev) => {
+    const next = nextOpenPanel(root);
+    if (!next || notPrimary(ev)) return;
     ev.preventDefault();
-    const y0 = ev.clientY, h0 = body.getBoundingClientRect().height;
+    const idB = next.dataset.panel;
+    const hA = root.getBoundingClientRect().height, hB = next.getBoundingClientRect().height;
+    snapshotPanelWeights();
+    const wSum = panelWeight(pnl) + panelWeight(idB), hSum = hA + hB, y0 = ev.clientY;
     grip.classList.add("drag");
     grip.setPointerCapture(ev.pointerId);
-    const move = (e) => apply(Math.max(MIN_H, Math.min(MAX_H, h0 + e.clientY - y0)));
+    const move = (e) => {
+      if (e.buttons === 0) { up(); return; }
+      const a = Math.max(PANEL_MIN_PX, Math.min(hSum - PANEL_MIN_PX, hA + e.clientY - y0));
+      root.style.setProperty("--pw", wSum * a / hSum);
+      next.style.setProperty("--pw", wSum * (hSum - a) / hSum);
+    };
     const up = () => {
       grip.classList.remove("drag");
       grip.removeEventListener("pointermove", move);
       grip.removeEventListener("pointerup", up);
-      save(body.getBoundingClientRect().height);
+      setPanelWeight(pnl, parseFloat(root.style.getPropertyValue("--pw")));
+      setPanelWeight(idB, parseFloat(next.style.getPropertyValue("--pw")));
     };
     grip.addEventListener("pointermove", move);
     grip.addEventListener("pointerup", up);
   });
   grip.addEventListener("dblclick", () => {
-    try { localStorage.removeItem(key); } catch (e) { /* private */ }
-    apply(DEFAULT_H[pnl] || 200);
+    const next = nextOpenPanel(root);
+    if (!next) return;
+    snapshotPanelWeights();
+    const half = (panelWeight(pnl) + panelWeight(next.dataset.panel)) / 2;
+    setPanelWeight(pnl, half);
+    setPanelWeight(next.dataset.panel, half);
   });
 }
+layoutPanels();   // after the constants above exist (TDZ)
 
 function renderOverview() {
   const body = $("overviewBody");
@@ -4699,7 +5105,12 @@ function renderOverview() {
     r.append(kk, vv);
     body.appendChild(r);
   };
-  row("Size", `${design.width || "?"} × ${design.height || "?"}`.replaceAll("mm", " mm"));
+  // display to 0.1 mm (the SVG attr may carry 4+ decimals); unitless sizes pass through
+  const dim = (v) => {
+    const m = /^([\d.]+)\s*mm$/.exec(v || "");
+    return m ? `${+parseFloat(m[1]).toFixed(1)} mm` : (v || "?");
+  };
+  row("Size", `${dim(design.width)} × ${dim(design.height)}`);
   const counts = {};
   for (const o of design.objects) counts[o.kind] = (counts[o.kind] || 0) + 1;
   row("Objects", Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(" · "));
@@ -4825,14 +5236,11 @@ function renderLayers() {
   const body = $("layersBody");
   body.textContent = "";
   if (!design) return;
-  design.objects.forEach((o, i) => {
+  design.objects.forEach((o) => {
     const r = document.createElement("div");
     r.className = "layerRow" + (selection.includes(o.id) ? " sel" : "");
     r.dataset.id = o.id;
     r.draggable = true;
-    const num = document.createElement("span");
-    num.className = "num";
-    num.textContent = i + 1;
     // editable swatch: recolors just this element (Colors panel rethreads
     // the whole thread group; this is the per-element complement)
     const sw = document.createElement("input");
@@ -4882,8 +5290,8 @@ function renderLayers() {
       warn.className = "warnBadge";
       warn.innerHTML = icon("alert-triangle");
       warn.title = ignoredMethodNote();
-      r.append(eye, num, sw, nm, warn, kd);
-    } else r.append(eye, num, sw, nm, kd);   // visibility first, as in Illustrator
+      r.append(eye, sw, nm, warn, kd);
+    } else r.append(eye, sw, nm, kd);   // visibility first, as in Illustrator
     r.addEventListener("click", (ev) =>
       select(o.id, ev.shiftKey || ev.metaKey || ev.ctrlKey));
     r.addEventListener("contextmenu", (ev) =>
@@ -5325,7 +5733,6 @@ const HELP = [
 }
 const helpOpen = () => $("helpOverlay").classList.add("show");
 const helpClose = () => $("helpOverlay").classList.remove("show");
-$("helpBtn").onclick = helpOpen;
 $("helpClose").onclick = helpClose;
 $("helpOverlay").addEventListener("click", (ev) => {
   if (ev.target === $("helpOverlay")) helpClose();
