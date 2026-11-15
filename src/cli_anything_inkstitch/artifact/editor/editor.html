@@ -519,6 +519,9 @@
   #toast.show { animation: toast-in var(--dur-2) var(--ease-spring); }
   #presence.waiting { animation: ds-rise var(--dur-2) var(--ease-out); }
   #chat.live .msg { animation: ds-rise var(--dur-2) var(--ease-out); }
+  @keyframes bubble-pop { from { opacity: 0; transform: translateY(10px) scale(.85); } }
+  #chat.live .msg.human { transform-origin: 100% 100%;
+                          animation: bubble-pop var(--dur-3) var(--ease-spring); }
   /* press feedback */
   #toolbar .tool, .collapseBtn, #fileMenuBtn, .ctxItem, .themeTile, #send, .askOpt {
     transition: transform var(--dur-1) var(--ease-out), background-color var(--dur-1) var(--ease-out),
@@ -4219,6 +4222,30 @@ $("gateDismiss").onclick = () => $("gateBanner").classList.remove("show");
    both states — as in most current apps; the tooltip names the action */
 const CHEVRONS = { panel: ["layout-sidebar", "layout-sidebar"],           // [expanded, collapsed]
                    inspect: ["layout-sidebar-right", "layout-sidebar-right"] };
+/* motion helper: Web Animations on transform/opacity/flex only */
+const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const EASE_OUT = "cubic-bezier(.2, .8, .2, 1)", EASE_SPRING = "cubic-bezier(.34, 1.4, .64, 1)";
+/* Sidebar toggle with motion. The column slides toward its edge and fades
+   out, THEN collapses; expanding shows it first, then slides it in. The
+   canvas therefore resizes once (start or end) instead of every frame —
+   animating width would re-layout and redraw the canvas, rulers and plan
+   on every frame. */
+function toggleSidebar(id, collapsed) {
+  const side = $(id);
+  if (reducedMotion() || !side.animate) { setCollapsed(id, collapsed); return; }
+  const dx = id === "panel" ? -16 : 16;
+  if (collapsed) {
+    side.animate([{ opacity: 1, transform: "none" },
+                  { opacity: 0, transform: `translateX(${dx}px)` }],
+                 { duration: 140, easing: EASE_OUT })
+      .finished.then(() => setCollapsed(id, true), () => setCollapsed(id, true));
+  } else {
+    setCollapsed(id, false);
+    side.animate([{ opacity: 0, transform: `translateX(${dx}px)` },
+                  { opacity: 1, transform: "none" }],
+                 { duration: 260, easing: EASE_SPRING });
+  }
+}
 function setCollapsed(id, collapsed) {
   const side = $(id);
   if (!_lastCanvasRect) preserveScaleOnResize();   // baseline before the jump
@@ -4247,11 +4274,11 @@ for (const id of ["inspect", "panel"]) {
   $(id + "Toggle").innerHTML = icon(CHEVRONS[id][0]);   // replaced on collapse
   $(id + "Toggle").addEventListener("click", (ev) => {
     ev.stopPropagation();
-    setCollapsed(id, !$(id).classList.contains("collapsed"));
+    toggleSidebar(id, !$(id).classList.contains("collapsed"));
   });
   const reopen = $(id + "ToggleCenter");      // shown in the middle header while collapsed
   reopen.innerHTML = icon(CHEVRONS[id][0]);
-  reopen.addEventListener("click", (ev) => { ev.stopPropagation(); setCollapsed(id, false); });
+  reopen.addEventListener("click", (ev) => { ev.stopPropagation(); toggleSidebar(id, false); });
   try {
     if (localStorage.getItem("artifact-collapse-" + id) === "1") setCollapsed(id, true);
   } catch (e) { /* private mode */ }
@@ -4341,13 +4368,15 @@ function connectSSE() {
 for (const pnl of ["overview", "inspect", "layers", "colors", "reference", "history"]) {
   const root = document.querySelector(`[data-panel="${pnl}"]`);
   root.querySelector(".panelHead").addEventListener("click", () => {
-    root.classList.toggle("closed");
-    try {
-      localStorage.setItem("artifact-panel-" + pnl,
-                           root.classList.contains("closed") ? "1" : "0");
-    } catch (e) { /* private mode */ }
-    if (pnl === "history" && !root.classList.contains("closed")) renderHistory();
-    layoutPanels();
+    animatePanelLayout(() => {
+      root.classList.toggle("closed");
+      try {
+        localStorage.setItem("artifact-panel-" + pnl,
+                             root.classList.contains("closed") ? "1" : "0");
+      } catch (e) { /* private mode */ }
+      if (pnl === "history" && !root.classList.contains("closed")) renderHistory();
+      layoutPanels();
+    }, root);
   });
   try {
     const saved = localStorage.getItem("artifact-panel-" + pnl);
@@ -4387,10 +4416,37 @@ function nextOpenPanel(root) {
     if (n.classList.contains("panel") && !n.classList.contains("closed")) return n;
   return null;
 }
+/* Accordion motion (FLIP on flex-basis): measure every panel, apply the
+   change, then animate each panel from its old to its new height with the
+   same easing, so the heights always sum to the column (nothing jumps or
+   overflows mid-animation). Only the sidebar re-lays out; the canvas is
+   untouched. The opened panel's content fades in. */
+function animatePanelLayout(mutate, toggled) {
+  const roots = PANEL_IDS.map(panelRoot);
+  const before = roots.map(r => r.getBoundingClientRect().height);
+  mutate();
+  if (reducedMotion() || !document.body.animate) return;
+  const after = roots.map(r => r.getBoundingClientRect().height);
+  roots.forEach((r, i) => {
+    if (Math.abs(before[i] - after[i]) < 1) return;
+    r.animate([{ flexGrow: 0, flexBasis: before[i] + "px", minHeight: "0px" },
+               { flexGrow: 0, flexBasis: after[i] + "px", minHeight: "0px" }],
+              { duration: 240, easing: EASE_OUT });
+  });
+  if (toggled && !toggled.classList.contains("closed"))
+    toggled.querySelector(".panelBody").animate(
+      [{ opacity: 0, transform: "translateY(-4px)" }, { opacity: 1, transform: "none" }],
+      { duration: 240, easing: EASE_OUT });
+}
 function layoutPanels() {
+  // flex-grow values that sum to < 1 only claim that FRACTION of the free
+  // space (CSS flexbox) — a lone open panel with a saved weight of 0.85 left
+  // a 91 px gap. Scale the open panels' weights to a mean of 1 (sum >= 1).
+  const openIds = PANEL_IDS.filter(id => !panelRoot(id).classList.contains("closed"));
+  const mean = openIds.reduce((a, id) => a + panelWeight(id), 0) / (openIds.length || 1) || 1;
   for (const id of PANEL_IDS) {
     const r = panelRoot(id);
-    r.style.setProperty("--pw", panelWeight(id));
+    r.style.setProperty("--pw", panelWeight(id) / mean);
     r.classList.toggle("hasNext", !r.classList.contains("closed") && !!nextOpenPanel(r));
   }
 }
