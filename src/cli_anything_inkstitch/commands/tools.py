@@ -11,6 +11,7 @@ from cli_anything_inkstitch.errors import UserError
 from cli_anything_inkstitch.history import document_replace, make_entry, push
 from cli_anything_inkstitch.output import emit
 from cli_anything_inkstitch.svg.attrs import SVG_NS
+from cli_anything_inkstitch.svg.curvefit import uu_tolerance
 
 
 @click.group("tools")
@@ -1190,10 +1191,13 @@ def _doc_mm_frame(root, uu_per_mm):
 @click.option("--cases", "cases_path", type=click.Path(dir_okay=False), default=None,
               help="Append each applied override (shape hash, override, reason, outline, result) to "
                    "this JSON-lines file, a fixture for planner tests (default: next to the project).")
+@click.option("--keep-curves/--no-keep-curves", default=True, show_default=True,
+              help="Write each column with a few explicit rungs and bezier rails (a handful of "
+                   "handles in the editor) instead of one rail node per stitch pair.")
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
                     spread_turns, tidy_joins, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
-                    cases_path):
+                    cases_path, keep_curves):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
     The planner that text-to-satin uses for letters, applied to any filled
@@ -1323,7 +1327,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"{el.get('id')}_c{k}")
-                    p.set("d", gc.satin_d(c, tx))
+                    p.set("d", gc.satin_d_curves(c, tx, uu_tolerance(uu_per_mm)) if keep_curves else gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
                     kink = k not in acute_cols and _cc.short_stitch_kink(list(zip(c.left, c.right)), concavities)
                     extra = _schema_known(schema, "satin_column",
@@ -1482,7 +1486,7 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
         for el in root.iter(f"{{{SVG_NS}}}path"):
             if (el.get(sat) or "").lower() != "true":
                 continue
-            pairs = rv.satin_pairs(el.get("d") or "")
+            pairs = rv.satin_pairs(el.get("d") or "", step=0.5 * uu_per_mm)
             if pairs is None:
                 continue
             closed = _m.dist(pairs[0][0], pairs[-1][0]) < 0.5 * uu_per_mm and len(pairs) > 4 and \
@@ -1576,10 +1580,13 @@ def review(ctx, project_path, out_png, zoom_shape, warn):
                    "on bare fabric (an E's arms) with the engine's "
                    "auto_satin, so travel runs under columns not yet sewn. "
                    "--no-route keeps the planned order everywhere.")
+@click.option("--keep-curves/--no-keep-curves", default=True, show_default=True,
+              help="Write each column with a few explicit rungs and bezier rails (a handful of "
+                   "handles in the editor) instead of one rail node per stitch pair.")
 @click.pass_context
 def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                   letter_spacing_pct, width_mm, cx_mm, cy_mm, rotate_deg, merge_joins,
-                  fallback, color, pull_comp_mm, auto_params, route):
+                  fallback, color, pull_comp_mm, auto_params, route, keep_curves):
     """Set TEXT from a TTF as per-stroke satin columns: no rung review.
 
     Each letter is cut at its junctions into strokes, and each stroke gets
@@ -1652,7 +1659,7 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"text{n}_l{li}_c{k}")
-                    p.set("d", gc.satin_d(c, tx))
+                    p.set("d", gc.satin_d_curves(c, tx, uu_tolerance(uu_per_mm)) if keep_curves else gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
                     extra = (_lettering_satin_params(c.widths(), pull_comp_mm, band_width_mm=band_w)
                              if auto_params else {})
