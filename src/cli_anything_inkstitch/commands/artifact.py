@@ -250,12 +250,21 @@ def end_cmd(ctx, project_path):
 
 @artifact.command("gate")
 @click.option("--project", "project_path", type=click.Path(), default=None)
+@click.option("--engine/--no-engine", default=False,
+              help="Also run the real Ink/Stitch binary and judge the stitches it "
+                   "produces (satin passes, untrimmed travel, longest stitch). "
+                   "Cached per SVG hash; a cold run takes tens of seconds.")
+@click.option("--no-cache", is_flag=True, help="Ignore the engine-result cache.")
+@click.option("--reference-dst", type=click.Path(exists=True), default=None,
+              help="With --engine: a machine file to compare stitch/trim totals against.")
 @click.pass_context
-def gate_cmd(ctx, project_path):
+def gate_cmd(ctx, project_path, engine, no_cache, reference_dst):
     """Run the stitchability gate. Errors should be fixed before handback."""
     from cli_anything_inkstitch.artifact.gate import run_gate
     project = get_project_path(ctx, project_path)
-    emit(ctx, run_gate(project))
+    emit(ctx, run_gate(project, engine=engine, engine_cache=not no_cache,
+                       engine_binary=ctx.obj.get("binary_override"),
+                       reference_dst=reference_dst))
 
 
 @artifact.command("stop")

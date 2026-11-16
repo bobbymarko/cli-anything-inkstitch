@@ -503,7 +503,7 @@ The digitizing-artifact correction loop (full design doc: `docs/digitizing-artif
 artifact open   [--project <abs>]  [--no-browser]  [--reopen]
 artifact poll   [--project <abs>]  [--timeout-s <f>]  [--agent-reply <str>]
 artifact reply  [--project <abs>]  --text <str>
-artifact gate   [--project <abs>]
+artifact gate   [--project <abs>]  [--engine] [--no-cache] [--reference-dst <file>]
 artifact end    [--project <abs>]
 artifact stop
 ```
@@ -515,7 +515,7 @@ artifact stop
 | `open` | Open or resume the editor session (spawns the server if needed, opens the browser unless `--no-browser`). A session the user ended from the browser refuses a plain reopen; `--reopen` overrides. |
 | `poll` | Long-poll for the next feedback batch: `{objects, manipulation, text}` items. `--agent-reply` sends a chat reply before waiting. Queued feedback survives server restarts. |
 | `reply` | Send a chat message into the editor without polling |
-| `gate` | Stitchability audit (spec §8 of the design doc): error severity = desynced rung pairing, rail count/self-crossing, satin width outside 0.5–12 mm, twist risk; warning severity = narrow/wide-but-stitchable, satin >150 mm, fill handle >10 mm off its boundary. Errors should be fixed before handback. |
+| `gate` | Stitchability audit (spec §8 of the design doc): error severity = desynced rung pairing, rail count/self-crossing, satin width outside 0.5–12 mm, twist risk; warning severity = narrow/wide-but-stitchable, satin >150 mm, fill handle >10 mm off its boundary. Errors should be fixed before handback. `--engine` also runs the real Ink/Stitch binary (under the host-wide render lock `/tmp/inkstitch-render.lock`, result cached per SVG sha256) and judges the stitches it produces: top-layer passes per satin column (error if >1: a visible seam), untrimmed travel moves (warning >=3 mm, error >=15 mm), longest stitch (warning >8 mm), plus stitch/trim totals; `--reference-dst` adds a side-by-side with a machine file. Off by default (a cold run takes tens of seconds); `export file --require-gate` runs it and refuses to export on errors. |
 | `end` | End the session as the agent (plain `open` can revive it) |
 | `stop` | Shut down the background server |
 
