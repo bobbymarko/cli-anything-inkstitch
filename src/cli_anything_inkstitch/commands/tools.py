@@ -1262,7 +1262,11 @@ def _path_contours_mm(el, uu_per_mm: float, step_mm: float = 0.2) -> list[list[t
     for t in chain:                      # the path's own first, then each ancestor's (svgelements:
         m = m * se.Matrix(t)             # a * b applies a, then b)
     path = se.Path(_element_d(el), transform=m)
-    path = path.reified() if hasattr(path, "reified") else path
+    # Bake the transform into the coordinates: as_subpaths() hands back raw segments, so an
+    # un-reified path loses it. (svgelements 1.9 has reify(), in place; the old reified() guard
+    # never ran, so an EPS export's matrix(.1,0,0,-.1,...) on every path planned a 70 mm emblem at
+    # 640 mm: North Stars, Thready's overfit check 11/15.)
+    path.reify()
     out = []
     for sp in path.as_subpaths():
         sp = se.Path(sp)
@@ -1674,8 +1678,14 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                         extra["trim_after"] = "true"
                         trims_added += 1
                     made.append((p, "satin_column", extra))
-            made_groups.append((g, as_fill, _ancestor_matrix(el)))
+            anc = _ancestor_matrix(el)
+            made_groups.append((g, as_fill, anc))
             parent.replace(el, g)
+            if not as_fill and not anc.is_identity():
+                # satin rails are in the root frame (_path_contours_mm applied every transform);
+                # left inside the transformed parent, the group undoes the parent's transform
+                inv = ~anc
+                g.set("transform", f"matrix({inv.a:.10g},{inv.b:.10g},{inv.c:.10g},{inv.d:.10g},{inv.e:.10g},{inv.f:.10g})")
             for p, st, extra in made:
                 if st is None:
                     continue
@@ -1733,6 +1743,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 g, as_fill, m = made_groups[i]
                 if as_fill and not m.is_identity():
                     g.set("transform", f"matrix({m.a:g},{m.b:g},{m.c:g},{m.d:g},{m.e:g},{m.f:g})")
+                elif not as_fill:
+                    g.attrib.pop("transform", None)        # root frame: the box is at the root
                 box.append(g)
             report = [report[i] for i in order]
         groups = [made_groups[i][0].get("id") for i in order]
