@@ -125,6 +125,53 @@ def outline_polygon(contours):
     return geom
 
 
+KNOCKOUT_MIN_MM2 = 2.0   # same-thread shapes overlapping more than this would stack two satins
+KNOCKOUT_TUCK_MM = 0.3   # ...so the later one is cut back to tuck this far under the earlier one
+
+
+def knockout_overlaps(contours: list, polys: list, threads: list[str], order: list[int],
+                      labels: list[str] | None = None) -> tuple[list, list[dict]]:
+    """Where two shapes of one thread overlap (a V or butt joint drawn as two overlapping strokes:
+    the North Stars N's diagonal over its stem, 56 mm2), cut the one sewn LATER back so it tucks
+    KNOCKOUT_TUCK_MM under the earlier one's edge, instead of sewing two full satins on top of each
+    other. Bob's V-joint rule (DW MOM back, 11/14): never stack two full satins at a V; knock out
+    by default (first stroke whole, second tucked ~0.3 mm under it). A mitre is for a wide
+    symmetric V only and isn't attempted here.
+
+    Only when the cut leaves one piece with at least half the shape (an end joint): a stroke that
+    crosses straight through another, or one mostly inside it (a highlight), is left as drawn.
+    Different threads are left alone: there the overlap is layering. Returns (contours with the
+    cut shapes replaced, one record per cut)."""
+    n = len(contours)
+    pos = {i: k for k, i in enumerate(order)}
+    out, geo, cuts = list(contours), list(polys), []
+    for j in sorted(range(n), key=lambda q: pos.get(q, q)):
+        for i in sorted(range(n), key=lambda q: pos.get(q, q)):
+            if pos.get(i, i) >= pos.get(j, j) or threads[i] != threads[j]:
+                continue
+            a, b = geo[i], geo[j]
+            if a is None or b is None or not a.intersects(b):
+                continue
+            ov = a.intersection(b).area
+            if ov <= KNOCKOUT_MIN_MM2:
+                continue
+            # the part outside the first stroke, reaching KNOCKOUT_TUCK_MM back under it only where
+            # it continues out of it (b minus a shrunk by the tuck would also keep a sliver all
+            # round a's edge inside the overlap: a stray satin along the stem's foot)
+            rest = b.difference(a)
+            cut = b.intersection(rest.buffer(KNOCKOUT_TUCK_MM, join_style=2)).buffer(0)
+            pieces = [g for g in getattr(cut, "geoms", [cut]) if g.geom_type == "Polygon" and g.area >= 0.5]
+            if len(pieces) != 1 or pieces[0].area < 0.5 * b.area:     # crumbs of the outline don't count
+                continue
+            cut = pieces[0]
+            geo[j] = cut
+            out[j] = [[tuple(map(float, q)) for q in list(cut.exterior.coords)[:-1]]] + \
+                     [[tuple(map(float, q)) for q in list(r.coords)[:-1]] for r in cut.interiors]
+            cuts.append({"shape": labels[j] if labels else j, "tucked_under": labels[i] if labels else i,
+                         "overlap_mm2": round(ov, 1)})
+    return out, cuts
+
+
 def dedupe(shapes: list[tuple[str, list]]) -> tuple[list[int], list[dict]]:
     """Indices of the shapes to keep, and the ones dropped: a shape whose outline a LATER shape
     repeats (bounding boxes within 0.1 mm, outlines differing by under DUPLICATE_AREA_PCT of the
