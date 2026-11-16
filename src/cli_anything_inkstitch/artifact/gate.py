@@ -550,8 +550,18 @@ def check_ignored_fill_methods(project_file: str, design: dict) -> list[dict]:
     return findings
 
 
-def run_gate(project_file: str) -> dict[str, Any]:
-    """Audit the design. `ok` is False only on error-severity findings."""
+def run_gate(project_file: str, *, engine: bool = False,
+             engine_binary: str | None = None, engine_cache: bool = True,
+             reference_dst: str | None = None) -> dict[str, Any]:
+    """Audit the design. `ok` is False only on error-severity findings.
+
+    With `engine=True` the real Ink/Stitch binary is run (cached per SVG hash,
+    see `engine_gate`) and its stitches are judged too: top-layer passes per
+    satin column, untrimmed travel, longest stitch. Off by default because a
+    cold run takes tens of seconds and the editor gates after every edit; a
+    delivery path should pass `engine=True` (see `require_gate`). An engine
+    that cannot run is an error, never a silent skip.
+    """
     from cli_anything_inkstitch.artifact.design_model import read_design
 
     design = read_design(project_file)
@@ -571,7 +581,31 @@ def run_gate(project_file: str) -> dict[str, Any]:
                     "element — Ink/Stitch silently ignores it (drag the handle "
                     "in the editor or run `commands migrate` to fix)",
                     command=cmd["command"], use_id=cmd.get("use_id")))
+    engine_info = None
+    if engine:
+        from cli_anything_inkstitch.artifact.engine_gate import run_engine_checks
+        res = run_engine_checks(project_file, binary=engine_binary,
+                                use_cache=engine_cache, reference_dst=reference_dst)
+        findings.extend(res["findings"])
+        engine_info = res["engine"]
     errors = [f for f in findings if f["severity"] == "error"]
     warnings = [f for f in findings if f["severity"] == "warning"]
-    return {"ok": not errors, "errors": errors, "warnings": warnings,
-            "checked_objects": len(design["objects"])}
+    out = {"ok": not errors, "errors": errors, "warnings": warnings,
+           "checked_objects": len(design["objects"]), "engine_checked": engine}
+    if engine:
+        out["engine"] = engine_info
+    return out
+
+
+def require_gate(project_file: str, **kwargs) -> dict[str, Any]:
+    """Gate WITH the engine checks; raise UserError listing the errors if any.
+
+    For delivery/export paths that must not hand over a design the machine
+    will sew wrong.
+    """
+    from cli_anything_inkstitch.errors import UserError
+    result = run_gate(project_file, engine=True, **kwargs)
+    if not result["ok"]:
+        lines = [f"{f['object']}: [{f['check']}] {f['message']}" for f in result["errors"]]
+        raise UserError(f"gate failed with {len(lines)} error(s):\n" + "\n".join(lines[:20]))
+    return result
