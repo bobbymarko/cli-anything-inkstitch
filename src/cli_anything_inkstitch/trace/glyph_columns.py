@@ -1406,6 +1406,7 @@ def _reverse_column(c: PlannedColumn) -> None:
 
 
 def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = True,
+                  outward_from=None,
                   trim_mm: float = ONE_PASS_TRIM_MM, exposed_mm: float = EXPOSED_TRAVEL_MM,
                   margin_mm: float = ONE_PASS_TRIM_MARGIN_MM) -> dict:
     """Orient a shape's columns so each sews in ONE pass, and say where to trim.
@@ -1427,6 +1428,8 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
          after a trim starts exactly at its start (start_at_nearest_point off: `start_exact`).
 
     arrival: where the needle is before this shape (the previous shape's exit), or None.
+    outward_from: a point (stretch fabric's sewing origin); a column that trims afterwards then
+    starts at its end nearer that point instead of nearest the arrival, so it sews outward.
     trim_handoffs False: no trims inside the shape (only the orientation).
 
     Returns {"trim_after": [k...] (inside the shape, not the last column), "start_exact": [k...],
@@ -1474,9 +1477,10 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
         trims |= {k - 1 for k in range(1, n)
                   if jump_mm(k) > trim_mm - margin_mm or recs[k]["exposed"] > exposed_mm}
     cur = arrival                                # 3. a trimmed column starts nearest its arrival
-    for k in range(n):
+    for k in range(n):                           #    (or, outward, nearest the origin)
         a, b = column_ends(cols[k].left, cols[k].right)
-        if k in trims and cur is not None and not cols[k].closed and math.dist(cur, b) < math.dist(cur, a):
+        ref = outward_from if outward_from is not None else cur
+        if k in trims and ref is not None and not cols[k].closed and math.dist(ref, b) < math.dist(ref, a):
             flip(k)
             a, b = b, a
         cur = b

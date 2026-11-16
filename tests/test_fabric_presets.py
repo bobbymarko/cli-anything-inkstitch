@@ -205,3 +205,29 @@ class TestPointedEnds:
     def test_only_knit_cuts_points(self):
         assert FABRICS["knit"]["end_min_mm"] == 0.8
         assert FABRICS["standard"]["end_min_mm"] is None and FABRICS["twill"]["end_min_mm"] is None
+
+
+class TestSewOrderByFabric:
+    """Sew order is a property of what's being stitched on (Thready / Bob 11/15)."""
+
+    def test_stable_fabric_sews_by_thread_stretch_outward(self):
+        assert FABRICS["standard"]["order"] == FABRICS["twill"]["order"] == "thread"
+        assert FABRICS["knit"]["order"] == FABRICS["fleece"]["order"] == "centre_out"
+
+    def test_cap_sews_from_the_bottom_centre_with_firmer_settings(self):
+        cap = FABRICS["cap"]
+        assert cap["order"] == "bottom_out"
+        assert cap["pull_comp_mm"] > FABRICS["twill"]["pull_comp_mm"]
+        assert _underlay(_lettering_satin_params([2.7], None, "cap")) == ["contour_underlay", "zigzag_underlay"]
+
+    def test_outward_orientation_starts_at_the_end_nearer_the_origin(self):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn, PlannedLetter, plan_one_pass
+        strand = lambda: PlannedLetter(char="s", ok=True, contours=[[(10, 0), (30, 0), (30, 2), (10, 2)]],
+                                       columns=[PlannedColumn(left=[(30, 0), (20, 0), (10, 0)],
+                                                              right=[(30, 2), (20, 2), (10, 2)])])
+        lt = strand()                                   # drawn from x=30 inward
+        plan_one_pass(lt, arrival=(31, 1), outward_from=(0, 1))
+        assert lt.columns[0].left[0][0] == 10           # now starts at the inner end
+        lt = strand()
+        plan_one_pass(lt, arrival=(31, 1))              # without an origin: nearest the needle
+        assert lt.columns[0].left[0][0] == 30

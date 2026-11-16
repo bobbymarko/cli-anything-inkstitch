@@ -178,3 +178,42 @@ class TestShapesToSatinCleanup:
         dot = next(s for s in two["shapes"] if s["shape"] == "dot")
         assert dot["stitch"] == "satin"
         assert n2 > n1 and n2 < 2 * n1                                    # the bar once, plus the dot
+
+
+class TestCentreOutOrder:
+    """Stretch fabric sews outward from the middle, each element whole (Bob/Thready 11/15)."""
+
+    @staticmethod
+    def _box(x, y, w=4.0, h=4.0):
+        from shapely.geometry import box
+        return box(x, y, x + w, y + h)
+
+    def test_outward_from_the_origin(self):
+        polys = [self._box(40, 0), self._box(-2, 0), self._box(20, 0), self._box(-60, 0)]
+        order, splits = sp.centre_out_order(["w"] * 4, polys, (0.0, 2.0))
+        assert order == [1, 2, 0, 3] and splits == []
+
+    def test_an_elements_strands_sew_together(self):
+        # gold strands 0+1 (2 mm apart) are one element; a lone gold shape 2 sits between them and
+        # the origin in distance but is a separate element further out by its nearest point
+        polys = [self._box(10, 0), self._box(16, 0), self._box(-14, 0)]
+        order, _ = sp.centre_out_order(["g", "g", "g"], polys, (0.0, 2.0))
+        assert order == [0, 1, 2]
+
+    def test_interlocked_threads_form_one_unit_letters_batch_by_thread(self):
+        # a crest at the middle (green heart touching two gold strands) and white letters spaced
+        # 20 mm apart, one of them nearer the origin than the far gold strand
+        polys = [self._box(0, 0), self._box(5, 0), self._box(-5, 0),      # crest: g, y, y
+                 self._box(0, 30), self._box(25, 30), self._box(-25, 30)]  # letters: w w w
+        threads = ["g", "y", "y", "w", "w", "w"]
+        order, splits = sp.centre_out_order(threads, polys, (2.0, 2.0))
+        assert order[:3] == [0, 1, 2] or order[:3] == [0, 2, 1]           # crest first, heart first
+        assert set(order[3:]) == {3, 4, 5} and order[3] == 3               # then letters, centre-out
+        assert splits == []
+
+    def test_layering_still_wins(self):
+        # shape 1 (yellow) is drawn over shape 0 (green): green sews first even though yellow is
+        # nearer the origin
+        polys = [self._box(0, 0, 20, 4), self._box(-1, 0, 6, 4)]
+        order, _ = sp.centre_out_order(["g", "y"], polys, (0.0, 2.0))
+        assert order == [0, 1]

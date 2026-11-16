@@ -254,15 +254,9 @@ def merge_colors(areas: dict[str, float], max_de: float = MERGE_DE,
     return plan
 
 
-def thread_order(threads: list[str], polys: list) -> tuple[list[int], list[dict]]:
-    """A sewing order that sews each thread as one block where layering allows.
-
-    threads[i] is shape i's thread in drawing order; polys[i] its outline (shapely, mm). Shapes of
-    different threads that overlap must keep their drawing order (the later one lies on top), so
-    those pairs are constraints; everything else may move. Greedy topological sort: keep sewing
-    the current thread while any shape of it is free to sew, else start the free thread that
-    appears first in the drawing. Returns the order and the pairs that forced a thread to be split
-    (each one an extra colour change)."""
+def _layer_before(threads: list[str], polys: list) -> dict[int, set[int]]:
+    """For each shape, the shapes that must sew before it: an earlier-drawn shape of another
+    thread it overlaps (the later one lies on top)."""
     n = len(threads)
     before: dict[int, set[int]] = {j: set() for j in range(n)}
     for i in range(n):
@@ -273,6 +267,115 @@ def thread_order(threads: list[str], polys: list) -> tuple[list[int], list[dict]
                 continue
             if polys[i].intersection(polys[j]).area > LAYER_OVERLAP_MM2:
                 before[j].add(i)
+    return before
+
+
+INTERLOCK_GAP_MM = 8.0   # shapes of any thread this close interlock (a crest's heart, crown and knots)
+REGION_GAP_MM = 6.0      # shapes of one thread this close are one element (a knot's strands)
+
+
+def _components(n: int, linked) -> list[int]:
+    """Single-link components: comp[i] for i in range(n), linked(i, j) -> bool."""
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if find(i) != find(j) and linked(i, j):
+                parent[find(i)] = find(j)
+    return [find(i) for i in range(n)]
+
+
+def centre_out_order(threads: list[str], polys: list, origin: tuple[float, float]
+                     ) -> tuple[list[int], list[dict]]:
+    """A sewing order for stretch fabric: outward from `origin`, each element finished first.
+
+    On knit and fleece the fabric moves as it's sewn; sewing outward from the middle pushes that
+    movement out to free fabric instead of into finished work, and finishing one element before
+    the next keeps its parts registered to each other (Thready / Bob 11/15, HIDA champ back).
+
+    - Elements: shapes of one thread within REGION_GAP_MM (a knot's strands), each sewn whole.
+    - Interlocking clusters: shapes of ANY thread within INTERLOCK_GAP_MM (a crest's heart, crown
+      and knots). One with several threads is sewn as one unit, its threads batched (each thread's
+      nearest element to the origin first). Free-standing single-thread clusters (letters of a
+      name) are batched per thread, so spaced lettering doesn't add colour changes.
+    - Units, then each thread batch, then elements, then shapes sew by their nearest distance to
+      the origin. Layering still wins: an earlier-drawn shape of another thread that a shape
+      overlaps sews first (as thread_order).
+
+    Returns (order, splits): splits lists each thread sewn in more than one block (an extra colour
+    change the outward order costs)."""
+    from shapely.geometry import Point
+
+    n = len(threads)
+    if n == 0:
+        return [], []
+    before = _layer_before(threads, polys)
+    o = Point(origin)
+    far = float("inf")
+    d = [polys[i].distance(o) if polys[i] is not None else far for i in range(n)]
+
+    def near(i, j, gap):
+        a, b = polys[i], polys[j]
+        if a is None or b is None:
+            return False
+        ax0, ay0, ax1, ay1 = a.bounds
+        bx0, by0, bx1, by1 = b.bounds
+        if bx0 > ax1 + gap or ax0 > bx1 + gap or by0 > ay1 + gap or ay0 > by1 + gap:
+            return False
+        return a.distance(b) <= gap
+
+    cluster = _components(n, lambda i, j: near(i, j, INTERLOCK_GAP_MM))
+    element = _components(n, lambda i, j: threads[i] == threads[j] and near(i, j, REGION_GAP_MM))
+    multi = {c for c in set(cluster) if len({threads[i] for i in range(n) if cluster[i] == c}) > 1}
+    unit = [("cluster", cluster[i]) if cluster[i] in multi else ("thread", threads[i]) for i in range(n)]
+
+    def rank(keys):
+        best: dict = {}
+        for i in range(n):
+            best[keys[i]] = min(best.get(keys[i], far), d[i])
+        return best
+
+    unit_r = rank(unit)
+    batch = [(unit[i], threads[i]) for i in range(n)]
+    batch_r = rank(batch)
+    elem_r = rank(element)
+    key = {i: (unit_r[unit[i]], str(unit[i]), batch_r[batch[i]], threads[i], elem_r[element[i]], element[i],
+               d[i], i) for i in range(n)}
+    want = sorted(range(n), key=key.get)
+    done: list[int] = []
+    left = set(range(n))
+    while left:
+        k = next((q for q in want if q in left and before[q] <= set(done)), None)
+        if k is None:                      # a layering cycle can't happen (before is drawing order)
+            k = min(left)
+        done.append(k)
+        left.discard(k)
+    blocks = [threads[done[0]]]
+    for k in done[1:]:
+        if threads[k] != blocks[-1]:
+            blocks.append(threads[k])
+    splits = [{"thread": t, "blocks": blocks.count(t), "reason": "sewn outward from the middle"}
+              for t in dict.fromkeys(blocks) if blocks.count(t) > 1]
+    return done, splits
+
+
+def thread_order(threads: list[str], polys: list) -> tuple[list[int], list[dict]]:
+    """A sewing order that sews each thread as one block where layering allows.
+
+    threads[i] is shape i's thread in drawing order; polys[i] its outline (shapely, mm). Shapes of
+    different threads that overlap must keep their drawing order (the later one lies on top), so
+    those pairs are constraints; everything else may move. Greedy topological sort: keep sewing
+    the current thread while any shape of it is free to sew, else start the free thread that
+    appears first in the drawing. Returns the order and the pairs that forced a thread to be split
+    (each one an extra colour change)."""
+    n = len(threads)
+    before = _layer_before(threads, polys)
     first = {}
     for i, t in enumerate(threads):
         first.setdefault(t, i)

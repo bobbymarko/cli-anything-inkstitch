@@ -1020,17 +1020,33 @@ def _style_autorun_tops(ctx, project_path, stitch_length_mm, bean_repeats):
 # the engine's default (15 %, 0.25 mm).
 FABRICS = {
     #            spacing  pull  centre walk below  zigzag from (mm)
+# order: "thread" sews each thread as one block, the fewest trims and colour changes (stable
+# woven fabric barely moves, so registration holds); "centre_out" (stretch: knit, fleece) sews
+# outward from the design's middle, each element finished before the next, satins sewn outward
+# (shape_prep.centre_out_order); "bottom_out" (caps) is the same outward order from the middle of
+# the design's bottom edge (the brim) instead of its centre.
 # end_min_mm: a zigzag-underlaid satin's ends narrower than this are cut back to it (at most
 # SATIN_END_MAX_CUT_MM along, simple locks there), so a point doesn't stack every pass on one spot;
 # None sews to the tip.
     "standard": dict(spacing_mm=None, pull_comp_mm=0.2, center_below_mm=1.5, zigzag_from_mm=4.0,
-                     short_inset=None, short_dist_mm=None, end_min_mm=None),
+                     short_inset=None, short_dist_mm=None, end_min_mm=None,
+                     order="thread"),
     "twill":    dict(spacing_mm=0.4, pull_comp_mm=0.2, center_below_mm=2.0, zigzag_from_mm=5.0,
-                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=None),
+                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=None,
+                     order="thread"),
     "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=2.5,
-                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=0.8),
+                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=0.8,
+                     order="centre_out"),
     "fleece":   dict(spacing_mm=0.38, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=3.0,
-                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=None),
+                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=None,
+                     order="centre_out"),
+    # structured cap (front panel on a cap frame): firmer underlay and more pull compensation than
+    # flat goods (the crown is stiff but curved, and only the brim edge is clamped), and sewn from
+    # the bottom centre out, to the sides and up, so the crown is pushed away from the clamped brim
+    # instead of bubbling between it and finished work (Ricoma, Bernina, cap digitizing guides).
+    "cap":      dict(spacing_mm=0.4, pull_comp_mm=0.4, center_below_mm=1.5, zigzag_from_mm=2.5,
+                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=0.8,
+                     order="bottom_out"),
 }
 
 
@@ -1506,8 +1522,18 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
             areas[fill] = areas.get(fill, 0.0) + (poly.area if poly is not None else 0.0)
         threads = sp.merge_colors(areas, max_de=max_de, max_colors=max_colors) if areas else sp.ThreadPlan({})
         thread_of = [threads.thread.get(fill, fill) for _, fill in targets]
+        boxes = [q.bounds for q in polys if q is not None]
+        sew_order = FABRICS[fabric]["order"]
+        sew_origin = None
+        if boxes:   # planner frame is y up: the bottom edge is the smallest y
+            mid_x = (min(b[0] for b in boxes) + max(b[2] for b in boxes)) / 2
+            sew_origin = (mid_x, min(b[1] for b in boxes) if sew_order == "bottom_out"
+                          else (min(b[1] for b in boxes) + max(b[3] for b in boxes)) / 2)
+        outward = sew_order in ("centre_out", "bottom_out") and not keep_order and sew_origin is not None
         if keep_order or len(targets) < 2:
             order, order_splits = list(range(len(targets))), []
+        elif outward:
+            order, order_splits = sp.centre_out_order(thread_of, polys, sew_origin)
         else:
             order, order_splits = sp.thread_order(thread_of, polys)
 
@@ -1550,7 +1576,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                     arrival = None
                     continue
                 one_pass_plan[i] = gc.plan_one_pass(planned[i], arrival=arrival,
-                                                    trim_handoffs=travel == "trim")
+                                                    trim_handoffs=travel == "trim",
+                                                    outward_from=sew_origin if outward else None)
                 arrival = one_pass_plan[i]["exit"]
         made_groups, cases = [], []
         for i, ((el, _fill), color, lt, spec, gh) in enumerate(zip(targets, thread_of, planned, spec_of, hashes)):
@@ -1684,7 +1711,9 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 top = top.getparent()
             box = etree.Element(f"{{{SVG_NS}}}g")
             box.set("id", "shapes_by_thread")
-            box.set(f"{{{INKSCAPE_NS}}}label", "Shapes, sewn by thread")
+            box.set(f"{{{INKSCAPE_NS}}}label",
+                    {"centre_out": "Shapes, sewn centre-out", "bottom_out": "Shapes, sewn bottom-centre out"}
+                    .get(sew_order, "Shapes, sewn by thread") if outward else "Shapes, sewn by thread")
             top.addprevious(box)
             for i in order:
                 g, as_fill, m = made_groups[i]
@@ -1738,6 +1767,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                "color_merges": threads.merges,
                "color_changes": max(0, len(blocks) - 1),
                **({"overrides_applied": len(cases)} if overrides_path else {}),
+               "sew_order": "keep" if keep_order else FABRICS[fabric]["order"],
                **({"thread_order_splits": order_splits} if order_splits else {})}
     if skipped:
         payload["params_skipped"] = {"names": sorted(skipped),
