@@ -224,3 +224,35 @@ class TestCentreOutOrder:
         polys = [self._box(-6, 0, 5, 10), self._box(1, 0, 5, 10), self._box(-1, 3, 2, 4)]
         order, _ = sp.centre_out_order(["g", "g", "g"], polys, (-0.5, -3.0))
         assert order[0] == 2
+
+
+class TestKnockout:
+    """Bob's V-joint rule (11/14): never stack two full satins of one thread; the later stroke
+    tucks ~0.3 mm under the first (North Stars N, Thready 11/15)."""
+
+    @staticmethod
+    def _rect(x0, y0, x1, y1):
+        return [[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
+
+    def _run(self, rects, threads, order=None):
+        polys = [sp.outline_polygon(r) for r in rects]
+        return sp.knockout_overlaps(rects, polys, threads, order or list(range(len(rects))))
+
+    def test_butt_joint_later_stroke_tucks_under(self):
+        # a stem (0-8 wide) and a bar whose end overlaps it by 8 x 8 mm
+        out, cuts = self._run([self._rect(0, 0, 8, 40), self._rect(0, 32, 30, 40)], ["g", "g"])
+        assert cuts == [{"shape": 1, "tucked_under": 0, "overlap_mm2": 64.0}]
+        bar = sp.outline_polygon(out[1])
+        assert bar.bounds[0] == pytest.approx(7.7, abs=0.01)     # 0.3 mm under the stem's edge
+        assert out[0] == self._rect(0, 0, 8, 40)                  # the first stroke stays whole
+
+    def test_sewing_order_decides_which_one_tucks(self):
+        out, cuts = self._run([self._rect(0, 0, 8, 40), self._rect(0, 32, 30, 40)], ["g", "g"], order=[1, 0])
+        assert cuts and cuts[0]["shape"] == 0
+
+    def test_crossing_layering_and_slight_touch_left_alone(self):
+        cross = [self._rect(0, 10, 30, 18), self._rect(11, 0, 19, 30)]     # an X: the cut would split it
+        assert self._run(cross, ["g", "g"])[1] == []
+        assert self._run([self._rect(0, 0, 8, 40), self._rect(0, 32, 30, 40)], ["g", "y"])[1] == []
+        touch = [self._rect(0, 0, 8, 40), self._rect(7.9, 30, 30, 40)]     # 1 mm2: strands touching
+        assert self._run(touch, ["g", "g"])[1] == []

@@ -1657,7 +1657,10 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 ov["rungs"] = [tuple(from_doc(tuple(map(float, q))) for q in seg) for seg in spec["rungs"]]
             if ov:
                 plan_ov[el.get("id")] = ov
-        planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, contours)],
+        # same-thread overlaps (a V joint drawn as two strokes): the later one tucks under the first
+        plan_contours, knockouts = sp.knockout_overlaps(contours, polys, thread_of, order,
+                                                        [el.get("id") for el, _ in targets])
+        planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, plan_contours)],
                                  one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns,
                                  tidy_joins_on=tidy_joins)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
@@ -1884,6 +1887,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
     blocks = [t for k, t in enumerate(sewn_threads) if k == 0 or t != sewn_threads[k - 1]]
     payload = {"shapes": report, "failed_plans": [r["shape"] for r in report if not r["plan_ok"]],
                "routed_shapes": len(to_route), "trims_added": trims_added, "satin_tips_cut": tips_cut,
+               **({"knockouts": knockouts} if knockouts else {}),
                **({"thin_column_shapes": [r["shape"] for r in report if r.get("warning")]}
                   if any(r.get("warning") for r in report) else {}),
                **({"design_warnings": dw} if (dw := _design_warnings(planned, fill_of, run_of, polys)) else {}),
