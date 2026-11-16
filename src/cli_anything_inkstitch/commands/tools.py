@@ -1570,7 +1570,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
-                           **{k: chk[k] for k in ("sewable_bare_pct", "outside_pct", "overlap_mm2",
+                           **{k: chk[k] for k in ("sewable_bare_pct", "sewable_bare_mm2", "outside_pct", "outside_mm2", "overlap_mm2",
                                                   "crossed_pairs") if k in chk}})
         if order != sorted(order):
             # Sew by thread: the groups move, in the new order, into one container where the first
@@ -1595,7 +1595,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
         for case in cases:
             r = next(x for x in report if x["shape"] == case["shape"])
             case["result"] = {k: r.get(k) for k in ("stitch", "columns", "hard_seams", "fans",
-                                                    "sewable_bare_pct", "plan_ok")}
+                                                    "sewable_bare_pct", "sewable_bare_mm2", "outside_mm2", "plan_ok")}
         push(proj.history, make_entry(command="tools shapes-to-satin",
                                       patch=document_replace(before_xml, etree.tostring(root).decode("utf-8"))))
     for ids_here in to_route:
@@ -1916,7 +1916,7 @@ def text_to_satin(ctx, project_path, font_path, text, height_mm, wght,
                 "plan_ok": lt.ok,
                 "routed": bool(to_route and to_route[-1] == ids_here) if not as_fill else False,
                 **({"error": lt.error} if lt.error else {}),
-                **{k: chk[k] for k in ("sewable_bare_pct", "outside_pct",
+                **{k: chk[k] for k in ("sewable_bare_pct", "sewable_bare_mm2", "outside_pct", "outside_mm2",
                                        "overlap_mm2", "crossed_pairs")
                    if k in chk},
             })

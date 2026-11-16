@@ -24,6 +24,11 @@ from . import columns as col
 
 FLAT_UNCOVERED_PCT = 5.0    # flat work: pull compensation covers a thin edge, tips may stay bare
 FLAT_OUTSIDE_PCT = 3.0
+FLAT_SMALL_ARTIFACT_MM2 = 1.5   # small text (8 mm caps, ~1 mm strokes) trips the %-based bare and
+                                # outside limits on corner wedges / edge overshoot whose absolute
+                                # size does not scale with the letter: an artifact under this (a
+                                # ~1.2 mm wedge) is within pull-comp tolerance, so it passes regardless
+                                # of %. Larger shapes with real gaps/overshoot still fail on %.
 FLAT_OVERLAP_MM2 = 12.0     # per join: a V's two legs overlap where they meet (a 17 mm W: ~11 mm2)
 SEAM_OVERLAP_MM = 0.3       # two columns side by side (a dancer's two strokes) each reach this far into the
                             # other, so pull doesn't open a gap along their seam (ends butting: BUTT_OVERLAP_MM)
@@ -184,8 +189,12 @@ def plan_shape(index: int, contours: list[np.ndarray], strokes: list[col.Stroke]
         sewable = glyph.buffer(-MIN_TIP_MM / 2).buffer(MIN_TIP_MM / 2).intersection(glyph)
         if sewable.is_empty or sewable.area <= 0:
             return ShapeColumns(index, None, error=f"narrower than {MIN_TIP_MM} mm everywhere")
-        bare = sewable.difference(unary_union([c.shape() for c in cols])).area / sewable.area * 100
+        bare_mm2 = sewable.difference(unary_union([c.shape() for c in cols])).area
+        bare = bare_mm2 / sewable.area * 100
         check["sewable_bare_pct"] = round(bare, 2)
+        check["sewable_bare_mm2"] = round(bare_mm2, 3)
+        outside_mm2 = check["outside_pct"] / 100 * glyph.area
+        check["outside_mm2"] = round(outside_mm2, 3)
         # Flat work: two columns overlapping where they join only adds a little thickness there, so
         # the overlap allowance is per join, not puff's tight one.
         # Where two strokes meet they overlap by about a square of their width (a V's legs at its
@@ -196,7 +205,8 @@ def plan_shape(index: int, contours: list[np.ndarray], strokes: list[col.Stroke]
         w = float(np.median(widths)) if widths else 0.0
         allowed = max(FLAT_OVERLAP_MM2, FLAT_OVERLAP_PER_WIDTH2 * w * w) * joins
         check["overlap_allowed_mm2"] = round(allowed, 1)
-        check["ok"] = (bare <= FLAT_UNCOVERED_PCT and check["outside_pct"] <= FLAT_OUTSIDE_PCT
+        check["ok"] = ((bare <= FLAT_UNCOVERED_PCT or bare_mm2 <= FLAT_SMALL_ARTIFACT_MM2)
+                       and (check["outside_pct"] <= FLAT_OUTSIDE_PCT or outside_mm2 <= FLAT_SMALL_ARTIFACT_MM2)
                        and check["crossed_pairs"] == 0 and check["overlap_mm2"] <= allowed)
     except Exception as e:  # noqa: BLE001 - an unplannable shape keeps click-to-stitch
         return ShapeColumns(index, None, error=f"no column plan ({type(e).__name__}: {str(e)[:80]})")
@@ -212,16 +222,21 @@ def flat_check(lt: col.Letter) -> dict:
     glyph = lt.glyph()
     sewable = glyph.buffer(-MIN_TIP_MM / 2).buffer(MIN_TIP_MM / 2).intersection(glyph)
     if sewable.is_empty or sewable.area <= 0:
-        check.update(ok=False, sewable_bare_pct=100.0)
+        check.update(ok=False, sewable_bare_pct=100.0, sewable_bare_mm2=999.0, outside_mm2=999.0)
         return check
-    bare = sewable.difference(unary_union([c.shape() for c in lt.columns])).area / sewable.area * 100
+    bare_mm2 = sewable.difference(unary_union([c.shape() for c in lt.columns])).area
+    bare = bare_mm2 / sewable.area * 100
     check["sewable_bare_pct"] = round(bare, 2)
+    check["sewable_bare_mm2"] = round(bare_mm2, 3)
+    outside_mm2 = check["outside_pct"] / 100 * glyph.area
+    check["outside_mm2"] = round(outside_mm2, 3)
     joins = max(1, len(lt.columns) - 1)
     widths = [_width(p) for c in lt.columns for p in c.pairs]
     w = float(np.median(widths)) if widths else 0.0
     allowed = max(FLAT_OVERLAP_MM2, FLAT_OVERLAP_PER_WIDTH2 * w * w) * joins
     check["overlap_allowed_mm2"] = round(allowed, 1)
-    check["ok"] = (bare <= FLAT_UNCOVERED_PCT and check["outside_pct"] <= FLAT_OUTSIDE_PCT
+    check["ok"] = ((bare <= FLAT_UNCOVERED_PCT or bare_mm2 <= FLAT_SMALL_ARTIFACT_MM2)
+                   and (check["outside_pct"] <= FLAT_OUTSIDE_PCT or outside_mm2 <= FLAT_SMALL_ARTIFACT_MM2)
                    and check["crossed_pairs"] == 0 and check["overlap_mm2"] <= allowed)
     return check
 
