@@ -217,3 +217,10 @@ class TestCentreOutOrder:
         polys = [self._box(0, 0, 20, 4), self._box(-1, 0, 6, 4)]
         order, _ = sp.centre_out_order(["g", "y"], polys, (0.0, 2.0))
         assert order == [0, 1]
+
+    def test_inside_an_element_shapes_sew_from_its_own_middle(self):
+        # a heart: two halves either side, an inner swirl in the middle; the origin sits low, by
+        # the halves' bottom tips. The swirl still sews first: it's the element's middle.
+        polys = [self._box(-6, 0, 5, 10), self._box(1, 0, 5, 10), self._box(-1, 3, 2, 4)]
+        order, _ = sp.centre_out_order(["g", "g", "g"], polys, (-0.5, -3.0))
+        assert order[0] == 2
