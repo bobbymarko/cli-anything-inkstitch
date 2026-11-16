@@ -1307,10 +1307,94 @@ def _filled_shapes(root, want):
     return out
 
 
+def _median_w(c) -> float:
+    w = sorted(c.widths())
+    return w[len(w) // 2] if w else 0.0
+
+
+def _thin_shape(lt) -> bool:
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+    return bool(lt.columns) and all(_median_w(c) < gc.MIN_SATIN_MM for c in lt.columns)
+
+
+def _hairline_run(lt, spec: dict):
+    """A shape too thin to plan (or plan well) that is a long drawn line: its centre line (mm), to
+    sew as a bean stitch instead of a fill no needle can make of a 0.4 mm sliver. None otherwise."""
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+    if spec.get("stitch") in ("fill", "satin") or (lt.columns and lt.ok):
+        return None
+    if lt.columns and not _thin_shape(lt):
+        return None
+    if gc.outline_width_mm(lt.contours) >= gc.MIN_SATIN_MM:
+        return None
+    line = gc.hairline_centre(lt.contours)
+    if not line:
+        return None
+    length = sum(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5 for a, b in zip(line, line[1:]))
+    return line if length >= gc.HAIRLINE_RUN_MM else None
+
+
+def _shape_warning(lt, chk: dict, as_fill: bool, run_line) -> str | None:
+    """One line per shape about thin strokes at this size (Thready 11/15: one line, not one per
+    column)."""
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+    lim = f"{gc.MIN_SATIN_MM:g}"
+    if run_line:
+        w = gc.outline_width_mm(lt.contours)
+        length = sum(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5 for a, b in zip(run_line, run_line[1:]))
+        return f"a hairline {w:.2f} mm wide, {length:.0f} mm long: sewn as a bean stitch"
+    thin = chk.get("thin_columns") or []
+    if not thin or as_fill:
+        return None
+    hair = [t for t in thin if t["hint"] == "hairline"]
+    small = [t for t in thin if t["hint"] != "hairline"]
+    parts = []
+    if small:
+        lo, hi = min(t["width_mm"] for t in small), max(t["width_mm"] for t in small)
+        rng = f"{lo:.2f}" if abs(hi - lo) < 0.005 else f"{lo:.2f}-{hi:.2f}"
+        parts.append(f"{len(small)} column{'s' if len(small) > 1 else ''} {rng} mm wide, under {lim} mm "
+                     f"at this size: thicken the art or enlarge the design")
+    if hair:
+        parts.append(f"{len(hair)} hairline column{'s' if len(hair) > 1 else ''} "
+                     f"({min(t['width_mm'] for t in hair):.2f} mm): sew as a running/bean stitch")
+    msg = "; ".join(parts)
+    if not lt.ok:
+        msg += (f" (its plan failed, {chk.get('sewable_bare_pct')} % bare; kept as satin, since a stroke "
+                f"this thin can't sew as a fill)")
+    return msg
+
+
+def _design_warnings(planned, fill_of, run_of, polys) -> list[str]:
+    """One design-level line with the fix for small strokes: how much to enlarge the design so its
+    typical thin (non-hairline) stroke reaches MIN_SATIN_MM (Thready 11/15)."""
+    import statistics
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+
+    small, shapes = [], 0
+    for lt, f, r in zip(planned, fill_of, run_of):
+        if r or not lt.columns or f:
+            continue
+        hair = {t["column"] for t in ((lt.check or {}).get("thin_columns") or []) if t["hint"] == "hairline"}
+        ws = [w for k, c in enumerate(lt.columns) if k not in hair and (w := _median_w(c)) < gc.MIN_SATIN_MM]
+        if ws:
+            small += ws
+            shapes += 1
+    if not small:
+        return []
+    wm = statistics.median(small)
+    k = gc.MIN_SATIN_MM / wm
+    boxes = [q.bounds for q in polys if q is not None]
+    width = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) if boxes else 0
+    return [f"small strokes ~{wm:.2f} mm wide in {shapes} shape{'s' if shapes > 1 else ''}: enlarge the design "
+            f"about {k:.1f}x (to ~{width * k:.0f} mm wide) or thicken the art to {gc.MIN_SATIN_MM:g} mm"]
+
+
 def _sews_as_fill(lt, spec: dict, fallback: str) -> bool:
     """Whether a planned shape is written as its fill: a failed plan under --fallback fill, no
     columns at all, or an override's stitch: fill / satin."""
-    as_fill = (not lt.ok and fallback == "fill") or not lt.columns
+    # a thin shape (every column under MIN_SATIN_MM) whose plan failed stays satin, with a warning:
+    # tatami can't sew a 0.5 mm stroke at all (Thready, North Stars 11/15)
+    as_fill = (not lt.ok and fallback == "fill" and not _thin_shape(lt)) or not lt.columns
     if spec.get("stitch") == "fill":
         as_fill = True
     elif spec.get("stitch") == "satin" and lt.columns:
@@ -1578,6 +1662,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                                  tidy_joins_on=tidy_joins)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         fill_of = [_sews_as_fill(lt, spec, fallback) for lt, spec in zip(planned, spec_of)]
+        run_of = [_hairline_run(lt, spec) if f else None for lt, spec, f in zip(planned, spec_of, fill_of)]
         # One underlay setting per design region (same thread, near each other): see underlay_regions.
         region_of, region_w = underlay_regions(planned, thread_of, fill_of)
         region_size = Counter(r for r in region_of if r is not None)
@@ -1609,7 +1694,17 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
             as_fill = fill_of[i]
             op = one_pass_plan.get(i)
             made = []
-            if as_fill:
+            if as_fill and run_of[i]:
+                # a hairline: a bean stitch on its centre line (readers: lib/elements/stroke.py
+                # running_stitch_length_mm, bean_stitch_repeats)
+                p = etree.SubElement(g, f"{{{SVG_NS}}}path")
+                p.set("id", f"{el.get('id')}_run")
+                p.set("d", "M " + " ".join(f"{x:.3f},{y:.3f}" for x, y in (tx(q) for q in run_of[i])))
+                p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
+                made.append((p, "running_stitch", _schema_known(
+                    schema, "running_stitch", {"running_stitch_length_mm": "1.8", "bean_stitch_repeats": "1"},
+                    skipped)))
+            elif as_fill:
                 cp = el.__copy__()
                 style = (cp.get("style") or "").rstrip(";")
                 cp.set("style", (style + ";" if style else "") + f"fill:{color}")
@@ -1719,14 +1814,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                                "region_width_mm": round(region_w[region_of[i]], 2),
                                "column_widths_mm": [round(_median_width(c.widths()), 2) for c in lt.columns]}
                               if region_of[i] is not None and region_of[i] in region_w else {}),
-                           **({"warnings": [f"column {t['column']} is {t['width_mm']} mm wide "
-                                            f"(under {gc.MIN_SATIN_MM:g} mm at this size, {t['length_mm']} mm "
-                                            f"long): " + ("a hairline, sew it as a running/bean stitch"
-                                                          if t["hint"] == "hairline"
-                                                          else "thicken the art or enlarge the design")
-                                            for t in chk["thin_columns"]]}
-                              if chk.get("thin_columns") and not as_fill else {}),
-                           "stitch": "fill" if as_fill else "satin",
+                           **({"warning": warn} if (warn := _shape_warning(lt, chk, as_fill, run_of[i])) else {}),
+                           "stitch": "run" if run_of[i] else ("fill" if as_fill else "satin"),
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
                            **{k: chk[k] for k in ("sewable_bare_pct", "sewable_bare_mm2", "outside_pct", "outside_mm2", "overlap_mm2",
@@ -1795,8 +1884,9 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
     blocks = [t for k, t in enumerate(sewn_threads) if k == 0 or t != sewn_threads[k - 1]]
     payload = {"shapes": report, "failed_plans": [r["shape"] for r in report if not r["plan_ok"]],
                "routed_shapes": len(to_route), "trims_added": trims_added, "satin_tips_cut": tips_cut,
-               **({"thin_column_shapes": [r["shape"] for r in report if r.get("warnings")]}
-                  if any(r.get("warnings") for r in report) else {}),
+               **({"thin_column_shapes": [r["shape"] for r in report if r.get("warning")]}
+                  if any(r.get("warning") for r in report) else {}),
+               **({"design_warnings": dw} if (dw := _design_warnings(planned, fill_of, run_of, polys)) else {}),
                "duplicates_dropped": duplicates,
                "threads": sorted(set(sewn_threads)),
                "color_merges": threads.merges,
