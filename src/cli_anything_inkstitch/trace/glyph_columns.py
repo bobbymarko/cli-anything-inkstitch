@@ -400,6 +400,7 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
 
 
 MIN_SATIN_MM = 0.8       # thinner, a satin sews as a thread line (small lettering keeps >= ~0.8 mm)
+THIN_WARN_MM = 0.75      # warn below this: 0.75-0.8 mm columns sew fine, so no noise for them
 HAIRLINE_RUN_MM = 12.0   # a thin column this long is a drawn line, which wants a running stitch
 
 
@@ -418,7 +419,7 @@ def thin_column_warnings(planned: PlannedLetter) -> list[dict]:
     for k, c in enumerate(planned.columns):
         ws = sorted(c.widths())
         w = ws[len(ws) // 2] if ws else 0.0
-        if w >= MIN_SATIN_MM:
+        if w >= THIN_WARN_MM:
             continue
         length = _centre_length(c)
         out.append({"column": k, "width_mm": round(w, 2), "length_mm": round(length, 1),

@@ -362,3 +362,23 @@ class TestThinReporting:
         dw = _design_warnings(lts, [False, False], [None, None], [box(0, 0, 70, 10)])
         assert dw == ["small strokes ~0.50 mm wide in 2 shapes: enlarge the design about 1.6x (to ~112 mm wide) "
                       "or thicken the art to 0.8 mm"]
+
+
+class TestEveryHairlineRuns:
+    def test_a_hairline_that_planned_still_sews_as_a_run(self):
+        """elem_16/17 on North Stars: 0.43 mm arcs whose satin plan passed stayed satin with advice
+        only; the planner knows the answer, so it applies it (Thready 11/15)."""
+        from cli_anything_inkstitch.commands.tools import _hairline_run
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn, PlannedLetter
+        sliver = [[(0.0, 0.0), (30.0, 0.0), (30.0, 0.43), (0.0, 0.43)]]
+        col = PlannedColumn(left=[(0.0, 0.0), (15.0, 0.0), (30.0, 0.0)], right=[(0.0, 0.43), (15.0, 0.43), (30.0, 0.43)])
+        lt = PlannedLetter(char="h", columns=[col], contours=sliver, ok=True, check={})
+        assert _hairline_run(lt, {}) is not None
+        assert _hairline_run(lt, {"stitch": "satin"}) is None       # an override wins
+
+    def test_no_warning_just_under_the_minimum(self):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn, PlannedLetter, thin_column_warnings
+        ys = [0.0, 2.0, 4.0]
+        mk = lambda w: PlannedColumn(left=[(0, y) for y in ys], right=[(w, y) for y in ys])
+        lt = PlannedLetter(char="x", columns=[mk(0.77), mk(0.6)], contours=[], ok=True, check={})
+        assert [t["column"] for t in thin_column_warnings(lt)] == [1]
