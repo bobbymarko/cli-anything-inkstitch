@@ -426,6 +426,45 @@ def thin_column_warnings(planned: PlannedLetter) -> list[dict]:
     return out
 
 
+def outline_width_mm(contours) -> float:
+    """A shape's mean stroke width from its outline: 2 x area / perimeter (exact for a long strip)."""
+    g = glyph_polygon(contours)
+    return 2 * g.area / g.length if g is not None and g.length else 0.0
+
+
+def hairline_centre(contours, step_mm: float = 0.5) -> list[tuple[float, float]] | None:
+    """The centre line of a thin single-ring sliver (a hairline arc): the outline split at its two
+    farthest-apart points into two sides, each resampled by arc length, averaged. None for a shape
+    with holes or more than one ring (not a simple line)."""
+    import numpy as np
+
+    rings = [c for c in contours if len(c) >= 3]
+    if len(rings) != 1:
+        return None
+    ring = np.asarray(rings[0], float)
+    n = len(ring)
+    sub = ring[:: max(1, n // 400)]
+    d = np.hypot(sub[:, None, 0] - sub[None, :, 0], sub[:, None, 1] - sub[None, :, 1])
+    a, b = np.unravel_index(int(np.argmax(d)), d.shape)
+    ia = int(np.argmin(np.hypot(*(ring - sub[a]).T)))
+    ib = int(np.argmin(np.hypot(*(ring - sub[b]).T)))
+    i, j = sorted((ia, ib))
+    side1 = ring[i:j + 1]
+    side2 = np.concatenate([ring[j:], ring[:i + 1]])[::-1]
+
+    def resample(line, m):
+        s = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(line, axis=0).T))])
+        t = np.linspace(0, s[-1], m)
+        return np.column_stack([np.interp(t, s, line[:, 0]), np.interp(t, s, line[:, 1])])
+
+    if len(side1) < 2 or len(side2) < 2:
+        return None
+    length = float(d[a, b])
+    m = max(8, int(length / step_mm))
+    mid = (resample(side1, m) + resample(side2, m)) / 2
+    return [tuple(map(float, q)) for q in mid]
+
+
 def seam_report(planned: PlannedLetter) -> dict:
     from cli_anything_inkstitch.trace import column_checks as cc
 

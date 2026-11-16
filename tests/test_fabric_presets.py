@@ -312,3 +312,53 @@ class TestTipTrimInterpolates:
         assert len(c.pairs) == 4
         assert _width(c.pairs[-1]) == pytest.approx(MIN_TIP_MM)
         assert c.pairs[-1][0][1] == pytest.approx(28.9, abs=0.05)   # 1.1 mm short of the tip, not 28 mm
+
+
+class TestThinReporting:
+    """Thready 11/15 on b6d64b6: one warning line per shape, a design-level fix line, and no silent
+    fill fallback for a thin shape (satin + warning) or a hairline (bean stitch)."""
+
+    @staticmethod
+    def _col(width, length, x=0.0):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn
+        ys = [0.0, length / 2, length]
+        return PlannedColumn(left=[(x - width / 2, y) for y in ys], right=[(x + width / 2, y) for y in ys])
+
+    def _letter(self, cols, ok=True, contours=None):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedLetter, thin_column_warnings
+        lt = PlannedLetter(char="x", columns=cols, contours=contours or [], ok=ok, check={"sewable_bare_pct": 16.0})
+        lt.check["thin_columns"] = thin_column_warnings(lt)
+        return lt
+
+    def test_one_line_per_shape(self):
+        from cli_anything_inkstitch.commands.tools import _shape_warning
+        lt = self._letter([self._col(0.52, 3.0), self._col(0.62, 3.0, 1), self._col(0.55, 3.0, 2)])
+        w = _shape_warning(lt, lt.check, False, None)
+        assert w.count("\n") == 0 and w.startswith("3 columns 0.52-0.62 mm wide, under 0.8 mm")
+
+    def test_thin_failed_shape_stays_satin_with_a_note(self):
+        from cli_anything_inkstitch.commands.tools import _sews_as_fill, _shape_warning
+        lt = self._letter([self._col(0.48, 3.0), self._col(0.48, 1.0, 1)], ok=False)
+        assert _sews_as_fill(lt, {}, "fill") is False
+        assert "kept as satin" in _shape_warning(lt, lt.check, False, None)
+        wide = self._letter([self._col(3.0, 10.0)], ok=False)
+        assert _sews_as_fill(wide, {}, "fill") is True           # a wide failed shape still falls back
+
+    def test_unplannable_hairline_sews_as_a_run(self):
+        from cli_anything_inkstitch.commands.tools import _hairline_run
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedLetter
+        sliver = [[(0.0, 0.0), (30.0, 0.0), (30.0, 0.3), (0.0, 0.3)]]
+        lt = PlannedLetter(char="h", columns=[], contours=sliver, ok=False, check={})
+        line = _hairline_run(lt, {})
+        assert line and abs(line[len(line) // 2][1] - 0.15) < 0.02          # on the sliver's centre
+        assert abs(abs(line[-1][0] - line[0][0]) - 30.0) < 0.6
+        blob = PlannedLetter(char="b", columns=[], contours=[[(0, 0), (5, 0), (5, 5), (0, 5)]], ok=False, check={})
+        assert _hairline_run(blob, {}) is None
+
+    def test_design_warning_says_how_much_to_enlarge(self):
+        from shapely.geometry import box
+        from cli_anything_inkstitch.commands.tools import _design_warnings
+        lts = [self._letter([self._col(0.5, 3.0)]), self._letter([self._col(0.5, 3.0, 5)])]
+        dw = _design_warnings(lts, [False, False], [None, None], [box(0, 0, 70, 10)])
+        assert dw == ["small strokes ~0.50 mm wide in 2 shapes: enlarge the design about 1.6x (to ~112 mm wide) "
+                      "or thicken the art to 0.8 mm"]
