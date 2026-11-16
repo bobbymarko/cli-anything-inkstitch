@@ -506,12 +506,36 @@ class ArtifactHandler(BaseHTTPRequestHandler):
     # -- the loop ---------------------------------------------------------------
 
     def _handle_feedback(self, key: str, body: dict) -> None:
+        from cli_anything_inkstitch.artifact import markup as mk
+        marks = mk.clean(body.get("markup"))
+        body = {k: v for k, v in body.items() if k not in ("markup", "snapshot", "snapshot_error")}
+        if marks:
+            body["markup"] = marks
+            found = self.state.store.find_by_key(key)
+            if found:
+                # rendered BEFORE the item is queued, so the agent is never handed a path that
+                # isn't written yet; a failure still sends the note, just without the picture
+                body.update(self._markup_snapshot(found["file"], marks))
         session = self.state.store.queue_feedback(key, body)
         if not session:
             self._json({"error": "session not found"}, 404)
             return
         self.state.hub.publish(key, {"event": "feedback"})
         self._json({"status": "queued", "pending": len(session["pending_feedback"])})
+
+    def _markup_snapshot(self, project_file: str, marks: dict) -> dict:
+        """{"snapshot": path} or {"snapshot_error": why}: the stitch plan around Bob's marks."""
+        import time as _time
+        from cli_anything_inkstitch.artifact import markup as mk
+        from cli_anything_inkstitch.artifact.design_model import stitch_sequence, _open_locked, _uu_per_mm
+        try:
+            with _open_locked(project_file) as (_proj, tree):
+                upm = _uu_per_mm(tree.getroot())
+            out = Path(project_file).parent / "markup" / f"{_time.strftime('%Y%m%d-%H%M%S')}-{id(marks) % 10000:04d}.png"
+            mk.render_snapshot(marks, out, plan=lambda: stitch_sequence(project_file), uu_per_mm=upm)
+            return {"snapshot": str(out)}
+        except Exception as exc:  # noqa: BLE001 - the note must still go through
+            return {"snapshot_error": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
     def _handle_agent_reply(self, key: str, body: dict) -> None:
         text = str(body.get("text") or "")

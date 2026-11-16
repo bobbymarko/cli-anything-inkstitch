@@ -157,9 +157,16 @@ class SessionStore:
                 "text": str(batch.get("text") or ""),
                 "queued_at": _now_iso(),
             }
+            # pins / sketches drawn over the design, and the server's PNG of them (artifact/markup.py)
+            if batch.get("markup"):
+                item["markup"] = batch["markup"]
+            for k in ("snapshot", "snapshot_error"):
+                if batch.get(k):
+                    item[k] = batch[k]
             session["pending_feedback"].append(item)
             session["chat"].append({"role": "human", "text": item["text"],
-                                    "objects": item["objects"], "at": item["queued_at"]})
+                                    "objects": item["objects"], "at": item["queued_at"],
+                                    **({"markup": item["markup"]} if "markup" in item else {})})
             session["updated_at"] = _now_iso()
             self._save()
             return dict(session)
