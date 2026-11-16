@@ -1511,6 +1511,10 @@ def _doc_mm_frame(root, uu_per_mm):
 @click.option("--fallback", type=click.Choice(["fill", "satin"]), default="fill", show_default=True,
               help="A shape whose plan fails its check: keep it as its fill, or use the failing "
                    "satin plan anyway.")
+@click.option("--joints", type=click.Choice(["knockout", "mitre", "auto"]), default="knockout", show_default=True,
+              help="Where two shapes of one thread overlap (a V drawn as two strokes): knockout tucks the "
+                   "later one 0.3 mm under the first; mitre cuts both on the V's bisector; auto mitres only a "
+                   "wide symmetric V (both strokes >= 6 mm, within 20 %) and knocks out the rest.")
 @click.option("--fabric", type=click.Choice(sorted(FABRICS)), default="standard", show_default=True,
               help="Satin spacing, pull compensation and underlay ladder for this fabric (FABRICS).")
 @click.option("--pull-comp-mm", type=float, default=None,
@@ -1561,7 +1565,7 @@ def _doc_mm_frame(root, uu_per_mm):
 @click.pass_context
 def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, travel, route, one_column,
                     spread_turns, tidy_joins, one_pass, merge_colors_de, max_colors, keep_order, keep_duplicates, overrides_path,
-                    cases_path, keep_curves):
+                    cases_path, keep_curves, joints="knockout"):
     """Digitize filled artwork shapes (a logo) as per-stroke satin columns.
 
     The planner that text-to-satin uses for letters, applied to any filled
@@ -1661,7 +1665,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 plan_ov[el.get("id")] = ov
         # same-thread overlaps (a V joint drawn as two strokes): the later one tucks under the first
         plan_contours, knockouts = sp.knockout_overlaps(contours, polys, thread_of, order,
-                                                        [el.get("id") for el, _ in targets])
+                                                        [el.get("id") for el, _ in targets], joints=joints)
         planned = gc.plan_shapes([(el.get("id"), c) for (el, _), c in zip(targets, plan_contours)],
                                  one_column=one_column, overrides=plan_ov, spread_turns_on=spread_turns,
                                  tidy_joins_on=tidy_joins)
