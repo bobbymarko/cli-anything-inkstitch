@@ -460,6 +460,74 @@ class TestPlanShapes:
 
 
 @needs_planner
+class TestRouteOrder:
+    """route_order reorders a shape's columns so travel runs under the shape
+    instead of jumping across bare fabric, without touching clean shapes."""
+
+    # A "C" opening to the right (⊏): a top arm, a bottom arm and the left
+    # spine joining them. Sewing the two arms back to back leaves the needle
+    # to jump across the open mouth; running arm -> spine -> arm stays inside.
+    CONTOUR = [[(0, 0), (20, 0), (20, 4), (4, 4), (4, 16), (20, 16), (20, 20), (0, 20)]]
+    # The arms stop 0.6 mm short of the spine, so neither tucks under it (a tucked end must keep sewing
+    # before the column it runs under; see test_keeps_tucked_ends_before_their_host).
+    TOP = ([(4.6, 16), (20, 16)], [(4.6, 20), (20, 20)])
+    BOTTOM = ([(4.6, 0), (20, 0)], [(4.6, 4), (20, 4)])
+    LEFT = ([(0, 0), (0, 20)], [(4, 0), (4, 20)])
+
+    def _letter(self, cols):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn, PlannedLetter
+        return PlannedLetter("C", [PlannedColumn(list(l), list(r)) for l, r in cols],
+                             self.CONTOUR, True)
+
+    def _big_hops(self, lt):
+        from cli_anything_inkstitch.trace.glyph_columns import EXPOSED_TRAVEL_MM, exposed_hops
+        return [mm for _, mm in exposed_hops(lt) if mm > EXPOSED_TRAVEL_MM]
+
+    def test_keeps_tucked_ends_before_their_host(self):
+        """Arms that butt into the spine tuck under it (#60) and must sew before it, even though
+        top -> spine -> bottom would save the jump across the mouth: a tucked end sewn after its
+        host would lie on top of it. Cutting a trim never costs a tuck."""
+        from cli_anything_inkstitch.trace.glyph_columns import route_order
+        top = ([(4, 16), (20, 16)], [(4, 20), (20, 20)])
+        bottom = ([(4, 0), (20, 0)], [(4, 4), (20, 4)])
+        order = route_order(self._letter([top, bottom, self.LEFT]))
+        assert order.index(2) > order.index(0) and order.index(2) > order.index(1)
+
+    def test_outward_guard_keeps_the_fabric_sew_order(self):
+        """On an outward fabric (bottom_out from below the shape) a reorder may not sew farther
+        columns before nearer ones any more than the planned order did: here the trim-free order
+        that also runs outward wins, bottom arm -> spine -> top arm (Bob 11/16)."""
+        from cli_anything_inkstitch.trace.glyph_columns import route_order
+        lt = self._letter([self.TOP, self.BOTTOM, self.LEFT])
+        assert route_order(lt, outward_from=(10.0, -50.0)) == [1, 2, 0]
+        assert route_order(lt) == [0, 2, 1]              # no guard: the first trim-free order
+
+    def test_reorders_a_shape_that_jumps_the_mouth(self):
+        from cli_anything_inkstitch.trace.glyph_columns import route_order
+        # planned order top, bottom, left: the needle jumps across the open mouth.
+        lt = self._letter([self.TOP, self.BOTTOM, self.LEFT])
+        assert self._big_hops(lt), "the scrambled order should expose travel"
+        order = route_order(lt)
+        assert order != [0, 1, 2]
+        routed = self._letter([[self.TOP, self.BOTTOM, self.LEFT][i] for i in order])
+        assert not self._big_hops(routed), "the routed order should lay no bare travel"
+
+    def test_leaves_a_clean_shape_alone(self):
+        from cli_anything_inkstitch.trace.glyph_columns import route_order
+        # top, left, bottom already runs the shape end to end.
+        lt = self._letter([self.TOP, self.LEFT, self.BOTTOM])
+        assert not self._big_hops(lt)
+        assert route_order(lt) == [0, 1, 2]
+
+    def test_a_ring_is_never_reordered(self):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn, PlannedLetter, route_order
+        ring = PlannedColumn([(0, 0), (0, 10)], [(2, 0), (2, 10)], closed=True)
+        bar = PlannedColumn([(5, 0), (5, 10)], [(7, 0), (7, 10)])
+        lt = PlannedLetter("O", [ring, bar], self.CONTOUR, True)
+        assert route_order(lt) == [0, 1]
+
+
+@needs_planner
 @needs_binary
 class TestShapesToSatinEngine:
     def test_transformed_ring_keeps_size_place_and_colour(self, tmp_path):

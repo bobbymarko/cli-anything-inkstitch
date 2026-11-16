@@ -881,24 +881,54 @@ def flatten_joint_ends(planned, keep_mm: float = KEEP_MM):
     return planned
 
 
-def tucked_first(planned):
-    """Reorder a shape's columns so each one whose end butts into another (runs under it) sews before
-    it: the column sewn on top covers the tucked end, and a strand running into a point always sews
-    last. Otherwise the planned order is kept (a stable sort; a cycle keeps its planned order).
-    Column indices in check["joins_trimmed"/"wedges_closed"/"joint_ends_flattened"/"acute_v_fills"]
-    are remapped. check["sew_order_changed"] = the new order as old indices, when it changed."""
-    cols = planned.columns
-    n = len(cols)
-    if n < 2:
-        return planned
-    before: dict[int, set[int]] = {j: set() for j in range(n)}
-    for k in range(n):
+def tuck_precedence(cols) -> set[tuple[int, int]]:
+    """(k, j) for each column k whose end butts into (runs under) column j: k must sew before j, so
+    the column sewn on top covers the tucked end. Shared by tucked_first and route_order."""
+    pairs = set()
+    for k in range(len(cols)):
         if cols[k].closed or len(cols[k].left) < 2:
             continue
         for end in (0, -1):
             j = _host(cols, k, end, skip_acute_v=False)
             if j is not None:
-                before[j].add(k)
+                pairs.add((k, j))
+    return pairs
+
+
+def apply_order(planned, order):
+    """Reorder the shape's columns to `order` (old indices in sewing order), remapping the column
+    indices held in check["joins_trimmed"/"wedges_closed"/"joint_ends_flattened"/"acute_v_fills"].
+    check["sew_order_changed"] = the new order as old indices. A no-op for the identity order."""
+    n = len(planned.columns)
+    if list(order) == list(range(n)):
+        return planned
+    cols = planned.columns
+    new_of = {old: new for new, old in enumerate(order)}
+    planned.columns = [cols[i] for i in order]
+    for key in ("joins_trimmed", "wedges_closed", "joint_ends_flattened"):
+        for rec in planned.check.get(key, []):
+            for f in ("column", "with", "under"):
+                if f in rec and rec[f] in new_of:
+                    rec[f] = new_of[rec[f]]
+    if planned.check.get("acute_v_fills"):
+        planned.check["acute_v_fills"] = [[new_of[a], new_of[b]] for a, b in planned.check["acute_v_fills"]]
+    prior = planned.check.get("sew_order_changed")
+    planned.check["sew_order_changed"] = [prior[i] for i in order] if isinstance(prior, list) else list(order)
+    return planned
+
+
+def tucked_first(planned):
+    """Reorder a shape's columns so each one whose end butts into another (runs under it) sews before
+    it: the column sewn on top covers the tucked end, and a strand running into a point always sews
+    last. Otherwise the planned order is kept (a stable sort; a cycle keeps its planned order).
+    Column indices in check are remapped (apply_order)."""
+    cols = planned.columns
+    n = len(cols)
+    if n < 2:
+        return planned
+    before: dict[int, set[int]] = {j: set() for j in range(n)}
+    for k, j in tuck_precedence(cols):
+        before[j].add(k)
     order, placed, busy = [], set(), set()
 
     def place(j):
@@ -913,16 +943,4 @@ def tucked_first(planned):
 
     for j in range(n):
         place(j)
-    if order == list(range(n)):
-        return planned
-    new_of = {old: new for new, old in enumerate(order)}
-    planned.columns = [cols[i] for i in order]
-    for key in ("joins_trimmed", "wedges_closed", "joint_ends_flattened"):
-        for rec in planned.check.get(key, []):
-            for f in ("column", "with", "under"):
-                if f in rec and rec[f] in new_of:
-                    rec[f] = new_of[rec[f]]
-    if planned.check.get("acute_v_fills"):
-        planned.check["acute_v_fills"] = [[new_of[a], new_of[b]] for a, b in planned.check["acute_v_fills"]]
-    planned.check["sew_order_changed"] = order
-    return planned
+    return apply_order(planned, order)
