@@ -487,6 +487,27 @@ class TestShapesToSatinEngine:
         assert abs(w - 30.0) < 1.2          # 20 mm ring x scale(1.5), within pull compensation
 
 
+class TestElementTransform:
+    def test_eps_style_path_transform_keeps_size(self, tmp_path):
+        """An EPS export: the path itself carries matrix(.1,0,0,-.1,0,H) over 10x coordinates
+        (North Stars, Thready's overfit check 11/15: planned at 640 mm for a 70 mm emblem)."""
+        k = 96 / 25.4
+        d = _ring_d(0, 0, 100 * k, 70 * k)          # a 200 mm ring in path units
+        svg = tmp_path / "e.svg"
+        svg.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="80mm" height="40mm" '
+                       f'viewBox="0 0 {80 * k:.4f} {40 * k:.4f}">'
+                       f'<path id="ring" transform="matrix(.1,0,0,-.1,{40 * k:.4f},{20 * k:.4f})" d="{d}" '
+                       f'style="fill:#ffdd00;fill-rule:evenodd;stroke:none"/></svg>')
+        proj = tmp_path / "e.json"
+        assert CliRunner().invoke(root, ["document", "open", "--project", str(proj), "--svg", str(svg)]).exit_code == 0
+        r = CliRunner().invoke(root, ["--json", "tools", "shapes-to-satin", "--project", str(proj)])
+        assert r.exit_code == 0, r.output
+        assert json.loads(r.output)["failed_plans"] == []
+        pts = _stitches(_export(proj, tmp_path, "eps"))
+        w = max(x for x, _ in pts) - min(x for x, _ in pts)
+        assert abs(w - 20.0) < 1.2          # 200 path units x 0.1
+
+
 def _bar_and_post_svg(k=96 / 25.4):
     """A 40 x 4 mm bar and, below its middle, a separate 3 mm post: the bar's nearest point to
     the post is mid-column, which is where end_at_nearest_point splits it."""

@@ -251,3 +251,21 @@ class TestEdgeWalkInset:
 
     def test_centre_walk_columns_have_no_inset(self):
         assert "contour_underlay_inset_mm" not in _lettering_satin_params([1.0], None, "knit")
+
+
+class TestTransformsApplied:
+    def test_path_transform_scales_the_contours(self):
+        # an EPS export: every path carries matrix(.1,0,0,-.1,0,H) over 10x coordinates
+        from lxml import etree
+        from cli_anything_inkstitch.commands.tools import _path_contours_mm
+        svg = etree.fromstring(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100mm" height="100mm">'
+            '<g transform="translate(5,0)"><path transform="matrix(.1,0,0,-.1,0,100)" '
+            'd="M 0 0 L 200 0 L 200 300 L 0 300 Z"/></g></svg>')
+        el = svg[0][0]
+        cs = _path_contours_mm(el, 1.0)
+        xs = [p[0] for c in cs for p in c]
+        ys = [p[1] for c in cs for p in c]
+        assert max(xs) - min(xs) == pytest.approx(20, abs=0.01)     # 200 * 0.1, not 200
+        assert max(ys) - min(ys) == pytest.approx(30, abs=0.01)
+        assert min(xs) == pytest.approx(5, abs=0.01)                 # the group's translate too
