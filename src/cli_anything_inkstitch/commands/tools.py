@@ -1318,10 +1318,12 @@ def _thin_shape(lt) -> bool:
 
 
 def _hairline_run(lt, spec: dict):
-    """A shape too thin to plan (or plan well) that is a long drawn line: its centre line (mm), to
-    sew as a bean stitch instead of a fill no needle can make of a 0.4 mm sliver. None otherwise."""
+    """A shape that is a long drawn line thinner than MIN_SATIN_MM (a hairline arc): its centre
+    line (mm), to sew as a bean stitch. Whether or not a satin plan came out of it: a 0.4 mm satin
+    is a thread line and a fill can't sew it at all (Thready 11/15: apply the answer to every
+    hairline). None otherwise; an override's stitch wins."""
     from cli_anything_inkstitch.trace import glyph_columns as gc
-    if spec.get("stitch") in ("fill", "satin") or (lt.columns and lt.ok):
+    if spec.get("stitch") in ("fill", "satin"):
         return None
     if lt.columns and not _thin_shape(lt):
         return None
@@ -1665,7 +1667,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                                  tidy_joins_on=tidy_joins)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         fill_of = [_sews_as_fill(lt, spec, fallback) for lt, spec in zip(planned, spec_of)]
-        run_of = [_hairline_run(lt, spec) if f else None for lt, spec, f in zip(planned, spec_of, fill_of)]
+        run_of = [_hairline_run(lt, spec) for lt, spec in zip(planned, spec_of)]
+        fill_of = [f or bool(r) for f, r in zip(fill_of, run_of)]    # not a satin: one-pass etc. skip it
         # One underlay setting per design region (same thread, near each other): see underlay_regions.
         region_of, region_w = underlay_regions(planned, thread_of, fill_of)
         region_size = Counter(r for r in region_of if r is not None)
