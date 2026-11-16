@@ -116,3 +116,92 @@ class TestUnderlayPerShape:
         from cli_anything_inkstitch.commands.tools import _lettering_satin_params
         # a wide column still splits even when the shape band width is thin
         assert _lettering_satin_params([8.0], None, "twill", band_width_mm=1.0)["max_stitch_length_mm"] == "7"
+
+
+class TestUnderlayRegions:
+    """One underlay setting per design region (Bob 11/15, HIDA champ back): a knot's strands are
+    separate shapes of one thread; picked per strand, look-alike strands straddling a width
+    threshold sewed with and without zigzag and read as different thicknesses."""
+
+    @staticmethod
+    def _strand(x0, width, length=10.0):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn, PlannedLetter
+        col = PlannedColumn(left=[(x0, 0.0), (x0, length / 2), (x0, length)],
+                            right=[(x0 + width, 0.0), (x0 + width, length / 2), (x0 + width, length)])
+        outline = [[(x0, 0.0), (x0 + width, 0.0), (x0 + width, length), (x0, length)]]
+        return PlannedLetter(char=f"s{x0}", columns=[col], contours=outline, ok=True)
+
+    def test_near_same_thread_shapes_form_one_region(self):
+        from cli_anything_inkstitch.commands.tools import underlay_regions
+        planned = [self._strand(0, 3.6), self._strand(5, 4.2), self._strand(40, 3.9), self._strand(10, 3.8)]
+        threads = ["gold", "gold", "gold", "green"]
+        region, width = underlay_regions(planned, threads, [False] * 4)
+        assert region[0] == region[1]                 # 1.4 mm apart, same thread
+        assert region[2] not in (region[0], None)     # 36 mm away
+        assert region[3] not in (region[0], None)     # touching, but another thread
+        assert width[region[0]] == pytest.approx(3.9)  # median of the strands: 3.6 and 4.2
+
+    def test_fill_shapes_are_left_out(self):
+        from cli_anything_inkstitch.commands.tools import underlay_regions
+        planned = [self._strand(0, 3.6), self._strand(5, 4.2)]
+        region, _ = underlay_regions(planned, ["gold", "gold"], [False, True])
+        assert region[1] is None and region[0] is not None
+
+    def test_region_width_decides_zigzag_for_look_alike_strands(self):
+        # standard ladder: zigzag from 4.0 mm. Per strand, 3.6 and 4.2 mm differ; given the
+        # region's width both agree.
+        assert _underlay(_lettering_satin_params([3.6])) == ["contour_underlay"]
+        assert _underlay(_lettering_satin_params([4.2])) == ["contour_underlay", "zigzag_underlay"]
+        for w in (3.6, 4.2):
+            assert _underlay(_lettering_satin_params([w], zigzag_width_mm=4.1)) == ["contour_underlay",
+                                                                                   "zigzag_underlay"]
+
+    def test_knit_zigzags_mid_width_satin(self):
+        # knit sinks and stretches: edge walk + zigzag from 2.5 mm (the hand-fixed HIDA v7 had it
+        # under every 2-4 mm emblem strand); twill keeps the edge walk alone there
+        knit = lambda w: _underlay(_lettering_satin_params([w], None, "knit"))
+        assert knit(1.2) == ["center_walk_underlay"]
+        assert knit(2.0) == ["contour_underlay"]
+        assert knit(2.7) == ["contour_underlay", "zigzag_underlay"]
+        assert _underlay(_lettering_satin_params([2.7], None, "twill")) == ["contour_underlay"]
+
+
+class TestPointedEnds:
+    """A zigzag-underlaid satin sewn to a point stacks underlay, top layer and lock on one spot
+    (HIDA knot points 56/mm2): knit ends it where it's still end_min_mm wide."""
+
+    @staticmethod
+    def _taper():
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn
+        # 0.2 mm wide at y=0, widening 1 mm per mm of length, 3 mm wide from y=3 on
+        ys = [0.0, 0.5, 1.0, 2.0, 3.0, 6.0, 9.0]
+        w = [min(3.0, 0.2 + y) for y in ys]
+        return PlannedColumn(left=[(-wi / 2, y) for wi, y in zip(w, ys)],
+                             right=[(wi / 2, y) for wi, y in zip(w, ys)])
+
+    def test_point_cut_back_to_min_width(self):
+        from cli_anything_inkstitch.trace.glyph_columns import end_at_min_width
+        c = self._taper()
+        assert end_at_min_width(c, 0.8, 0.6) == (True, False)    # the far end is 3 mm wide
+        assert c.widths()[0] == pytest.approx(0.8)
+        assert c.left[0][1] == pytest.approx(0.6)                # 0.6 mm along: where it is 0.8 wide
+        assert c.left[-1] == (-1.5, 9.0)
+
+    def test_cut_is_capped_along_the_column(self):
+        from cli_anything_inkstitch.trace.glyph_columns import end_at_min_width
+        c = self._taper()
+        end_at_min_width(c, 2.0, 0.6)                            # 2 mm wide is 1.8 mm in: capped
+        assert c.left[0][1] == pytest.approx(0.6)
+        assert c.widths()[0] == pytest.approx(0.8)
+
+    def test_square_and_closed_ends_untouched(self):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn, end_at_min_width
+        sq = PlannedColumn(left=[(0, 0), (0, 5), (0, 10)], right=[(2, 0), (2, 5), (2, 10)])
+        assert end_at_min_width(sq, 0.8, 0.6) == (False, False)
+        ring = self._taper()
+        ring.closed = True
+        assert end_at_min_width(ring, 0.8, 0.6) == (False, False)
+
+    def test_only_knit_cuts_points(self):
+        assert FABRICS["knit"]["end_min_mm"] == 0.8
+        assert FABRICS["standard"]["end_min_mm"] is None and FABRICS["twill"]["end_min_mm"] is None

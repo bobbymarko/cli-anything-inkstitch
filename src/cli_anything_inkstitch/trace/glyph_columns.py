@@ -67,6 +67,50 @@ class PlannedColumn:
         return [math.dist(a, b) for a, b in zip(self.left, self.right)]
 
 
+def end_at_min_width(c: PlannedColumn, min_mm: float, max_cut_mm: float) -> tuple[bool, bool]:
+    """Cut an open column's pointed ends back to where it is min_mm wide, at most max_cut_mm along
+    its centre line, with an interpolated end rung (in place). Returns (start_cut, end_cut).
+
+    Satin sewn down to a point stacks every underlay pass, the top layer and the lock on one spot
+    (HIDA champ back knot points: 56/mm2 with zigzag underlay); ending the column where it is still
+    ~0.8 mm wide spreads them, and the bare tip it leaves is sub-mm2 (the hand-fixed v7: 36/mm2)."""
+    if c.closed or len(c.left) < 3:
+        return False, False
+
+    def cut_front(L, R) -> bool:
+        w = [math.dist(a, b) for a, b in zip(L, R)]
+        if w[0] >= min_mm or len(L) < 3:
+            return False
+        mid = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(L, R)]
+        along = 0.0
+        for j in range(1, len(L)):
+            seg = math.dist(mid[j - 1], mid[j])
+            if w[j] >= min_mm or along + seg >= max_cut_mm:
+                t = 1.0
+                if w[j] >= min_mm and w[j] != w[j - 1]:
+                    t = (min_mm - w[j - 1]) / (w[j] - w[j - 1])
+                if seg > 0:
+                    t = min(t, (max_cut_mm - along) / seg)
+                t = max(0.0, min(1.0, t))
+                if t >= 1.0 and j == len(L) - 1:
+                    return False                       # would leave a single rung
+                lerp = lambda p, q: (p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t)
+                nl, nr = lerp(L[j - 1], L[j]), lerp(R[j - 1], R[j])
+                del L[:j], R[:j]
+                if t < 1.0:
+                    L.insert(0, nl)
+                    R.insert(0, nr)
+                return True
+            along += seg
+        return False
+
+    start = cut_front(c.left, c.right)
+    c.left.reverse(), c.right.reverse()
+    end = len(c.left) >= 3 and cut_front(c.left, c.right)
+    c.left.reverse(), c.right.reverse()
+    return start, end
+
+
 @dataclass
 class PlannedLetter:
     char: str
