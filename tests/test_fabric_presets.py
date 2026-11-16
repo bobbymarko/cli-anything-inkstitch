@@ -298,3 +298,17 @@ class TestThinColumns:
         base = {"outside_pct": 0.0, "crossed_pairs": 0, "overlap_mm2": 0.0}
         assert flat_ok({**base, "sewable_bare_pct": 8.3, "sewable_bare_mm2": 0.8})      # IRISH I corner
         assert not flat_ok({**base, "sewable_bare_pct": 54.0, "sewable_bare_mm2": 1.1})  # half an L bare
+
+
+class TestTipTrimInterpolates:
+    def test_straight_taper_keeps_its_length(self):
+        """A straight tapering stroke has few pairs; trimming its 0.14 mm tip must stop where the
+        rails reach the minimum width, not drop the whole last span (North Stars N, 11/15)."""
+        from cli_anything_inkstitch.planner import columns as col
+        from cli_anything_inkstitch.planner.art_columns import MIN_TIP_MM, _width, trim_tips
+        pairs = [((-4.0, 0.0), (4.0, 0.0)), ((-3.7, 1.0), (3.7, 1.0)), ((-3.4, 2.0), (3.4, 2.0)),
+                 ((-0.07, 30.0), (0.07, 30.0))]
+        c = trim_tips(col.Column(pairs=pairs, curve=[False] * 4, closed=False))
+        assert len(c.pairs) == 4
+        assert _width(c.pairs[-1]) == pytest.approx(MIN_TIP_MM)
+        assert c.pairs[-1][0][1] == pytest.approx(28.9, abs=0.05)   # 1.1 mm short of the tip, not 28 mm

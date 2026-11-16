@@ -148,16 +148,34 @@ def _width(pair) -> float:
 
 
 def trim_tips(c: col.Column, min_mm: float = MIN_TIP_MM) -> col.Column:
-    """End an open column where it's still `min_mm` wide: satin can't sew down to a point."""
+    """End an open column where it's still `min_mm` wide: satin can't sew down to a point.
+
+    The rails run straight between pairs, so the end moves back to the point between the tip pair
+    and the next where the width reaches min_mm, interpolated, not to the next pair. A straight
+    tapering stroke has few pairs: the N's diagonal on North Stars had three near its base and one
+    at its 0.14 mm tip, and dropping that tip pair took the whole 20 mm taper with it (bare 51 %,
+    fell back to fill; Thready's overfit check 11/15)."""
     if c.closed or len(c.pairs) <= 2:
         return c
     pairs, curve = list(c.pairs), list(c.curve)
-    while len(pairs) > 2 and _width(pairs[0]) < min_mm:
-        pairs.pop(0)
-        curve.pop(0)
-    while len(pairs) > 2 and _width(pairs[-1]) < min_mm:
-        pairs.pop()
-        curve.pop()
+
+    def trim_front(pairs, curve):
+        while len(pairs) > 2 and _width(pairs[0]) < min_mm:
+            w0, w1 = _width(pairs[0]), _width(pairs[1])
+            if w1 >= min_mm and w1 > w0:
+                t = (min_mm - w0) / (w1 - w0)
+                (l0, r0), (l1, r1) = pairs[0], pairs[1]
+                lerp = lambda p, q: (p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t)
+                pairs[0] = (lerp(l0, l1), lerp(r0, r1))
+                break
+            pairs.pop(0)
+            curve.pop(0)
+        return pairs, curve
+
+    pairs, curve = trim_front(pairs, curve)
+    pairs.reverse(), curve.reverse()
+    pairs, curve = trim_front(pairs, curve)
+    pairs.reverse(), curve.reverse()
     curve[0] = curve[-1] = False
     return col.Column(pairs=pairs, curve=curve, closed=False)
 
