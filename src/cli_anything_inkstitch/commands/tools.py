@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 import click
 from lxml import etree
 
@@ -1018,14 +1020,17 @@ def _style_autorun_tops(ctx, project_path, stitch_length_mm, bean_repeats):
 # the engine's default (15 %, 0.25 mm).
 FABRICS = {
     #            spacing  pull  centre walk below  zigzag from (mm)
+# end_min_mm: a zigzag-underlaid satin's ends narrower than this are cut back to it (at most
+# SATIN_END_MAX_CUT_MM along, simple locks there), so a point doesn't stack every pass on one spot;
+# None sews to the tip.
     "standard": dict(spacing_mm=None, pull_comp_mm=0.2, center_below_mm=1.5, zigzag_from_mm=4.0,
-                     short_inset=None, short_dist_mm=None),
+                     short_inset=None, short_dist_mm=None, end_min_mm=None),
     "twill":    dict(spacing_mm=0.4, pull_comp_mm=0.2, center_below_mm=2.0, zigzag_from_mm=5.0,
-                     short_inset="30 50", short_dist_mm=0.25),
-    "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=4.0,
-                     short_inset="30 50", short_dist_mm=0.25),
+                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=None),
+    "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=2.5,
+                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=0.8),
     "fleece":   dict(spacing_mm=0.38, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=3.0,
-                     short_inset="30 50", short_dist_mm=0.25),
+                     short_inset="30 50", short_dist_mm=0.25, end_min_mm=None),
 }
 
 
@@ -1061,9 +1066,68 @@ def shape_band_width_mm(columns) -> float | None:
     return statistics.median(meds) if meds else None
 
 
+SATIN_END_MAX_CUT_MM = 0.6     # a pointed satin end is cut back at most this far (FABRICS end_min_mm)
+UNDERLAY_REGION_GAP_MM = 6.0   # same-thread shapes this close form one design region (a knot's strands)
+UNDERLAY_PEER_RATIO = 1.4      # widths within this factor are peers: a shape follows its region's
+                               # underlay band, a column its shape's (and so its region's) zigzag
+
+
+def _median_width(widths) -> float:
+    return sorted(widths)[len(widths) // 2] if widths else 0.0
+
+
+def underlay_regions(planned, threads, skip) -> tuple[list[int | None], dict[int, float]]:
+    """Group satin shapes into design regions for the underlay choice, and each region's width.
+
+    A region is shapes of the same thread whose outlines come within UNDERLAY_REGION_GAP_MM of each
+    other (single link): the interlaced strands of one knot, a crown's points, a heart's lobes. Each
+    strand is usually its own shape, so a per-shape or per-column underlay choice lets strands of
+    near-identical width straddle a FABRICS threshold and sew differently (HIDA champ back: 5 of 24
+    emblem strands got zigzag, 19 did not, and they read as different thicknesses). The region's
+    width is the median of its columns' median widths. skip[i] true leaves shape i out (kept as
+    fill, no columns). Returns (region index per shape or None, {region: width_mm})."""
+    import statistics
+    from cli_anything_inkstitch.trace import glyph_columns as gc
+
+    idx = [i for i, lt in enumerate(planned) if not skip[i] and lt.columns]
+    geo = {i: gc.glyph_polygon(planned[i].contours) for i in idx}
+    idx = [i for i in idx if geo[i] is not None]
+    parent = {i: i for i in idx}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    gap = UNDERLAY_REGION_GAP_MM
+    boxes = {i: geo[i].bounds for i in idx}
+    for a_n, a in enumerate(idx):
+        ax0, ay0, ax1, ay1 = boxes[a]
+        for b in idx[a_n + 1:]:
+            if threads[a] != threads[b]:
+                continue
+            bx0, by0, bx1, by1 = boxes[b]
+            if bx0 > ax1 + gap or ax0 > bx1 + gap or by0 > ay1 + gap or ay0 > by1 + gap:
+                continue
+            if geo[a].distance(geo[b]) <= gap:
+                parent[find(a)] = find(b)
+    roots, region = {}, [None] * len(planned)
+    for i in idx:
+        region[i] = roots.setdefault(find(i), len(roots))
+    width: dict[int, float] = {}
+    for r in set(roots.values()):
+        meds = [_median_width(c.widths()) for i in idx if region[i] == r
+                for c in planned[i].columns if c.widths()]
+        if meds:
+            width[r] = statistics.median(meds)
+    return region, width
+
+
 def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None = None,
                             fabric: str = "standard", band_width_mm: float | None = None,
-                            suppress_short_stitch: bool = False) -> dict:
+                            suppress_short_stitch: bool = False,
+                            zigzag_width_mm: float | None = None) -> dict:
     """Satin params for one planned column, from its median width and the fabric preset.
 
     Underlay by width (FABRICS): a centre walk below center_below_mm, an edge
@@ -1076,7 +1140,11 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
     medium columns just because its representative width is wide. Columns
     wider than SPLIT_SATIN_MM get the engine's split satin
     (max_stitch_length_mm), because one long stitch snags, and that too stays
-    a per-column decision. pull_comp_mm overrides the preset's. Every name
+    a per-column decision. zigzag_width_mm, when given, decides the zigzag
+    instead of the column's own width: shapes-to-satin passes its design
+    region's width for a column of comparable width (underlay_regions), so
+    look-alike strands of one knot all get zigzag or none do. pull_comp_mm
+    overrides the preset's. Every name
     here is checked against the mined schema by _apply_params_to_element
     (readers: lib/elements/satin_column.py zigzag_spacing_mm,
     pull_compensation_mm, center_walk_underlay, contour_underlay,
@@ -1100,7 +1168,7 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
         p["center_walk_underlay"] = "true"
     else:
         p["contour_underlay"] = "true"
-        if w >= f["zigzag_from_mm"]:
+        if (w if zigzag_width_mm is None else zigzag_width_mm) >= f["zigzag_from_mm"]:
             p["zigzag_underlay"] = "true"
     if max(widths_mm or [0.0]) > SPLIT_SATIN_MM:
         p["max_stitch_length_mm"] = f"{SPLIT_SATIN_MM:g}"
@@ -1408,6 +1476,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
     report, param_errors, to_route, groups = [], [], [], []
     skipped: set = set()
     trims_added = 0
+    tips_cut = 0
     with open_project(ctx, project_path, mutate=True) as (proj, tree):
         if tree is None:
             raise UserError("the project has no SVG: document open --svg first")
@@ -1465,6 +1534,12 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                                  tidy_joins_on=tidy_joins)
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         fill_of = [_sews_as_fill(lt, spec, fallback) for lt, spec in zip(planned, spec_of)]
+        # One underlay setting per design region (same thread, near each other): see underlay_regions.
+        region_of, region_w = underlay_regions(planned, thread_of, fill_of)
+        region_size = Counter(r for r in region_of if r is not None)
+
+        def _peer(w, rw):
+            return rw is not None and bool(w) and 1 / UNDERLAY_PEER_RATIO <= w / rw <= UNDERLAY_PEER_RATIO
         # One pass per satin, decided in SEWING order (thread order), so each shape's first column
         # knows where the needle arrives from. A shape kept as fill ends somewhere we don't model.
         one_pass_plan: dict[int, dict] = {}
@@ -1502,7 +1577,13 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 else:
                     hops = {k for k, mm in gc.exposed_hops(lt) if mm > gc.EXPOSED_TRAVEL_MM} \
                         if travel == "trim" else set()
-                band_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole shape
+                shape_w = shape_band_width_mm(lt.columns)   # one underlay band for the whole shape
+                rw = region_w.get(region_of[i]) if region_of[i] is not None else None
+                band_w = rw if shape_w is not None and _peer(shape_w, rw) else shape_w   # ...and region
+                # A region of several shapes (a knot's strands) sews one zigzag choice; inside one
+                # shape a column much narrower than the shape's own width (a crossbar beside a wide
+                # stem) still decides for itself, and one too thin for an edge walk never zigzags.
+                region_zz = rw if rw is not None and region_size[region_of[i]] > 1 else None
                 from cli_anything_inkstitch.trace import column_checks as _cc
                 from cli_anything_inkstitch.trace import joins as _joins
                 concavities = lt.check.get("concavities") or []
@@ -1516,12 +1597,23 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                 for k, c in enumerate(lt.columns):
                     p = etree.SubElement(g, f"{{{SVG_NS}}}path")
                     p.set("id", f"{el.get('id')}_c{k}")
-                    p.set("d", gc.satin_d_curves(c, tx, uu_tolerance(uu_per_mm)) if keep_curves else gc.satin_d(c, tx))
                     p.set("style", f"fill:none;stroke:{color};stroke-width:{stroke_w}")
                     kink = k not in acute_cols and _cc.short_stitch_kink(list(zip(c.left, c.right)), concavities)
                     extra = _schema_known(schema, "satin_column",
-                                          _lettering_satin_params(c.widths(), pull_comp_mm, fabric, band_w,
-                                                                  suppress_short_stitch=kink), skipped)
+                                          _lettering_satin_params(
+                                              c.widths(), pull_comp_mm, fabric, band_w, suppress_short_stitch=kink,
+                                              zigzag_width_mm=region_zz
+                                              if region_zz is not None and _peer(_median_width(c.widths()), shape_w)
+                                              and _median_width(c.widths()) >= FABRICS[fabric]["center_below_mm"]
+                                              else None),
+                                          skipped)
+                    # Points stack zigzag + edge walk + top layer + lock on one spot: cut a zigzagged
+                    # column's pointed ends back (FABRICS end_min_mm). Thin text keeps its points.
+                    cut_s = cut_e = False
+                    if FABRICS[fabric]["end_min_mm"] and extra.get("zigzag_underlay") == "true":
+                        cut_s, cut_e = gc.end_at_min_width(c, FABRICS[fabric]["end_min_mm"], SATIN_END_MAX_CUT_MM)
+                        tips_cut += cut_s + cut_e
+                    p.set("d", gc.satin_d_curves(c, tx, uu_tolerance(uu_per_mm)) if keep_curves else gc.satin_d(c, tx))
                     if op is not None:
                         # readers: lib/elements/satin_column.py end_at_nearest_point (end_point,
                         # _split_top_layer: on, the top layer is split in two passes meeting
@@ -1531,6 +1623,11 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                         if k in op["start_exact"]:
                             one["start_at_nearest_point"] = "false"
                         extra.update(_schema_known(schema, "satin_column", one, skipped))
+                    # a cut point gets a simple lock: the default tack sews more stitches on that spot
+                    # (readers: lib/elements/element.py lock_start / lock_end, lib/stitches/lock_stitch)
+                    locks = ({"lock_start": "simple"} if cut_s else {}) | ({"lock_end": "simple"} if cut_e else {})
+                    if locks:
+                        extra.update(_schema_known(schema, "satin_column", locks, skipped))
                     extra.update(_override_params(spec, True))
                     if k in hops:            # reader: lib/elements/element.py trim_after
                         extra["trim_after"] = "true"
@@ -1567,6 +1664,10 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                            **({"one_pass": {"reversed": len(op["reversed"]), "trims_inside": len(op["trim_after"]),
                                             "longest_entry_run_mm": round(max(op["hidden_runs"] or [0.0]), 1)}}
                               if op is not None and not as_fill else {}),
+                           **({"underlay_region": region_of[i],
+                               "region_width_mm": round(region_w[region_of[i]], 2),
+                               "column_widths_mm": [round(_median_width(c.widths()), 2) for c in lt.columns]}
+                              if region_of[i] is not None and region_of[i] in region_w else {}),
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
@@ -1631,7 +1732,7 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
     sewn_threads = [r["thread"] for r in report]
     blocks = [t for k, t in enumerate(sewn_threads) if k == 0 or t != sewn_threads[k - 1]]
     payload = {"shapes": report, "failed_plans": [r["shape"] for r in report if not r["plan_ok"]],
-               "routed_shapes": len(to_route), "trims_added": trims_added,
+               "routed_shapes": len(to_route), "trims_added": trims_added, "satin_tips_cut": tips_cut,
                "duplicates_dropped": duplicates,
                "threads": sorted(set(sewn_threads)),
                "color_merges": threads.merges,
