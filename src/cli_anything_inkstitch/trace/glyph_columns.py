@@ -276,6 +276,12 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
         shells.append(col.Letter(ch, [], moved, box))
     if merge_joins:
         return _plan_merged(shells, ac)
+    # Build each glyph the lettering way (tuck), then bring the two cleanups the logo planner has and this
+    # path lacked (Bob 11/16, Avenir-Black B/K sew-out): a bowl sewn as two satins meeting at a hard seam
+    # (a B) is re-planned through plan_shapes, which wraps it into one column — kept only when that is ok
+    # with fewer seams, so a letter the tuck path already plans cleanly (an E's arms) is untouched; a glyph
+    # with no bowl seam is left as the tuck path planned it (no regression to an E's arms). (A K's leg
+    # junction is a separate, smaller cleanup deferred: tidy_joins on a clean glyph nudged an E off-letter.)
     out = []
     for sh in shells:
         try:
@@ -285,12 +291,18 @@ def plan_text(font_path: str | Path, text: str, height_mm: float, *,
                                       col.RING_OVERLAP_MM, col.BUTT_OVERLAP_MM, tuck=True)
             lt = col.Letter(sh.char, [ac.trim_tips(c) for c in cols], sh.outline, sh.box,
                             strokes, butt_overlap=col.BUTT_OVERLAP_MM)
-            check = ac.flat_check(lt)
+            planned = _from_letter(lt, bool(ac.flat_check(lt)["ok"]), ac.flat_check(lt))
         except Exception as exc:  # noqa: BLE001 - one unplannable glyph falls back alone
             out.append(PlannedLetter(sh.char, [], [[tuple(map(float, p)) for p in c] for c in sh.outline],
                                      False, {}, f"no column plan ({type(exc).__name__}: {str(exc)[:80]})"))
             continue
-        out.append(_from_letter(lt, bool(check["ok"]), check))
+        if seam_report(planned).get("hard_seams", 0) > 0:
+            cand = plan_shapes([(sh.char, [[tuple(map(float, p)) for p in c] for c in sh.outline])],
+                               one_column=True, tidy_joins_on=True)[0]
+            if cand.ok and cand.columns and \
+               seam_report(cand).get("hard_seams", 99) < seam_report(planned)["hard_seams"]:
+                planned = cand
+        out.append(planned)
     return out
 
 
@@ -581,7 +593,16 @@ def _join_seamed_strokes(i, arrs, sc, planned: PlannedLetter, force: bool = Fals
                         med = spread
                     if _crossed(med) <= _crossed(ring):
                         ring = med
-            pairs[g] = ring or follow_outline(pairs[g], [c.tolist() for c in arrs])
+            joined = ring or follow_outline(pairs[g], [c.tolist() for c in arrs])
+            # A multi-contour glyph (a B's bowl, with its counter) skips outline_column (that pairs a
+            # single-contour stroke's two arcs); follow_outline then leaves the tight inner turn's rungs
+            # crossed, which fails the check and loses the join (the bowl stays seamed). Spread the turns
+            # here too, as the single-contour path does, so the wrapped bowl keeps its one column.
+            if ring is None:
+                spread, _ = spread_turns(joined)
+                if _crossed(spread) <= _crossed(joined):
+                    joined = spread
+            pairs[g] = joined
     lt2 = _letter_from_pairs(ac, i, arrs, sc2.letter.box, strokes, pairs, [bool(c.closed) for c in sc2.letter.columns])
     check = ac.flat_check(lt2)
     new = _from_letter(lt2, bool(check["ok"]), check, planned.char)
