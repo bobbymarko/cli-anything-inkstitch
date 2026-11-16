@@ -129,14 +129,102 @@ KNOCKOUT_MIN_MM2 = 2.0   # same-thread shapes overlapping more than this would s
 KNOCKOUT_TUCK_MM = 0.3   # ...so the later one is cut back to tuck this far under the earlier one
 
 
+MITRE_MIN_WIDTH_MM = 6.0   # "auto" mitres a V only when both strokes are at least this wide...
+MITRE_WIDTH_RATIO = 1.2    # ...and within this ratio of each other (a symmetric V: an M or W bottom)
+MITRE_OVERLAP_MM = 0.3     # the two strokes overlap this much across the bisector (half each side)
+JOINTS = ("knockout", "mitre", "auto")
+
+
+def _axis(g):
+    """A stroke's middle and long direction (minimum rotated rectangle), and its length."""
+    import math
+    q = list(g.minimum_rotated_rectangle.exterior.coords)[:4]
+    e1 = (q[1][0] - q[0][0], q[1][1] - q[0][1])
+    e2 = (q[2][0] - q[1][0], q[2][1] - q[1][1])
+    e = e1 if math.hypot(*e1) >= math.hypot(*e2) else e2
+    n = math.hypot(*e) or 1.0
+    c = g.minimum_rotated_rectangle.centroid
+    return (c.x, c.y), (e[0] / n, e[1] / n), n
+
+
+def _stroke_width(g) -> float:
+    """A stroke's mean width: its area over its length."""
+    return g.area / _axis(g)[2]
+
+
+def wide_symmetric_v(a, b) -> bool:
+    """Bob's rule for a mitre (DW MOM back, 11/14): a wide V with equal strokes, which must read
+    the same on both sides."""
+    wa, wb = _stroke_width(a), _stroke_width(b)
+    return min(wa, wb) >= MITRE_MIN_WIDTH_MM and max(wa, wb) <= MITRE_WIDTH_RATIO * min(wa, wb)
+
+
+def _half_plane(point, normal, size: float = 1e4):
+    """The half-plane {x : (x - point) . normal >= 0} as a big polygon."""
+    from shapely.geometry import Polygon
+    t = (-normal[1], normal[0])
+    px, py = point
+    return Polygon([(px - t[0] * size, py - t[1] * size), (px + t[0] * size, py + t[1] * size),
+                    (px + t[0] * size + normal[0] * size, py + t[1] * size + normal[1] * size),
+                    (px - t[0] * size + normal[0] * size, py - t[1] * size + normal[1] * size)])
+
+
+def mitre_pair(a, b):
+    """Cut two overlapping strokes on the bisector of the V they make, each reaching
+    MITRE_OVERLAP_MM / 2 past it, trimming each only inside the other (the rest of each stroke is
+    untouched). None when they don't make a V (parallel, or one straight on from the other)."""
+    import math
+    (ca, ua, _), (cb, ub, _) = _axis(a), _axis(b)
+    det = ua[0] * (-ub[1]) - ua[1] * (-ub[0])
+    if abs(det) < 1e-6:
+        return None
+    t = ((cb[0] - ca[0]) * (-ub[1]) - (cb[1] - ca[1]) * (-ub[0])) / det
+    p = (ca[0] + ua[0] * t, ca[1] + ua[1] * t)                 # where the two axes meet
+    ra, rb = a.difference(b), b.difference(a)
+    if ra.is_empty or rb.is_empty:
+        return None
+    def unit(v):
+        n = math.hypot(*v)
+        return (v[0] / n, v[1] / n) if n else (0.0, 0.0)
+    da = unit((ra.centroid.x - p[0], ra.centroid.y - p[1]))
+    db = unit((rb.centroid.x - p[0], rb.centroid.y - p[1]))
+    bis = (da[0] + db[0], da[1] + db[1])
+    if math.hypot(*bis) < 0.2:                                  # nearly straight on: a butt, not a V
+        return None
+    bis = unit(bis)
+    nrm = (-bis[1], bis[0])
+    side = lambda v: 1.0 if nrm[0] * v[0] + nrm[1] * v[1] >= 0 else -1.0
+    sa = side(da)
+    sb = side(db)
+    if sa == sb:
+        return None
+    h = MITRE_OVERLAP_MM / 2
+    # a's part lying in b, beyond the bisector on b's side by more than h, goes (and vice versa)
+    beyond_a = _half_plane((p[0] - sa * nrm[0] * h, p[1] - sa * nrm[1] * h), (-sa * nrm[0], -sa * nrm[1]))
+    beyond_b = _half_plane((p[0] - sb * nrm[0] * h, p[1] - sb * nrm[1] * h), (-sb * nrm[0], -sb * nrm[1]))
+    return a.difference(b.intersection(beyond_a)).buffer(0), b.difference(a.intersection(beyond_b)).buffer(0)
+
+
+def _one_piece(g, whole):
+    pieces = [q for q in getattr(g, "geoms", [g]) if q.geom_type == "Polygon" and q.area >= 0.5]
+    return pieces[0] if len(pieces) == 1 and pieces[0].area >= 0.5 * whole.area else None
+
+
+def _rings(g):
+    return [[tuple(map(float, q)) for q in list(g.exterior.coords)[:-1]]] + \
+           [[tuple(map(float, q)) for q in list(r.coords)[:-1]] for r in g.interiors]
+
+
 def knockout_overlaps(contours: list, polys: list, threads: list[str], order: list[int],
-                      labels: list[str] | None = None) -> tuple[list, list[dict]]:
+                      labels: list[str] | None = None, joints: str = "knockout") -> tuple[list, list[dict]]:
     """Where two shapes of one thread overlap (a V or butt joint drawn as two overlapping strokes:
     the North Stars N's diagonal over its stem, 56 mm2), cut the one sewn LATER back so it tucks
     KNOCKOUT_TUCK_MM under the earlier one's edge, instead of sewing two full satins on top of each
     other. Bob's V-joint rule (DW MOM back, 11/14): never stack two full satins at a V; knock out
-    by default (first stroke whole, second tucked ~0.3 mm under it). A mitre is for a wide
-    symmetric V only and isn't attempted here.
+    by default (first stroke whole, second tucked ~0.3 mm under it). joints="mitre" cuts both
+    strokes on the V's bisector instead (mitre_pair, ~0.3 mm overlap), "auto" only for a wide
+    symmetric V (wide_symmetric_v: an M or W bottom); a joint the mitre can't cut (not a V, or it
+    would split a stroke) falls back to the knockout.
 
     Only when the cut leaves one piece with at least half the shape (an end joint): a stroke that
     crosses straight through another, or one mostly inside it (a highlight), is left as drawn.
@@ -155,6 +243,16 @@ def knockout_overlaps(contours: list, polys: list, threads: list[str], order: li
             ov = a.intersection(b).area
             if ov <= KNOCKOUT_MIN_MM2:
                 continue
+            if joints == "mitre" or (joints == "auto" and wide_symmetric_v(a, b)):
+                m = mitre_pair(a, b)
+                if m is not None:
+                    ma, mb = _one_piece(m[0], a), _one_piece(m[1], b)
+                    if ma is not None and mb is not None:
+                        geo[i], geo[j] = ma, mb
+                        out[i], out[j] = _rings(ma), _rings(mb)
+                        cuts.append({"shape": labels[j] if labels else j, "with": labels[i] if labels else i,
+                                     "joint": "mitre", "overlap_mm2": round(ov, 1)})
+                        continue
             # the part outside the first stroke, reaching KNOCKOUT_TUCK_MM back under it only where
             # it continues out of it (b minus a shrunk by the tuck would also keep a sliver all
             # round a's edge inside the overlap: a stray satin along the stem's foot)
@@ -165,10 +263,9 @@ def knockout_overlaps(contours: list, polys: list, threads: list[str], order: li
                 continue
             cut = pieces[0]
             geo[j] = cut
-            out[j] = [[tuple(map(float, q)) for q in list(cut.exterior.coords)[:-1]]] + \
-                     [[tuple(map(float, q)) for q in list(r.coords)[:-1]] for r in cut.interiors]
+            out[j] = _rings(cut)
             cuts.append({"shape": labels[j] if labels else j, "tucked_under": labels[i] if labels else i,
-                         "overlap_mm2": round(ov, 1)})
+                         "joint": "knockout", "overlap_mm2": round(ov, 1)})
     return out, cuts
 
 

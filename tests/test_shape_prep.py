@@ -241,7 +241,7 @@ class TestKnockout:
     def test_butt_joint_later_stroke_tucks_under(self):
         # a stem (0-8 wide) and a bar whose end overlaps it by 8 x 8 mm
         out, cuts = self._run([self._rect(0, 0, 8, 40), self._rect(0, 32, 30, 40)], ["g", "g"])
-        assert cuts == [{"shape": 1, "tucked_under": 0, "overlap_mm2": 64.0}]
+        assert cuts == [{"shape": 1, "tucked_under": 0, "joint": "knockout", "overlap_mm2": 64.0}]
         bar = sp.outline_polygon(out[1])
         assert bar.bounds[0] == pytest.approx(7.7, abs=0.01)     # 0.3 mm under the stem's edge
         assert out[0] == self._rect(0, 0, 8, 40)                  # the first stroke stays whole
@@ -256,3 +256,43 @@ class TestKnockout:
         assert self._run([self._rect(0, 0, 8, 40), self._rect(0, 32, 30, 40)], ["g", "y"])[1] == []
         touch = [self._rect(0, 0, 8, 40), self._rect(7.9, 30, 30, 40)]     # 1 mm2: strands touching
         assert self._run(touch, ["g", "g"])[1] == []
+
+
+class TestMitre:
+    """Mitre: an OPTION (Bob 11/14, Thready 11/15): both strokes cut on the V's bisector with
+    ~0.3 mm overlap; auto only for a wide symmetric V."""
+
+    @staticmethod
+    def _bar(angle_deg, width, length=40.0):
+        import math
+        from shapely.geometry import Polygon
+        a = math.radians(angle_deg)
+        u, n = (math.cos(a), math.sin(a)), (-math.sin(a), math.cos(a))
+        h = width / 2
+        # a bar from just behind the origin outward: two of them overlap at the V's apex
+        s, e = -0.3 * width, length
+        return Polygon([(u[0] * s + n[0] * h, u[1] * s + n[1] * h), (u[0] * e + n[0] * h, u[1] * e + n[1] * h),
+                        (u[0] * e - n[0] * h, u[1] * e - n[1] * h), (u[0] * s - n[0] * h, u[1] * s - n[1] * h)])
+
+    def test_mitre_splits_the_overlap_on_the_bisector(self):
+        a, b = self._bar(60, 7.0), self._bar(120, 7.0)          # a symmetric V opening upward
+        ma, mb = sp.mitre_pair(a, b)
+        assert ma.intersection(mb).area < 0.25 * a.intersection(b).area     # mostly not stacked
+        assert ma.union(mb).area == pytest.approx(a.union(b).area, rel=0.01)  # nothing left bare
+        assert ma.area == pytest.approx(mb.area, rel=0.02)                   # symmetric
+
+    def test_auto_mitres_only_a_wide_symmetric_v(self):
+        assert sp.wide_symmetric_v(self._bar(60, 7.0), self._bar(120, 7.5))
+        assert not sp.wide_symmetric_v(self._bar(60, 7.0), self._bar(120, 3.0))   # unequal
+        assert not sp.wide_symmetric_v(self._bar(60, 3.0), self._bar(120, 3.0))   # narrow
+
+    def test_joints_option(self):
+        a, b = self._bar(60, 7.0), self._bar(120, 7.0)
+        rings = lambda g: [list(g.exterior.coords)[:-1]]
+        polys = [a, b]
+        for joints, want in (("knockout", "knockout"), ("mitre", "mitre"), ("auto", "mitre")):
+            _, cuts = sp.knockout_overlaps([rings(a), rings(b)], polys, ["g", "g"], [0, 1], joints=joints)
+            assert [c["joint"] for c in cuts] == [want], joints
+        n1, n2 = self._bar(60, 3.0), self._bar(120, 3.0)
+        _, cuts = sp.knockout_overlaps([rings(n1), rings(n2)], [n1, n2], ["g", "g"], [0, 1], joints="auto")
+        assert [c["joint"] for c in cuts] == ["knockout"]
