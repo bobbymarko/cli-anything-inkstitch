@@ -322,9 +322,6 @@ def _concave_corners(contours, glyph) -> np.ndarray:
     return np.array(out).reshape(-1, 2)
 
 
-BEHIND_EPS = 0.02         # a corner projecting this share of the junction radius or less onto a branch lies behind it
-
-
 def _smooth_pairs(es, dirs, at, r, corners, near_lines, others=None) -> list:
     """At a junction of 3 or more branches: the pairs of neighbouring branches (by direction) with no
     inside corner between them, when those pairs give each branch at most one partner and at least
@@ -346,16 +343,13 @@ def _smooth_pairs(es, dirs, at, r, corners, near_lines, others=None) -> list:
             continue
         p = Point(c)
         ranked = sorted(es, key=lambda e: lines[e].distance(p))
-        # A corner of a NEIGHBOURING junction (nearer to it than to this one — e.g. along an R's short
-        # bowl bar, the bowl-meets-stem corners are within reach of the leg fork) that lies BEHIND two
-        # of this junction's branches is the same distance (|corner - at|) from both, so which one
-        # counted as "second nearest" was a tie broken by branch numbering. On an R's fork that split
-        # the bowl's own halves at some sizes and not others (R = 3 strokes at 7.6 mm, 4 at 9 mm, same
-        # geometry; Thready's rig suite 2026-11-16). It separates nothing here: skip it. A corner nearest
-        # THIS junction keeps the old reading even when tied (bracketed serifs depend on it: regress).
-        if others is not None and len(ranked) >= 3 \
-                and all(lines[e].project(p) <= BEHIND_EPS * max(r, 0.3) for e in ranked[1:3]) \
-                and any(np.hypot(*(c - o)) < np.hypot(*(c - at)) for o in others):
+        # A corner nearer ANOTHER junction than this one belongs to that junction and separates nothing
+        # here. Within SECTOR_REACH such corners (an R's bowl-meets-stem corners seen from its leg fork; a
+        # K's connector-meets-stem corners seen from its arm/leg fork) were assigned to whichever two branches
+        # passed closest, and where two branches were the same distance away (both nearest at the junction
+        # point) branch numbering broke the tie: the R split its bowl at some sizes and not others, a Lato 1
+        # K at 45.5 mm read its connector as running on into the leg (Thready's rig suite, 2026-11-16).
+        if others is not None and any(np.hypot(*(c - o)) < np.hypot(*(c - at)) for o in others):
             continue
         two = ranked[:2]
         split.add(frozenset(two))
