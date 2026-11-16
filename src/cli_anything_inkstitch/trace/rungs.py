@@ -23,6 +23,7 @@ point — do not wire this straight into fill_to_satin.
 from __future__ import annotations
 
 import math
+import re
 
 from cli_anything_inkstitch.trace.satinize import (
     distance_transform,
@@ -232,3 +233,143 @@ def suggest_rungs(d: str, *, spacing: float = 30.0, turn_deg: float = 20.0,
         if placed_arc is None or arc - placed_arc > min_spacing_px:
             emit(len(seg) - 1)
     return rungs
+
+
+# ---------------------------------------------------------------- pairing rails of an edited satin
+
+PAIR_RUNG_STEP_MM = 2.5        # one rung per this much column length (14 on a 35 mm hand-edited band)
+PAIR_RUNG_OVERSHOOT_MM = 0.3   # each rung end runs this far past its rail, so it surely crosses it
+PAIR_RUNG_SQUARE_DEG = 20.0    # a rung crosses each rail within this of square (and the rails run within
+                               # this of parallel there), or it isn't placed
+
+
+def pairing_rungs(rail_a, rail_b, units_per_mm: float, step_mm: float = PAIR_RUNG_STEP_MM,
+                  overshoot_mm: float = PAIR_RUNG_OVERSHOOT_MM,
+                  square_deg: float = PAIR_RUNG_SQUARE_DEG) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Rungs that pair two satin rails square across the column, without touching the rails.
+
+    For a satin whose rails have different node counts and no rungs: the engine then invents
+    rungs from the rails' own nodes (lib/elements/satin_column.py _synthesize_rungs: node i of
+    one rail to node i of the other, ends dropped), so a hand-edited rail with extra nodes on one
+    side pairs unrelated points and the zigzag slants or twists. Resampling the rails to equal
+    counts would fix the pairing but moves the outline; explicit rungs fix it and leave the rails
+    exactly as drawn.
+
+    rail_a / rail_b: flattened rail points (any units); units_per_mm converts step_mm and
+    overshoot_mm into them. A rung is tried every step_mm along the column's centre line (the
+    series centred on the column), square to the centre line, from rail to rail, each end
+    overshooting its rail by overshoot_mm. Only where the rails run alongside each other: a rung
+    must cross each rail within square_deg of square, and the rails there run within square_deg
+    of parallel, so a slanted or tapered end keeps the engine's own fan from the last rung to the
+    rail ends (a band ending on a slanted edge, as drawn). Each must meet the engine's reading of a rung
+    (lib/elements/satin_column.py rail_indices / flattened_sections / validation_warnings): it
+    crosses each rail exactly once, crosses no other rung, and the rungs cut both rails in the
+    same order. Rungs failing that are dropped. Two rungs exactly is ambiguous to the engine
+    (TwoRungsWarning: a '#' shape whose rails it has to guess), so two become one. Returns
+    [] when no rung fits (a very short column)."""
+    from shapely.geometry import LineString
+
+    A, B = LineString(rail_a), LineString(rail_b)
+    if A.length == 0 or B.length == 0:
+        return []
+    a0, a1 = rail_a[0], rail_a[-1]
+    b0, b1 = rail_b[0], rail_b[-1]
+    Bc = B if math.dist(a0, b0) + math.dist(a1, b1) <= math.dist(a0, b1) + math.dist(a1, b0) \
+        else LineString(list(rail_b)[::-1])
+    n = 200
+    centre = []
+    for i in range(n + 1):
+        p, q = A.interpolate(i / n, normalized=True), Bc.interpolate(i / n, normalized=True)
+        centre.append(((p.x + q.x) / 2.0, (p.y + q.y) / 2.0))
+    C = LineString(centre)
+    step = step_mm * units_per_mm
+    over = overshoot_mm * units_per_mm
+    if C.length < step:
+        return []
+    reach = 4.0 * max(A.hausdorff_distance(Bc), units_per_mm)
+
+    def tangent(rail, pt):
+        t = rail.project(pt)
+        q0 = rail.interpolate(max(t - 0.3 * units_per_mm, 0.0))
+        q1 = rail.interpolate(min(t + 0.3 * units_per_mm, rail.length))
+        rx, ry = q1.x - q0.x, q1.y - q0.y
+        rl = math.hypot(rx, ry) or 1.0
+        return rx / rl, ry / rl
+
+    def hit(line, rail, c):
+        x = line.intersection(rail)
+        pts = [g for g in getattr(x, "geoms", [x]) if g.geom_type == "Point" and not g.is_empty]
+        return min(pts, key=lambda g: g.distance(c)) if pts else None
+
+    lim = math.sin(math.radians(square_deg))
+    out, cuts = [], []
+    k = int((C.length - step) // step) + 1
+    first = (C.length - (k - 1) * step) / 2.0          # centre the rungs on the column
+    for j in range(k):
+        s = first + j * step
+        c = C.interpolate(s)
+        p0 = C.interpolate(max(s - 0.5 * units_per_mm, 0.0))
+        p1 = C.interpolate(min(s + 0.5 * units_per_mm, C.length))
+        tx, ty = p1.x - p0.x, p1.y - p0.y
+        tl = math.hypot(tx, ty)
+        if tl == 0:
+            continue
+        nx, ny = -ty / tl, tx / tl
+        probe = LineString([(c.x - nx * reach, c.y - ny * reach), (c.x + nx * reach, c.y + ny * reach)])
+        pa, pb = hit(probe, A, c), hit(probe, B, c)
+        if pa is None or pb is None:
+            continue
+        ax, ay, bx, by = pa.x, pa.y, pb.x, pb.y
+        w = math.hypot(bx - ax, by - ay)
+        if w == 0:
+            continue
+        ux, uy = (bx - ax) / w, (by - ay) / w
+        rung = ((ax - ux * over, ay - uy * over), (bx + ux * over, by + uy * over))
+        ls = LineString(rung)
+        if ls.intersection(A).geom_type != "Point" or ls.intersection(B).geom_type != "Point":
+            continue
+        if any(ls.intersects(LineString(r)) for r in out):
+            continue
+        (tax, tay), (tbx, tby) = tangent(A, pa), tangent(B, pb)
+        # square to each rail, and the rails alongside each other (not an end cut or a taper)
+        if abs(tax * ux + tay * uy) > lim or abs(tbx * ux + tby * uy) > lim \
+                or abs(tax * tby - tay * tbx) > lim:
+            continue
+        ta, tb = A.project(pa), B.project(pb)
+        if cuts and ta <= cuts[-1][0]:                  # must move on along rail A
+            continue
+        out.append(rung)
+        cuts.append((ta, tb))
+    # the rungs must cut rail B in one consistent order too (else sections pair across a twist)
+    if len(cuts) > 1:
+        tbs = [t for _, t in cuts]
+        inc = sum(1 for x, y in zip(tbs, tbs[1:]) if y > x) >= len(tbs) / 2
+        keep, last = [], None
+        for r, t in zip(out, tbs):
+            if last is None or (t > last if inc else t < last):
+                keep.append(r)
+                last = t
+        out = keep
+    if len(out) == 2:
+        out = out[:1]
+    return out
+
+
+def pair_unpaired_rails(d: str, units_per_mm: float, **kw) -> tuple[str, int]:
+    """A satin path's `d` with pairing rungs added when its two rails have different node counts
+    and it has no rungs (the gate's twist_risk), else unchanged. The rails' text is kept byte for
+    byte; rungs are appended as extra subpaths, which is how the engine reads them
+    (lib/elements/satin_column.py rail_indices: subpaths crossing exactly two others are rungs).
+    Returns (d, rungs added)."""
+    from cli_anything_inkstitch.artifact.gate import flatten_path, rail_node_count
+
+    subs = [x.strip() for x in re.split(r"(?=[Mm])", d or "") if x.strip()]
+    if len(subs) != 2 or rail_node_count(subs[0]) == rail_node_count(subs[1]):
+        return d, 0
+    a, b = flatten_path(subs[0]), flatten_path(subs[1])
+    if len(a) < 2 or len(b) < 2:
+        return d, 0
+    rungs = pairing_rungs(a, b, units_per_mm, **kw)
+    if not rungs:
+        return d, 0
+    return d.rstrip() + "".join(f" M {p[0]:.3f},{p[1]:.3f} L {q[0]:.3f},{q[1]:.3f}" for p, q in rungs), len(rungs)
