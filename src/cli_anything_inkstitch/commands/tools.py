@@ -1682,6 +1682,15 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                                  tidy_joins_on=tidy_joins,
                                  joint_overlap_mm=FABRICS[fabric]["joint_overlap_mm"]
                                  if joint_overlap_mm is None else joint_overlap_mm)
+        if travel == "trim":
+            # Sew each shape's columns in an order that keeps travel off bare fabric, so a connected
+            # shape runs end to end instead of filling one part, jumping, and filling the rest from the
+            # other way (a mid-shape jump --travel trim would trim). Geometry is unchanged; only the sew
+            # order. On an outward fabric (centre_out / bottom_out) the reorder may not undo that push
+            # (Bob 11/16). --travel route orders via auto_satin itself, so it's skipped there.
+            for lt in planned:
+                from cli_anything_inkstitch.trace.joins import apply_order
+                apply_order(lt, gc.route_order(lt, outward_from=sew_origin if outward else None))
         stroke_w = f"{0.1 * uu_per_mm:.3f}"
         fill_of = [_sews_as_fill(lt, spec, fallback) for lt, spec in zip(planned, spec_of)]
         run_of = [_hairline_run(lt, spec) for lt, spec in zip(planned, spec_of)]

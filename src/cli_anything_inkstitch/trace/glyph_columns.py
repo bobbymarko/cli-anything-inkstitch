@@ -1715,6 +1715,103 @@ def plan_one_pass(letter: PlannedLetter, arrival=None, trim_handoffs: bool = Tru
             "hidden_runs": [r["hidden_run"] for r in recs]}
 
 
+ROUTE_EXACT_MAX = 7       # route_order tries every column order up to this many columns
+OUTWARD_TOL_MM = 3.0      # route_order's guard: sewing a column this much farther from the origin before a
+                          # nearer one doesn't count against the outward order (small shapes reorder freely)
+
+
+def route_order(letter: PlannedLetter, outward_from=None, tol_mm: float = OUTWARD_TOL_MM) -> list[int]:
+    """A sewing order for a shape's columns that lays less travel on bare fabric than the planned
+    (drawing) order, or the planned order unchanged when nothing strictly beats it.
+
+    The planner cuts a shape into strokes at its junctions in drawing order, which can sew one part,
+    jump across bare fabric, and fill the rest from the other way (a bracket sewing its top arm, then
+    jumping its open mouth); --travel trim drops a trim on each such jump. Only whole columns are
+    reordered: no column's geometry, rails or ring changes. An order is costed with route_walk, the
+    same walk exposed_hops and the trims use (start_at_nearest_point entry).
+
+    Guard (Bob 11/16: "prioritize our preferred stitch-out order when it matters"): with
+    `outward_from` (the fabric's sew origin for centre_out / bottom_out), an order may not sew farther
+    columns before nearer ones (by more than tol_mm) any more than the planned order already does,
+    so cutting trims never undoes the outward push. Without it (thread order) any order may win.
+    A tucked joint end always keeps sewing before the column it runs under (tuck_precedence)."""
+    import itertools
+
+    import numpy as np
+
+    n = len(letter.columns)
+    identity = list(range(n))
+    if n < 2 or any(c.closed for c in letter.columns):
+        return identity
+    glyph = glyph_polygon(letter.contours)
+    if glyph is None:
+        return identity
+    glyph = glyph.buffer(0.05)
+    ends = [column_ends(c.left, c.right) for c in letter.columns]
+
+    def cost(order):
+        big = [r["exposed"] for r in route_walk([ends[i] for i in order], glyph)[1:]
+               if r["exposed"] > EXPOSED_TRAVEL_MM]
+        return (len(big), round(sum(big), 3))
+
+    inward = None
+    if outward_from is not None:
+        ox, oy = outward_from
+        cen = [np.mean([((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(c.left, c.right)], axis=0)
+               for c in letter.columns]
+        dist = [math.hypot(float(x) - ox, float(y) - oy) for x, y in cen]
+
+        def inward(order):     # how much farther-before-nearer sewing the order does, past tol_mm
+            return sum(max(0.0, dist[order[i]] - dist[order[j]] - tol_mm)
+                       for i in range(n) for j in range(i + 1, n))
+        limit = inward(identity) + 1e-9
+    from cli_anything_inkstitch.trace.joins import tuck_precedence
+    tucks = tuck_precedence(letter.columns)      # a tucked end sews before the column it runs under (#60)
+    base = cost(identity)
+    if base == (0, 0.0):
+        return identity
+    best_order, best_cost = identity, base
+    candidates = (itertools.permutations(identity) if n <= ROUTE_EXACT_MAX
+                  else _route_heuristic(ends, glyph))
+    for order in candidates:
+        order = list(order)
+        if inward is not None and inward(order) > limit:
+            continue
+        if tucks:
+            pos = {c: i for i, c in enumerate(order)}
+            if any(pos[k] > pos[j] for k, j in tucks):
+                continue
+        c = cost(order)
+        if c < best_cost:
+            best_cost, best_order = c, order
+    return best_order if best_cost < base else identity
+
+
+def _route_heuristic(ends, glyph):
+    """Nearest-neighbour orders, one per first column, for shapes with too many columns to permute;
+    route_order keeps one only when it strictly beats the planned order, so a weak seed never
+    regresses."""
+    from shapely.geometry import LineString
+    n = len(ends)
+
+    def hop(a_far, b):
+        e0, e1 = ends[b]
+        start, far = (e0, e1) if math.dist(a_far, e0) <= math.dist(a_far, e1) else (e1, e0)
+        mm = LineString([a_far, start]).difference(glyph).length if math.dist(a_far, start) > 1e-6 else 0.0
+        return mm, far
+
+    seeds = []
+    for first in range(n):
+        order, used, cur = [first], {first}, ends[first][1]
+        while len(order) < n:
+            nxt = min((j for j in range(n) if j not in used), key=lambda j: hop(cur, j)[0])
+            _, cur = hop(cur, nxt)
+            order.append(nxt)
+            used.add(nxt)
+        seeds.append(order)
+    return seeds
+
+
 def exposed_hops(letter: PlannedLetter) -> list[tuple[int, float]]:
     """(k, mm) for each travel from column k to column k+1, sewn in planned order, that would lie
     on bare fabric for more than a hair (exposed_travel_mm sums these)."""
