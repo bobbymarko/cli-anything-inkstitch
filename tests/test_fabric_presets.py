@@ -231,3 +231,23 @@ class TestSewOrderByFabric:
         lt = strand()
         plan_one_pass(lt, arrival=(31, 1))              # without an origin: nearest the needle
         assert lt.columns[0].left[0][0] == 30
+
+
+class TestEdgeWalkInset:
+    """Stretch fabric: the edge walk sits ~1 mm in, never past 25 % per side (Bob 11/13: on a
+    hoodie a 0.4 mm-in edge walk peeked out past the satin)."""
+
+    def test_knit_insets_a_quarter_up_to_one_mm(self):
+        narrow = _lettering_satin_params([3.0], None, "knit")
+        assert (narrow["contour_underlay_inset_mm"], narrow["contour_underlay_inset_percent"]) == ("0", "25")
+        wide = _lettering_satin_params([7.0], None, "knit")
+        assert (wide["contour_underlay_inset_mm"], wide["contour_underlay_inset_percent"]) == ("1", "0")
+        assert FABRICS["fleece"]["contour_inset_mm"] == 1.0
+
+    def test_stable_fabric_keeps_the_engine_default(self):
+        for fabric in ("standard", "twill", "cap"):
+            p = _lettering_satin_params([3.0], None, fabric)
+            assert "contour_underlay_inset_mm" not in p and "contour_underlay_inset_percent" not in p
+
+    def test_centre_walk_columns_have_no_inset(self):
+        assert "contour_underlay_inset_mm" not in _lettering_satin_params([1.0], None, "knit")

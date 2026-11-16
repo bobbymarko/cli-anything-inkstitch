@@ -304,8 +304,8 @@ def centre_out_order(threads: list[str], polys: list, origin: tuple[float, float
       and knots). One with several threads is sewn as one unit, its threads batched (each thread's
       nearest element to the origin first). Free-standing single-thread clusters (letters of a
       name) are batched per thread, so spaced lettering doesn't add colour changes.
-    - Units, then each thread batch, then elements, then shapes sew by their nearest distance to
-      the origin. Layering still wins: an earlier-drawn shape of another thread that a shape
+    - Units, then each thread batch, then elements sew by their nearest distance to the origin;
+      inside an element, shapes sew outward from the element's own middle. Layering still wins: an earlier-drawn shape of another thread that a shape
       overlaps sews first (as thread_order).
 
     Returns (order, splits): splits lists each thread sewn in more than one block (an extra colour
@@ -345,8 +345,20 @@ def centre_out_order(threads: list[str], polys: list, origin: tuple[float, float
     batch = [(unit[i], threads[i]) for i in range(n)]
     batch_r = rank(batch)
     elem_r = rank(element)
+    # inside an element, shapes sew outward from the element's own middle (a heart's inner swirl
+    # before its two halves, a knot's strands from its centre): the elements themselves already
+    # sew outward from the origin
+    from shapely.ops import unary_union
+    centre = {}
+    for e in set(element):
+        g = [polys[i] for i in range(n) if element[i] == e and polys[i] is not None]
+        if g:
+            x0, y0, x1, y1 = unary_union(g).bounds
+            centre[e] = Point((x0 + x1) / 2, (y0 + y1) / 2)
+    d_in = [polys[i].distance(centre[element[i]]) if polys[i] is not None and element[i] in centre else far
+            for i in range(n)]
     key = {i: (unit_r[unit[i]], str(unit[i]), batch_r[batch[i]], threads[i], elem_r[element[i]], element[i],
-               d[i], i) for i in range(n)}
+               d_in[i], d[i], i) for i in range(n)}
     want = sorted(range(n), key=key.get)
     done: list[int] = []
     left = set(range(n))

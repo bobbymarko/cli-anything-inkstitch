@@ -1020,6 +1020,10 @@ def _style_autorun_tops(ctx, project_path, stitch_length_mm, bean_repeats):
 # the engine's default (15 %, 0.25 mm).
 FABRICS = {
     #            spacing  pull  centre walk below  zigzag from (mm)
+# contour_inset_mm: how far the edge walk sits inside each rail, about this much but never more than
+# 25 % of the column per side (None: the engine's 0.4 mm). On stretch fabric an edge walk 0.4 mm in
+# peeks out past the satin once the fabric relaxes (Bob 11/13, HIDAMOM v5 hoodie: "edge underlay
+# can't be so close to the edge"); the hand-fixed HIDA v7 used 25 % per side, ~1 mm on 4 mm strands.
 # order: "thread" sews each thread as one block, the fewest trims and colour changes (stable
 # woven fabric barely moves, so registration holds); "centre_out" (stretch: knit, fleece) sews
 # outward from the design's middle, each element finished before the next, satins sewn outward
@@ -1030,23 +1034,23 @@ FABRICS = {
 # None sews to the tip.
     "standard": dict(spacing_mm=None, pull_comp_mm=0.2, center_below_mm=1.5, zigzag_from_mm=4.0,
                      short_inset=None, short_dist_mm=None, end_min_mm=None,
-                     order="thread"),
+                     order="thread", contour_inset_mm=None),
     "twill":    dict(spacing_mm=0.4, pull_comp_mm=0.2, center_below_mm=2.0, zigzag_from_mm=5.0,
                      short_inset="30 50", short_dist_mm=0.25, end_min_mm=None,
-                     order="thread"),
+                     order="thread", contour_inset_mm=None),
     "knit":     dict(spacing_mm=0.4, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=2.5,
                      short_inset="30 50", short_dist_mm=0.25, end_min_mm=0.8,
-                     order="centre_out"),
+                     order="centre_out", contour_inset_mm=1.0),
     "fleece":   dict(spacing_mm=0.38, pull_comp_mm=0.3, center_below_mm=1.5, zigzag_from_mm=3.0,
                      short_inset="30 50", short_dist_mm=0.25, end_min_mm=None,
-                     order="centre_out"),
+                     order="centre_out", contour_inset_mm=1.0),
     # structured cap (front panel on a cap frame): firmer underlay and more pull compensation than
     # flat goods (the crown is stiff but curved, and only the brim edge is clamped), and sewn from
     # the bottom centre out, to the sides and up, so the crown is pushed away from the clamped brim
     # instead of bubbling between it and finished work (Ricoma, Bernina, cap digitizing guides).
     "cap":      dict(spacing_mm=0.4, pull_comp_mm=0.4, center_below_mm=1.5, zigzag_from_mm=2.5,
                      short_inset="30 50", short_dist_mm=0.25, end_min_mm=0.8,
-                     order="bottom_out"),
+                     order="bottom_out", contour_inset_mm=None),
 }
 
 
@@ -1184,6 +1188,16 @@ def _lettering_satin_params(widths_mm: list[float], pull_comp_mm: float | None =
         p["center_walk_underlay"] = "true"
     else:
         p["contour_underlay"] = "true"
+        if f["contour_inset_mm"] is not None:
+            # readers: lib/elements/satin_column.py contour_underlay_inset_mm / _percent, summed per
+            # side by lib/utils/geometry.py offset_points (clamped at the midpoint). 25 % per side
+            # up to the target, a flat target above it, so it's ~target and never past a quarter.
+            if w * 0.25 <= f["contour_inset_mm"]:
+                p["contour_underlay_inset_mm"] = "0"
+                p["contour_underlay_inset_percent"] = "25"
+            else:
+                p["contour_underlay_inset_mm"] = f"{f['contour_inset_mm']:g}"
+                p["contour_underlay_inset_percent"] = "0"
         if (w if zigzag_width_mm is None else zigzag_width_mm) >= f["zigzag_from_mm"]:
             p["zigzag_underlay"] = "true"
     if max(widths_mm or [0.0]) > SPLIT_SATIN_MM:
