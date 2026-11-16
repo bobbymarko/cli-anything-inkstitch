@@ -506,6 +506,21 @@
                 pointer-events: none; }
   .knifeNode { fill: var(--end); stroke: var(--handle); stroke-width: 1;
                vector-effect: non-scaling-stroke; pointer-events: none; }
+  /* mark up: pins + sketches for the agent (renderMarks) */
+  .markStroke { fill: none; stroke: #e0245e; stroke-width: 2.5; stroke-linecap: round;
+                stroke-linejoin: round; vector-effect: non-scaling-stroke; pointer-events: none; }
+  .markStroke.markDraft { opacity: .65; }
+  .markPin { pointer-events: none; }
+  .markPin circle { fill: #e0245e; stroke: #fff; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .markPin text { fill: #fff; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+  #markChip { position: absolute; left: 50%; transform: translateX(-50%); bottom: 58px;
+              display: none; gap: 2px; align-items: center; z-index: 3; padding: 4px 6px;
+              background: color-mix(in srgb, var(--panel) 95%, transparent);
+              border: 1px solid var(--border); border-radius: var(--r-md); font-size: 12px; }
+  #markChip.show { display: flex; }
+  #markChip .tool { width: auto; padding: 0 8px; font-size: 12px; }
+  #markChip .markHint { opacity: .6; padding: 0 6px; white-space: nowrap; }
+  .pill.pillMarks { border-color: #e0245e; color: #e0245e; }
   .selMarquee { fill: color-mix(in srgb, var(--accent) 6%, transparent); stroke: var(--accent);
                 stroke-dasharray: 4 3; vector-effect: non-scaling-stroke;
                 pointer-events: none; }
@@ -596,6 +611,14 @@
       <div class="pe-diag"></div>
     </div>
     <div id="toast"></div>
+    <div id="markChip" role="toolbar" aria-label="Mark up">
+      <button class="tool on" id="markPen" type="button" title="Drag to sketch freehand">Sketch</button>
+      <button class="tool" id="markArrow" type="button"
+              title="Drag to draw an arrow: which way the stitches should go (Shift-drag works in Sketch too)">Arrow</button>
+      <span class="markHint">click = pin</span>
+      <button class="tool" id="markUndo" type="button" title="Remove the last mark (Backspace)">Undo</button>
+      <button class="tool" id="markClear" type="button" title="Remove all marks">Clear</button>
+    </div>
     <div id="toolbar" role="toolbar" aria-label="Tools">
       <button class="tool on" id="toolSelect" type="button"
               title="Select and transform (V) — drag to move, corners to scale">
@@ -626,6 +649,14 @@
              stroke="currentColor" stroke-width="1.4" aria-hidden="true">
           <path d="M2 14 L9.2 6.8 L13.6 2.4 C14.6 4.6 13.4 7.6 10.6 8.2 L4 14.4 Z"/>
           <path d="M9.2 6.8 L10.6 8.2"/>
+        </svg>
+      </button>
+      <button class="tool" id="toolMark" type="button"
+              title="Mark up (M) — click to drop a numbered pin, drag to sketch, Shift-drag for an arrow. Marks go with your next message, with a picture of them for the agent">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+             stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+          <path d="M2 3 H14 V10.5 H7.2 L4 13.2 V10.5 H2 Z"/>
+          <circle cx="8" cy="6.8" r="1.2" fill="currentColor" stroke="none"/>
         </svg>
       </button>
       <button class="tool" id="toolPan" type="button"
@@ -2848,6 +2879,11 @@ canvas.addEventListener("pointerdown", (ev) => {
         && document.activeElement.blur) document.activeElement.blur();
     knifePointerDown(ev);
   }
+  if (activeTool === "markup" && ev.button === 0 && !spaceHeld) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    markPointerDown(ev);
+  }
 }, true);
 canvas.addEventListener("pointermove", (ev) => {
   if (activeTool === "knife" && knifeDraft && !knifeDragging) {
@@ -3131,6 +3167,7 @@ function renderAll() {
   guideLayer = el("g", {}, canvas);
   routeLayer = el("g", {}, canvas);     // entry/exit markers, above the artwork
   editLayer = el("g", {}, canvas);
+  markupLayer = el("g", {}, canvas);    // Bob's pins + sketches, above everything
   renderPlanLayer();
   renderGrid();
   renderReference();
@@ -3206,7 +3243,7 @@ function renderAll() {
     // their whole click target is the invisible hit stroke, so give them a
     // wider band than filled shapes (inline style: the class rule would
     // otherwise win). Still screen-px via non-scaling-stroke.
-    const hit = el("path", { d: displayD, class: "obj-hit", ...ruleAttr,
+    const hit = el("path", { d: displayD, class: "obj-hit", "data-oid": o.id, ...ruleAttr,
       fill: displayFill ? "rgba(0,0,0,0)" : "none",
       ...(displayFill ? {} : { style: "stroke-width:14" }), ...tAttr }, artworkLayer);
     hit.addEventListener("pointerdown", (ev) => {
@@ -3496,6 +3533,7 @@ function renderAvailableParams(o, body) {
 }
 function renderEditLayer() {
   if (!editLayer) return;
+  renderMarks();                        // pin size tracks the zoom
   editLayer.textContent = "";
   if (typeof renderRoute === "function") renderRoute();  // track selection + zoom
   const objs = selection.map(byId).filter(Boolean);
@@ -4412,6 +4450,7 @@ document.addEventListener("keydown", (ev) => {
       renderEditLayer(); return;
     }
     if (knifeDraft) { cancelKnife(); return; }
+    if (markDraft) { markDraft = null; renderMarks(); return; }
     setSelection([]);
   } else if (ev.key === "Enter" && penDraft) {
     ev.preventDefault();
@@ -4435,6 +4474,12 @@ document.addEventListener("keydown", (ev) => {
     setTool("pan");
   } else if (!mod && k === "k") {
     setTool("knife");
+  } else if (!mod && k === "m") {
+    setTool("markup");
+  } else if ((ev.key === "Delete" || ev.key === "Backspace")
+             && activeTool === "markup" && markList.length) {
+    ev.preventDefault();
+    undoMark();
   } else if ((ev.key === "Delete" || ev.key === "Backspace") && activeRung) {
     const o = byId(activeRung.objId);
     const idx = activeRung.index;
@@ -4526,7 +4571,21 @@ function renderPills() {
   } else {
     for (const id of selection) box.appendChild(_pillFor(id));
   }
-  $("send").disabled = !selection.length && !$("input").value.trim();
+  if (markList.length) {
+    const pill = document.createElement("span");
+    pill.className = "pill pillMarks";
+    pill.textContent = "✎ " + markSummary();
+    pill.title = "Your marks go with this message (with a picture of them for the agent)";
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "pillX";
+    x.textContent = "×";
+    x.title = "Remove all marks";
+    x.onclick = (ev) => { ev.stopPropagation(); clearMarks(); };
+    pill.appendChild(x);
+    box.appendChild(pill);
+  }
+  $("send").disabled = !selection.length && !$("input").value.trim() && !markList.length;
 }
 let _pillPop = null;
 function openPillPopover(anchor) {
@@ -4626,9 +4685,12 @@ function addMsg(role, text, objects, options, answered) {
 }
 $("send").onclick = async () => {
   const text = $("input").value.trim();
-  if (!text && !selection.length) return;
-  await postFeedback({ objects: [...selection], text });
-  addMsg("human", text, [...selection]);
+  const markup = markupPayload();
+  if (!text && !selection.length && !markup) return;
+  if (markup) showToast("Sending your marks…");
+  await postFeedback({ objects: [...selection], text, ...(markup ? { markup } : {}) });
+  addMsg("human", markup ? (text ? text + "  " : "") + "[" + markSummary() + "]" : text, [...selection]);
+  if (markup) clearMarks();
   $("input").value = "";           // selection persists (Illustrator model)
   renderPills();
 };
@@ -4869,6 +4931,141 @@ for (const id of ["inspect", "panel"]) {
   } catch (e) { /* private mode */ }
 }
 
+/* ---------- mark up: pins + sketches for the agent (Bob 11/15, msg 7699) ----------
+   Selecting says WHICH shapes; marks say WHERE and WHICH WAY: a numbered pin on a
+   spot, a freehand sketch ("bring the stitches out to here"), an arrow ("stitches
+   go this way", first point to last). They stay on screen until the next message,
+   which carries them as `markup` (design units + document mm + the shapes under
+   each); the server draws them on the stitch plan for the agent
+   (artifact/markup.py). Sent marks clear. */
+let markList = [];               // [{type: "pin", x, y} | {type: "stroke", kind, points}] in order
+let markMode = "pen";            // a drag draws "pen" or "arrow"; a click is always a pin
+let markDraft = null;            // the stroke being drawn
+let markupLayer = null;
+function setMarkMode(m) {
+  markMode = m;
+  $("markPen").classList.toggle("on", m === "pen");
+  $("markArrow").classList.toggle("on", m === "arrow");
+}
+function markSummary() {
+  const n = { pin: 0, arrow: 0, pen: 0 };
+  for (const m of markList) n[m.type === "pin" ? "pin" : m.kind]++;
+  return [[n.pin, "pin"], [n.arrow, "arrow"], [n.pen, "sketch"]]
+    .filter(([c]) => c).map(([c, w]) => c + " " + w + (c > 1 ? "es".slice(w === "sketch" ? 0 : 1) : "")).join(", ");
+}
+function svgToClient(p) {
+  const m = canvas.getScreenCTM();
+  return { x: m.a * p.x + m.c * p.y + m.e, y: m.b * p.x + m.d * p.y + m.f };
+}
+function objectsAt(p) {                 // the shapes under a design point (on screen)
+  const c = svgToClient(p), ids = [];
+  for (const e of document.elementsFromPoint(c.x, c.y)) {
+    const id = e.getAttribute && e.getAttribute("data-oid");
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+function objectsAlong(pts) {
+  const ids = [], step = Math.max(1, Math.floor(pts.length / 24));
+  for (let i = 0; i < pts.length; i += step)
+    for (const id of objectsAt(pts[i])) if (!ids.includes(id)) ids.push(id);
+  for (const id of objectsAt(pts[pts.length - 1])) if (!ids.includes(id)) ids.push(id);
+  return ids;
+}
+function toMm(p) {                      // document mm from the viewBox's top-left, y down
+  const upm = unitsPerMm();
+  return [+((p.x - baseVb.x) / upm).toFixed(2), +((p.y - baseVb.y) / upm).toFixed(2)];
+}
+function markupPayload() {
+  if (!markList.length) return null;
+  const pins = [], strokes = [];
+  for (const m of markList) {
+    if (m.type === "pin") {
+      const [x_mm, y_mm] = toMm(m);
+      pins.push({ n: pins.length + 1, x: +m.x.toFixed(3), y: +m.y.toFixed(3), x_mm, y_mm,
+                  objects: objectsAt(m) });
+    } else {
+      strokes.push({ kind: m.kind, points: m.points.map(p => [+p.x.toFixed(3), +p.y.toFixed(3)]),
+                     points_mm: m.points.map(toMm), objects: objectsAlong(m.points) });
+    }
+  }
+  return { pins, strokes, view: { x: vb.x, y: vb.y, w: vb.w, h: vb.h } };
+}
+function arrowHead(pts) {
+  const tip = pts[pts.length - 1];
+  let back = pts[0];
+  for (let i = pts.length - 2; i >= 0; i--)
+    if (Math.hypot(pts[i].x - tip.x, pts[i].y - tip.y) > px(14)) { back = pts[i]; break; }
+  const a = Math.atan2(tip.y - back.y, tip.x - back.x), L = px(13);
+  const wing = (d) => fmt(tip.x + L * Math.cos(a + d)) + "," + fmt(tip.y + L * Math.sin(a + d));
+  return wing(2.6) + " " + fmt(tip.x) + "," + fmt(tip.y) + " " + wing(-2.6);
+}
+function renderMarks() {
+  if (!markupLayer) return;
+  markupLayer.textContent = "";
+  const strokes = markList.filter(m => m.type === "stroke");
+  if (markDraft) strokes.push(markDraft);
+  for (const s of strokes) {
+    if (s.points.length < 2) continue;
+    const cls = "markStroke" + (s === markDraft ? " markDraft" : "");
+    el("polyline", { points: s.points.map(p => fmt(p.x) + "," + fmt(p.y)).join(" "),
+                     class: cls }, markupLayer);
+    if (s.kind === "arrow") el("polyline", { points: arrowHead(s.points), class: cls }, markupLayer);
+  }
+  let n = 0;
+  for (const m of markList) {
+    if (m.type !== "pin") continue;
+    n++;
+    const g = el("g", { class: "markPin" }, markupLayer);
+    el("circle", { cx: m.x, cy: m.y, r: px(9) }, g);
+    el("text", { x: m.x, y: m.y, "font-size": px(11) }, g).textContent = String(n);
+  }
+}
+function markPointerDown(ev) {
+  const p0 = clientToSvg(ev), sx = ev.clientX, sy = ev.clientY;
+  const kind = ev.shiftKey ? "arrow" : markMode;
+  let dragging = false;
+  const move = (e) => {
+    if (!dragging && Math.hypot(e.clientX - sx, e.clientY - sy) > 4) {
+      dragging = true;
+      markDraft = { type: "stroke", kind, points: [{ x: p0.x, y: p0.y }] };
+    }
+    if (!dragging || !markDraft) return;
+    const p = clientToSvg(e), last = markDraft.points[markDraft.points.length - 1];
+    if (Math.hypot(p.x - last.x, p.y - last.y) >= px(2)) {
+      markDraft.points.push({ x: p.x, y: p.y });
+      renderMarks();
+    }
+  };
+  const up = (e) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (dragging && markDraft) {
+      const p = clientToSvg(e);
+      markDraft.points.push({ x: p.x, y: p.y });
+      markList.push(markDraft);
+      markDraft = null;
+    } else if (!dragging) {
+      markList.push({ type: "pin", x: p0.x, y: p0.y });
+    }
+    renderMarks();
+    renderPills();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+function undoMark() {
+  markList.pop();
+  renderMarks();
+  renderPills();
+}
+function clearMarks() {
+  markList = [];
+  markDraft = null;
+  renderMarks();
+  renderPills();
+}
+
 /* ---------- floating toolbar (Figma-style) ---------- */
 function setTool(t) {
   activeTool = t;
@@ -4877,11 +5074,14 @@ function setTool(t) {
   $("toolPen").classList.toggle("on", t === "pen");
   $("toolPan").classList.toggle("on", t === "pan");
   $("toolKnife").classList.toggle("on", t === "knife");
+  $("toolMark").classList.toggle("on", t === "markup");
+  $("markChip").classList.toggle("show", t === "markup");
+  if (t !== "markup") markDraft = null;
   activeRung = null;
   activeNode = null;
   if (t !== "pen") { penDraft = null; penSel = null; penHover = null; }
   if (t !== "knife") { knifeDraft = null; knifeHover = null; knifeDragging = false; }
-  canvas.style.cursor = t === "pen" || t === "knife" ? "crosshair"
+  canvas.style.cursor = t === "pen" || t === "knife" || t === "markup" ? "crosshair"
                       : t === "pan" ? "grab" : "";
   renderEditLayer();
 }
@@ -4890,6 +5090,11 @@ $("toolNode").onclick = () => setTool("node");
 $("toolPen").onclick = () => setTool("pen");
 $("toolPan").onclick = () => setTool("pan");
 $("toolKnife").onclick = () => setTool("knife");
+$("toolMark").onclick = () => setTool("markup");
+$("markPen").onclick = () => setMarkMode("pen");
+$("markArrow").onclick = () => setMarkMode("arrow");
+$("markUndo").onclick = () => undoMark();
+$("markClear").onclick = () => clearMarks();
 
 function setViewMode(mode) {
   viewMode = mode;
