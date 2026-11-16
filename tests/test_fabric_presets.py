@@ -269,3 +269,32 @@ class TestTransformsApplied:
         assert max(xs) - min(xs) == pytest.approx(20, abs=0.01)     # 200 * 0.1, not 200
         assert max(ys) - min(ys) == pytest.approx(30, abs=0.01)
         assert min(xs) == pytest.approx(5, abs=0.01)                 # the group's translate too
+
+
+class TestThinColumns:
+    """Too-thin columns are an ART problem at this size (Thready / Bob 11/15): the planner warns,
+    it doesn't widen or re-stitch."""
+
+    @staticmethod
+    def _letter(cols):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedLetter
+        return PlannedLetter(char="x", columns=cols, contours=[], ok=True, check={})
+
+    @staticmethod
+    def _col(width, length, x=0.0):
+        from cli_anything_inkstitch.trace.glyph_columns import PlannedColumn
+        ys = [0.0, length / 2, length]
+        return PlannedColumn(left=[(x - width / 2, y) for y in ys], right=[(x + width / 2, y) for y in ys])
+
+    def test_hairline_and_small_stroke_warned_not_changed(self):
+        from cli_anything_inkstitch.trace.glyph_columns import thin_column_warnings
+        lt = self._letter([self._col(0.43, 30.0), self._col(0.5, 3.5, x=2.0), self._col(1.1, 8.0, x=5.0)])
+        w = thin_column_warnings(lt)
+        assert [(t["column"], t["hint"]) for t in w] == [(0, "hairline"), (1, "small stroke")]
+        assert [round(min(c.widths()), 2) for c in lt.columns] == [0.43, 0.5, 1.1]   # untouched
+
+    def test_small_artifact_floor_stops_at_a_missing_stroke(self):
+        from cli_anything_inkstitch.planner.art_columns import flat_ok
+        base = {"outside_pct": 0.0, "crossed_pairs": 0, "overlap_mm2": 0.0}
+        assert flat_ok({**base, "sewable_bare_pct": 8.3, "sewable_bare_mm2": 0.8})      # IRISH I corner
+        assert not flat_ok({**base, "sewable_bare_pct": 54.0, "sewable_bare_mm2": 1.1})  # half an L bare

@@ -392,7 +392,37 @@ def plan_shapes(shapes: list[tuple[str, list]], one_column: bool = True,
             # After tidy_joins, so the ease works on the final end cuts (a junction end may have been
             # trimmed/snapped) and nothing undoes it. A hand-placed-rungs shape is left as placed.
             planned = ease_letter_ends(planned)
+        thin = thin_column_warnings(planned)
+        if thin:
+            planned.check["thin_columns"] = thin
         out.append(planned)
+    return out
+
+
+MIN_SATIN_MM = 0.8       # thinner, a satin sews as a thread line (small lettering keeps >= ~0.8 mm)
+HAIRLINE_RUN_MM = 12.0   # a thin column this long is a drawn line, which wants a running stitch
+
+
+def _centre_length(c: PlannedColumn) -> float:
+    mid = [((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in zip(c.left, c.right)]
+    return sum(math.dist(p, q) for p, q in zip(mid, mid[1:]))
+
+
+def thin_column_warnings(planned: PlannedLetter) -> list[dict]:
+    """Columns too thin to sew well AT THIS SIZE, for the report (Thready / Bob 11/15: that's an art
+    problem, prepped or thickened by the digitizer as Bob did the HIDA stacked logo; the planner
+    warns, it doesn't widen or re-stitch). Each: column index, median width and length in mm, and
+    a hint: "hairline" (long: a drawn line, wants a running/bean stitch) or "small stroke"
+    (small lettering: thicken to >= MIN_SATIN_MM, four_threads/embroidery_knowledge/small_lettering.md)."""
+    out = []
+    for k, c in enumerate(planned.columns):
+        ws = sorted(c.widths())
+        w = ws[len(ws) // 2] if ws else 0.0
+        if w >= MIN_SATIN_MM:
+            continue
+        length = _centre_length(c)
+        out.append({"column": k, "width_mm": round(w, 2), "length_mm": round(length, 1),
+                    "hint": "hairline" if length >= HAIRLINE_RUN_MM and not c.closed else "small stroke"})
     return out
 
 

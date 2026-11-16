@@ -29,6 +29,9 @@ FLAT_SMALL_ARTIFACT_MM2 = 1.5   # small text (8 mm caps, ~1 mm strokes) trips th
                                 # size does not scale with the letter: an artifact under this (a
                                 # ~1.2 mm wedge) is within pull-comp tolerance, so it passes regardless
                                 # of %. Larger shapes with real gaps/overshoot still fail on %.
+FLAT_SMALL_ARTIFACT_MAX_PCT = 15.0   # ...but only up to this much of the shape: a 3.5 mm letter whose
+                                     # columns miss a whole stroke (an L's foot, half an H) is under
+                                     # 1.5 mm2 bare too, and must fail (North Stars, 11/15)
 FLAT_OVERLAP_MM2 = 12.0     # per join: a V's two legs overlap where they meet (a 17 mm W: ~11 mm2)
 SEAM_OVERLAP_MM = 0.3       # two columns side by side (a dancer's two strokes) each reach this far into the
                             # other, so pull doesn't open a gap along their seam (ends butting: BUTT_OVERLAP_MM)
@@ -205,12 +208,24 @@ def plan_shape(index: int, contours: list[np.ndarray], strokes: list[col.Stroke]
         w = float(np.median(widths)) if widths else 0.0
         allowed = max(FLAT_OVERLAP_MM2, FLAT_OVERLAP_PER_WIDTH2 * w * w) * joins
         check["overlap_allowed_mm2"] = round(allowed, 1)
-        check["ok"] = ((bare <= FLAT_UNCOVERED_PCT or bare_mm2 <= FLAT_SMALL_ARTIFACT_MM2)
+        check["ok"] = ((bare <= FLAT_UNCOVERED_PCT or (bare_mm2 <= FLAT_SMALL_ARTIFACT_MM2 and bare <= FLAT_SMALL_ARTIFACT_MAX_PCT))
                        and (check["outside_pct"] <= FLAT_OUTSIDE_PCT or outside_mm2 <= FLAT_SMALL_ARTIFACT_MM2)
                        and check["crossed_pairs"] == 0 and check["overlap_mm2"] <= allowed)
     except Exception as e:  # noqa: BLE001 - an unplannable shape keeps click-to-stitch
         return ShapeColumns(index, None, error=f"no column plan ({type(e).__name__}: {str(e)[:80]})")
     return ShapeColumns(index, lt, check)
+
+
+def flat_ok(check: dict) -> bool:
+    """The flat-work gate on a check dict (plan_shape / flat_check's keys): bare and outside each
+    pass on % or on a small absolute area, no crossed pairs, overlap within its allowance."""
+    return ((check["sewable_bare_pct"] <= FLAT_UNCOVERED_PCT
+             or (check.get("sewable_bare_mm2", 999.0) <= FLAT_SMALL_ARTIFACT_MM2
+                and check["sewable_bare_pct"] <= FLAT_SMALL_ARTIFACT_MAX_PCT))
+            and (check["outside_pct"] <= FLAT_OUTSIDE_PCT
+                 or check.get("outside_mm2", 999.0) <= FLAT_SMALL_ARTIFACT_MM2)
+            and check["crossed_pairs"] == 0
+            and check["overlap_mm2"] <= check.get("overlap_allowed_mm2", float("inf")))
 
 
 def flat_check(lt: col.Letter) -> dict:
@@ -235,7 +250,7 @@ def flat_check(lt: col.Letter) -> dict:
     w = float(np.median(widths)) if widths else 0.0
     allowed = max(FLAT_OVERLAP_MM2, FLAT_OVERLAP_PER_WIDTH2 * w * w) * joins
     check["overlap_allowed_mm2"] = round(allowed, 1)
-    check["ok"] = ((bare <= FLAT_UNCOVERED_PCT or bare_mm2 <= FLAT_SMALL_ARTIFACT_MM2)
+    check["ok"] = ((bare <= FLAT_UNCOVERED_PCT or (bare_mm2 <= FLAT_SMALL_ARTIFACT_MM2 and bare <= FLAT_SMALL_ARTIFACT_MAX_PCT))
                    and (check["outside_pct"] <= FLAT_OUTSIDE_PCT or outside_mm2 <= FLAT_SMALL_ARTIFACT_MM2)
                    and check["crossed_pairs"] == 0 and check["overlap_mm2"] <= allowed)
     return check

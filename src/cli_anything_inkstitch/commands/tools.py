@@ -1719,6 +1719,13 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
                                "region_width_mm": round(region_w[region_of[i]], 2),
                                "column_widths_mm": [round(_median_width(c.widths()), 2) for c in lt.columns]}
                               if region_of[i] is not None and region_of[i] in region_w else {}),
+                           **({"warnings": [f"column {t['column']} is {t['width_mm']} mm wide "
+                                            f"(under {gc.MIN_SATIN_MM:g} mm at this size, {t['length_mm']} mm "
+                                            f"long): " + ("a hairline, sew it as a running/bean stitch"
+                                                          if t["hint"] == "hairline"
+                                                          else "thicken the art or enlarge the design")
+                                            for t in chk["thin_columns"]]}
+                              if chk.get("thin_columns") and not as_fill else {}),
                            "stitch": "fill" if as_fill else "satin",
                            "columns": 0 if as_fill else len(lt.columns), "plan_ok": lt.ok,
                            **({"error": lt.error} if lt.error else {}),
@@ -1788,6 +1795,8 @@ def shapes_to_satin(ctx, project_path, ids, fallback, fabric, pull_comp_mm, trav
     blocks = [t for k, t in enumerate(sewn_threads) if k == 0 or t != sewn_threads[k - 1]]
     payload = {"shapes": report, "failed_plans": [r["shape"] for r in report if not r["plan_ok"]],
                "routed_shapes": len(to_route), "trims_added": trims_added, "satin_tips_cut": tips_cut,
+               **({"thin_column_shapes": [r["shape"] for r in report if r.get("warnings")]}
+                  if any(r.get("warnings") for r in report) else {}),
                "duplicates_dropped": duplicates,
                "threads": sorted(set(sewn_threads)),
                "color_merges": threads.merges,
