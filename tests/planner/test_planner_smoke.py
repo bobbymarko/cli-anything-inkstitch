@@ -157,6 +157,28 @@ def test_y_junction_runs_the_smooth_pair_through_with_a_leg_left_over():
     assert set(out[0]) == {(0, True), (1, True)}           # ...the two smooth branches, not the leg
 
 
+def test_a_neighbouring_junctions_corner_splits_nothing_whatever_the_branch_order():
+    """A corner of the NEXT junction along a short bar can fall within this junction's reach while
+    lying behind two of its branches: its nearest point on both is the junction itself, so it is the
+    same distance from each and "the two nearest" was a tie broken by branch numbering. On an R's
+    fork that split the bowl's own halves at some sizes and not others (Avenir Black R = 3 strokes at
+    7.6 mm, 4 at 9 mm; Thready's rig suite 2026-11-16). A corner nearer another junction separates
+    nothing here."""
+    import itertools
+    from cli_anything_inkstitch.planner import autostrokes as A
+    at = (0.0, 0.0)
+    dirs = {(0, True): (-0.7, 0.7), (1, True): (0.7, 0.7), (2, True): (0.2, -1.0)}
+    near_lines = {(0, True): [(0.0, 0.0), (-2.0, 2.0)],
+                  (1, True): [(0.0, 0.0), (2.0, 2.0)],
+                  (2, True): [(0.0, 0.0), (0.4, -2.0)]}
+    corners = [np.array([-0.6, -0.5]), np.array([0.8, -0.5]),     # either side of the leg
+               np.array([-1.6, 1.2])]                             # alongside (0) only, behind (1) and (2)
+    for es in itertools.permutations(dirs):
+        out = A._smooth_pairs(list(es), dirs, at, 1.0, corners, near_lines,
+                              others=[np.array([-2.0, 1.8])])          # the next junction, by that corner
+        assert [set(p) for p in out] == [{(0, True), (1, True)}], es
+
+
 def test_a_sliver_column_under_the_others_is_dropped():
     """Futura Condensed's R planned a 4th column along its stem: 0.11 mm of rail, 3.3 mm stitches lying
     lengthwise. It sewed as a diagonal line over the stem (11/13). Dropped; a real narrow stroke is kept."""
